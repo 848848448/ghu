@@ -1,7 +1,8 @@
-# Secrets — NEVER commit these
+# Your private info — NEVER committed / uploaded to GitHub
 .env
 .env.local
 *.env
+local_config.py
 
 __pycache__/
 *.pyc
