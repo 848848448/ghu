@@ -257,6 +257,49 @@ def api_new():
     return jsonify({"albums": fetch_new_releases()})
 
 
+@app.route("/api/play")
+def api_play():
+    """Stream a track for in-browser playback (inline), forwarding Range
+    requests so the player can seek. The token stays server-side."""
+    if not AUDIO_API_BASE:
+        return jsonify({"error": "Server not configured (AUDIO_API_BASE)."}), 400
+
+    track_id = request.args.get("trackId", "").strip()
+    if not track_id:
+        return jsonify({"error": "Missing track id."}), 400
+
+    full_url = f"{AUDIO_API_BASE}?trackId={track_id}&token={USER_TOKEN}"
+    fwd = {}
+    if request.headers.get("Range"):
+        fwd["Range"] = request.headers["Range"]
+
+    try:
+        upstream = requests.get(full_url, verify=False, stream=True, timeout=60, headers=fwd)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"Playback error: {exc}"}), 502
+
+    if upstream.status_code == 403:
+        return jsonify({"error": "Access Denied (403). Your JWT token may have expired."}), 403
+    if upstream.status_code not in (200, 206):
+        return jsonify({"error": f"Server returned code {upstream.status_code}."}), 502
+
+    def generate():
+        for chunk in upstream.iter_content(chunk_size=8192):
+            if chunk:
+                yield chunk
+
+    headers = {
+        "Content-Type": upstream.headers.get("Content-Type", "audio/mpeg"),
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+    }
+    for h in ("Content-Range", "Content-Length"):
+        if upstream.headers.get(h):
+            headers[h] = upstream.headers[h]
+
+    return Response(stream_with_context(generate()), status=upstream.status_code, headers=headers)
+
+
 @app.route("/api/download")
 def api_download():
     """Stream a track download, adding the server-side token. The browser
