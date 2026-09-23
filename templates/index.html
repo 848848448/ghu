@@ -15,6 +15,7 @@
       --muted: #9aa3c7;
       --ok: #3ecf8e;
       --err: #ff6b6b;
+      --warn: #ffcc66;
       --border: #2c3352;
     }
     * { box-sizing: border-box; }
@@ -38,7 +39,7 @@
     header h1 { margin: 0; font-size: 1.4rem; }
     .container { max-width: 900px; margin: 0 auto; padding: 16px; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; }
-    input[type="text"], input[type="password"] {
+    input[type="text"] {
       background: var(--panel-2);
       border: 1px solid var(--border);
       color: var(--text);
@@ -66,7 +67,6 @@
       color: var(--muted);
     }
     button.ghost:hover { background: var(--panel-2); color: var(--text); }
-    button:disabled { opacity: .5; cursor: not-allowed; }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -91,8 +91,6 @@
     .list-item.no-click { cursor: default; }
     .list-item.no-click:hover { border-color: var(--border); }
     .he { color: var(--muted); font-size: .9rem; }
-    .settings-field { margin-bottom: 12px; }
-    .settings-field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: .85rem; }
     #status { min-height: 22px; font-size: .9rem; }
     .ok { color: var(--ok); }
     .err { color: var(--err); }
@@ -108,40 +106,32 @@
       vertical-align: -2px; margin-right: 6px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .title-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     h2 { margin: 0 0 12px; font-size: 1.15rem; }
+    .banner {
+      border-radius: 12px; padding: 14px 16px; margin-bottom: 16px;
+      border: 1px solid var(--warn); background: rgba(255,204,102,.08);
+      color: var(--warn); font-size: .92rem;
+    }
+    .banner code {
+      background: rgba(255,255,255,.08); padding: 1px 6px; border-radius: 6px;
+      color: var(--text);
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>🎵 Jewish Music Downloader</h1>
-    <button class="ghost" id="settingsBtn">⚙️ Settings</button>
+    <span class="muted" id="cfgBadge"></span>
   </header>
 
   <div class="container">
 
-    <!-- Settings -->
-    <div class="card hidden" id="settingsCard">
-      <h2>⚙️ Settings</h2>
-      <div class="settings-field">
-        <label>GraphQL API URL</label>
-        <input type="text" id="apiUrl" placeholder="https://.../graphql" />
-      </div>
-      <div class="settings-field">
-        <label>Audio API Base URL (download endpoint)</label>
-        <input type="text" id="audioBase" placeholder="https://.../stream" />
-      </div>
-      <div class="settings-field">
-        <label>JWT Token</label>
-        <input type="password" id="token" placeholder="Paste your JWT token here" />
-      </div>
-      <div class="row">
-        <button id="saveSettings">💾 Save</button>
-        <button class="ghost" id="reloadArtists">♻️ Reload artist catalog</button>
-      </div>
-      <p class="muted" style="margin-bottom:0;font-size:.82rem;">
-        These are stored only in your browser (localStorage).
-      </p>
+    <!-- Not-configured banner -->
+    <div class="banner hidden" id="cfgBanner">
+      ⚠️ The server has no configuration yet. Create a <code>.env</code> file next to
+      <code>app.py</code> with your <code>API_URL</code>, <code>AUDIO_API_BASE</code> and
+      <code>USER_TOKEN</code> (see <code>.env.example</code> / README), then restart the server.
+      Your secrets stay on the server and are never sent to the browser.
     </div>
 
     <!-- Search -->
@@ -164,36 +154,12 @@
   </div>
 
   <script>
-    // ---- State ----
-    let cfg = { apiUrl: "", audioBase: "", token: "" };
-    let artists = [];              // full catalog
+    let artists = [];
     let artistsLoaded = false;
+    let configured = false;
 
     const $ = (id) => document.getElementById(id);
 
-    // ---- Settings persistence ----
-    function loadCfg() {
-      try {
-        cfg.apiUrl = localStorage.getItem("jmd_apiUrl") || "";
-        cfg.audioBase = localStorage.getItem("jmd_audioBase") || "";
-        cfg.token = localStorage.getItem("jmd_token") || "";
-      } catch (e) {}
-      $("apiUrl").value = cfg.apiUrl;
-      $("audioBase").value = cfg.audioBase;
-      $("token").value = cfg.token;
-    }
-    function saveCfg() {
-      cfg.apiUrl = $("apiUrl").value.trim();
-      cfg.audioBase = $("audioBase").value.trim();
-      cfg.token = $("token").value.trim();
-      try {
-        localStorage.setItem("jmd_apiUrl", cfg.apiUrl);
-        localStorage.setItem("jmd_audioBase", cfg.audioBase);
-        localStorage.setItem("jmd_token", cfg.token);
-      } catch (e) {}
-    }
-
-    // ---- Status helpers ----
     function setStatus(html, cls = "") {
       $("status").innerHTML = html;
       $("status").className = cls;
@@ -205,34 +171,41 @@
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
 
-    // ---- API calls ----
     async function post(path, payload) {
       const res = await fetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payload || {}),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
       return data;
     }
 
-    function requireConfig() {
-      if (!cfg.apiUrl) {
-        setStatus("⚠️ Please open Settings and add the GraphQL API URL.", "err");
-        $("settingsCard").classList.remove("hidden");
-        return false;
+    async function checkStatus() {
+      try {
+        const res = await fetch("/api/status");
+        const s = await res.json();
+        configured = !!s.configured;
+        if (configured) {
+          $("cfgBanner").classList.add("hidden");
+          $("cfgBadge").textContent = "✅ configured";
+          $("cfgBadge").className = "ok";
+        } else {
+          $("cfgBanner").classList.remove("hidden");
+          $("cfgBadge").textContent = "⚠️ not configured";
+          $("cfgBadge").className = "muted";
+        }
+      } catch (e) {
+        $("cfgBadge").textContent = "";
       }
-      return true;
     }
 
-    // ---- Load catalog ----
     async function ensureArtists(force = false) {
       if (artistsLoaded && !force) return true;
-      if (!requireConfig()) return false;
       loading("Downloading artist catalog…");
       try {
-        const data = await post("/api/artists", { apiUrl: cfg.apiUrl, force });
+        const data = await post("/api/artists", { force });
         artists = data.artists || [];
         artistsLoaded = true;
         setStatus("🎉 Loaded " + artists.length + " artists" +
@@ -244,7 +217,6 @@
       }
     }
 
-    // ---- Rendering ----
     function showResults(title, breadcrumbHtml, html) {
       $("resultsCard").classList.remove("hidden");
       $("resultsTitle").innerHTML = title;
@@ -252,7 +224,6 @@
       $("results").innerHTML = html;
     }
 
-    // ---- Search ----
     async function doSearch() {
       if (!(await ensureArtists())) return;
       const q = $("search").value.trim().toLowerCase();
@@ -279,12 +250,10 @@
       setStatus("", "");
     }
 
-    // ---- Open artist → albums ----
     async function openArtist(id) {
-      if (!requireConfig()) return;
       loading("Loading albums…");
       try {
-        const data = await post("/api/artist", { apiUrl: cfg.apiUrl, id });
+        const data = await post("/api/artist", { id });
         const artist = data.artist;
         const albums = (artist && artist.albums) || [];
         if (!albums.length) {
@@ -309,12 +278,8 @@
       }
     }
 
-    function backToSearch() {
-      return '<a onclick="backToResults()">‹ Back to results</a>';
-    }
-    function backToResults() { doSearch(); }
+    function backToSearch() { return '<a onclick="doSearch()">‹ Back to results</a>'; }
 
-    // ---- Open album → tracks ----
     function openAlbum(albumId) {
       const al = (window._albums || {})[albumId];
       if (!al) return;
@@ -334,19 +299,12 @@
       showResults("Album: " + esc(al.enName || "Unknown"), "", html);
     }
 
-    // ---- Downloads ----
     function downloadUrl(trackId, file) {
-      const p = new URLSearchParams({
-        audioBase: cfg.audioBase,
-        token: cfg.token,
-        trackId: trackId,
-        file: file || "",
-      });
+      const p = new URLSearchParams({ trackId: trackId, file: file || "" });
       return "/api/download?" + p.toString();
     }
 
     function downloadTrack(trackId, file) {
-      if (!cfg.audioBase) { setStatus("⚠️ Add the Audio API Base URL in Settings.", "err"); return; }
       const a = document.createElement("a");
       a.href = downloadUrl(trackId, file);
       a.download = "";
@@ -357,25 +315,21 @@
     }
 
     async function downloadAlbum(albumId) {
-      if (!cfg.audioBase) { setStatus("⚠️ Add the Audio API Base URL in Settings.", "err"); return; }
       const al = (window._albums || {})[albumId];
       if (!al) return;
       const tracks = al.tracks || [];
       for (let i = 0; i < tracks.length; i++) {
         setStatus("⬇️ Downloading " + (i + 1) + " / " + tracks.length + "…", "muted");
         downloadTrack(tracks[i].id, tracks[i].file || "");
-        // small gap so the browser queues each download
         await new Promise((r) => setTimeout(r, 800));
       }
       setStatus("✨ Started all " + tracks.length + " downloads.", "ok");
     }
 
-    // ---- New releases ----
     async function doNew() {
-      if (!requireConfig()) return;
       loading("Fetching recent releases…");
       try {
-        const data = await post("/api/new", { apiUrl: cfg.apiUrl });
+        const data = await post("/api/new", {});
         const albums = data.albums || [];
         if (!albums.length) {
           showResults("New Releases", "", '<p class="muted">No new releases found.</p>');
@@ -399,21 +353,11 @@
       }
     }
 
-    // ---- Wire up ----
-    $("settingsBtn").onclick = () => $("settingsCard").classList.toggle("hidden");
-    $("saveSettings").onclick = () => {
-      saveCfg();
-      setStatus("💾 Settings saved.", "ok");
-      $("settingsCard").classList.add("hidden");
-      artistsLoaded = false;
-    };
-    $("reloadArtists").onclick = () => { saveCfg(); ensureArtists(true); };
     $("searchBtn").onclick = doSearch;
     $("newBtn").onclick = doNew;
     $("search").addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
 
-    loadCfg();
-    if (!cfg.apiUrl) $("settingsCard").classList.remove("hidden");
+    checkStatus();
   </script>
 </body>
 </html>
