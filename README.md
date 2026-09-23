@@ -3,22 +3,73 @@
 A web version of the original command-line Python downloader. Search artists,
 browse albums, view new releases, and download tracks — all from a browser.
 
+Two ways to run it:
+
+- **☁️ Cloudflare Workers** (`worker.js`) — host it online. **Recommended.**
+- **🖥️ Local Python / Flask** (`app.py`) — run it on your own computer.
+
 ## 🔒 Your private info stays private
 
-Your secrets (API URL, audio URL, JWT token) stay in **one local file on
-your own computer** that is **never** uploaded to GitHub. Only the website
-code goes to GitHub — your secrets never do, so **nobody else (not even the
-author of this code) ever sees them.**
+Your secrets (API URL, audio URL, JWT token) are **never** put in the code
+and **never** uploaded to GitHub.
 
-> ⚠️ **Important:** Do NOT paste your token into a file you upload to GitHub
-> (like `app.py`) and push it. Anything committed to GitHub is visible in the
-> repository and its history forever. Keep secrets only in the local file
-> below, which is git-ignored.
+- On **Cloudflare**, they are stored as encrypted **Worker secrets**.
+- **Locally**, they live in a git-ignored `.env` or `local_config.py`.
 
-## Setup — the easy way (use your existing script)
+Either way the token stays on the server and is never sent to the browser,
+so nobody reading the repository (or anyone else) ever sees your secrets.
 
-You already have your original script with your info filled in. You don't
-have to change it.
+> ⚠️ **Important:** Never paste your token into a file you commit (like
+> `worker.js` or `app.py`). Anything on GitHub is visible in the repo and its
+> history forever. Keep secrets only as Cloudflare secrets or in the local
+> git-ignored files.
+
+---
+
+## ☁️ Deploy to Cloudflare (recommended)
+
+You need a free [Cloudflare account](https://dash.cloudflare.com/sign-up) and
+[Node.js](https://nodejs.org) installed. Everything below runs on **your**
+computer, so your secrets are never sent to anyone else.
+
+**1. Log in to Cloudflare**
+
+```bash
+npx wrangler login
+```
+
+**2. Add your three secrets** (encrypted at Cloudflare — never in the repo)
+
+```bash
+npx wrangler secret put API_URL
+npx wrangler secret put AUDIO_API_BASE
+npx wrangler secret put USER_TOKEN
+```
+
+Each command prompts you to paste the value. These are the same values as in
+your original script (`API_URL`, `AUDIO_API_BASE`, `USER_TOKEN`).
+
+**3. Deploy**
+
+```bash
+npx wrangler deploy
+```
+
+Wrangler prints your site's URL (something like
+`https://jewish-music-downloader.<your-subdomain>.workers.dev`). Open it — it
+just works.
+
+To change a secret later, run the same `secret put` command again and
+redeploy. To test locally first, create a `.dev.vars` file (git-ignored) with
+`API_URL=…`, `AUDIO_API_BASE=…`, `USER_TOKEN=…` and run `npx wrangler dev`.
+
+> ℹ️ Cloudflare's `fetch` verifies TLS certificates. If your music API uses a
+> self-signed / invalid certificate, the Worker can't reach it — use the local
+> Python option below in that case (it keeps the original `verify=False`).
+
+---
+
+## 🖥️ Run locally with Python (alternative)
 
 **1. Install dependencies**
 
@@ -26,16 +77,16 @@ have to change it.
 pip install -r requirements.txt
 ```
 
-**2. Point it at your script** (runs on your computer — your info is not sent anywhere)
+**2. Point it at your original script** (runs on your computer)
 
 ```bash
 python configure.py
 ```
 
-It asks for the path to your original script and copies it in as
-`local_config.py`. That file is git-ignored, so it is **never uploaded to
-GitHub**. (You can also just copy your script into this folder and rename it
-to `local_config.py` yourself — same result.)
+It copies your script in as `local_config.py` (git-ignored, never uploaded).
+You can also just copy your script into this folder and rename it to
+`local_config.py` yourself. Or create a `.env` file (`cp .env.example .env`)
+and fill in the three values.
 
 **3. Run**
 
@@ -43,46 +94,35 @@ to `local_config.py` yourself — same result.)
 python app.py
 ```
 
-Open <http://localhost:5000>. It reads `API_URL`, `AUDIO_API_BASE` and
-`USER_TOKEN` straight from your script and just works — nothing to type in
-the browser. Change the port with `PORT=8080 python app.py`.
+Open <http://localhost:5000>. Change the port with `PORT=8080 python app.py`.
 
-### Alternative: a `.env` file
-
-If you prefer, instead of `local_config.py` you can create a `.env` file
-(also git-ignored):
-
-```bash
-cp .env.example .env
-```
-
-```
-API_URL=https://.../graphql
-AUDIO_API_BASE=https://.../stream
-USER_TOKEN=your-jwt-token-here
-```
+---
 
 ## Features
 
-- 🔍 **Search** artists by English or Hebrew name (24‑hour local catalog cache)
+- 🔍 **Search** artists by English or Hebrew name (24‑hour catalog cache)
 - 🔥 **New Releases** — the latest 10 albums
 - 📂 Browse an artist → albums → tracks
 - ⬇️ Download a single track, or 📥 the whole album at once
-
-## Deploying (optional)
-
-If you host this somewhere, do **not** commit `.env`. Instead set the same
-three values (`API_URL`, `AUDIO_API_BASE`, `USER_TOKEN`) as environment
-variables / secrets in your hosting provider (or GitHub Actions secrets).
-The app reads from the environment automatically.
 
 ## How it maps to the original script
 
 | Original CLI | Web equivalent |
 |--------------|----------------|
-| `fetch_artists()` (+ JSON cache) | `POST /api/artists` |
+| `fetch_artists()` (+ cache) | `POST /api/artists` (browser cache on Cloudflare) |
 | `fetch_artist_details()` | `POST /api/artist` |
 | `fetch_new_releases()` | `POST /api/new` |
 | `download_track()` | `GET /api/download` (streamed, token added server-side) |
 | terminal menus | the web UI |
-| `API_URL` / `AUDIO_API_BASE` / `USER_TOKEN` constants | `local_config.py` (your script) or `.env` |
+| `API_URL` / `AUDIO_API_BASE` / `USER_TOKEN` | Cloudflare secrets, or `.env` / `local_config.py` |
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `worker.js` | Cloudflare Worker (backend + web UI) |
+| `wrangler.toml` | Cloudflare deploy config |
+| `app.py` | Flask backend (local option) |
+| `templates/index.html` | Flask web UI |
+| `configure.py` | Local setup helper (copies your script to `local_config.py`) |
+| `.env.example` | Template for local secrets |

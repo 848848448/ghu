@@ -1,0 +1,15 @@
+# Cloudflare Worker configuration.
+#
+# Your private values (API_URL, AUDIO_API_BASE, USER_TOKEN) are NOT stored
+# here. Set them as encrypted Cloudflare secrets instead:
+#
+#   npx wrangler secret put API_URL
+#   npx wrangler secret put AUDIO_API_BASE
+#   npx wrangler secret put USER_TOKEN
+#
+# Secrets live encrypted in Cloudflare — never in this repo, never on GitHub,
+# and the token is never sent to the browser.
+
+name = "jewish-music-downloader"
+main = "worker.js"
+compatibility_date = "2025-01-01"

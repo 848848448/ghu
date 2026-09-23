@@ -4,6 +4,11 @@
 *.env
 local_config.py
 
+# Cloudflare / Node
+.wrangler/
+node_modules/
+.dev.vars
+
 __pycache__/
 *.pyc
 .cache/
