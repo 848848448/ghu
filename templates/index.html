@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🎵 Jewish Music Downloader</title>
+  <style>
+    :root {
+      --bg: #0f1220;
+      --panel: #191d31;
+      --panel-2: #212640;
+      --accent: #6c8cff;
+      --accent-2: #4a68d8;
+      --text: #e8eaf5;
+      --muted: #9aa3c7;
+      --ok: #3ecf8e;
+      --err: #ff6b6b;
+      --border: #2c3352;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      background: linear-gradient(135deg, #232a4a, #171a2e);
+      padding: 20px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 1.4rem; }
+    .container { max-width: 900px; margin: 0 auto; padding: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    input[type="text"], input[type="password"] {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 11px 13px;
+      border-radius: 10px;
+      font-size: 1rem;
+      width: 100%;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    button {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 11px 16px;
+      border-radius: 10px;
+      font-size: 1rem;
+      cursor: pointer;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    button:hover { background: var(--accent-2); }
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    button.ghost:hover { background: var(--panel-2); color: var(--text); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 11px 13px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 8px;
+      background: var(--panel-2);
+      cursor: pointer;
+    }
+    .list-item:hover { border-color: var(--accent); }
+    .list-item .meta { color: var(--muted); font-size: .85rem; }
+    .list-item.no-click { cursor: default; }
+    .list-item.no-click:hover { border-color: var(--border); }
+    .he { color: var(--muted); font-size: .9rem; }
+    .settings-field { margin-bottom: 12px; }
+    .settings-field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: .85rem; }
+    #status { min-height: 22px; font-size: .9rem; }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .muted { color: var(--muted); }
+    .hidden { display: none; }
+    .breadcrumb { color: var(--muted); font-size: .9rem; margin-bottom: 10px; }
+    .breadcrumb a { color: var(--accent); cursor: pointer; text-decoration: none; }
+    .breadcrumb a:hover { text-decoration: underline; }
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid var(--muted); border-top-color: transparent;
+      border-radius: 50%; animation: spin .7s linear infinite;
+      vertical-align: -2px; margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .title-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    h2 { margin: 0 0 12px; font-size: 1.15rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🎵 Jewish Music Downloader</h1>
+    <button class="ghost" id="settingsBtn">⚙️ Settings</button>
+  </header>
+
+  <div class="container">
+
+    <!-- Settings -->
+    <div class="card hidden" id="settingsCard">
+      <h2>⚙️ Settings</h2>
+      <div class="settings-field">
+        <label>GraphQL API URL</label>
+        <input type="text" id="apiUrl" placeholder="https://.../graphql" />
+      </div>
+      <div class="settings-field">
+        <label>Audio API Base URL (download endpoint)</label>
+        <input type="text" id="audioBase" placeholder="https://.../stream" />
+      </div>
+      <div class="settings-field">
+        <label>JWT Token</label>
+        <input type="password" id="token" placeholder="Paste your JWT token here" />
+      </div>
+      <div class="row">
+        <button id="saveSettings">💾 Save</button>
+        <button class="ghost" id="reloadArtists">♻️ Reload artist catalog</button>
+      </div>
+      <p class="muted" style="margin-bottom:0;font-size:.82rem;">
+        These are stored only in your browser (localStorage).
+      </p>
+    </div>
+
+    <!-- Search -->
+    <div class="card">
+      <div class="row">
+        <input type="text" id="search" placeholder="🔍 Search for an artist by name…" style="flex:1;min-width:200px;" />
+        <button id="searchBtn">Search</button>
+        <button class="ghost" id="newBtn">🔥 New Releases</button>
+      </div>
+      <div id="status" style="margin-top:10px;"></div>
+    </div>
+
+    <!-- Results -->
+    <div class="card hidden" id="resultsCard">
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <h2 id="resultsTitle"></h2>
+      <div id="results"></div>
+    </div>
+
+  </div>
+
+  <script>
+    // ---- State ----
+    let cfg = { apiUrl: "", audioBase: "", token: "" };
+    let artists = [];              // full catalog
+    let artistsLoaded = false;
+
+    const $ = (id) => document.getElementById(id);
+
+    // ---- Settings persistence ----
+    function loadCfg() {
+      try {
+        cfg.apiUrl = localStorage.getItem("jmd_apiUrl") || "";
+        cfg.audioBase = localStorage.getItem("jmd_audioBase") || "";
+        cfg.token = localStorage.getItem("jmd_token") || "";
+      } catch (e) {}
+      $("apiUrl").value = cfg.apiUrl;
+      $("audioBase").value = cfg.audioBase;
+      $("token").value = cfg.token;
+    }
+    function saveCfg() {
+      cfg.apiUrl = $("apiUrl").value.trim();
+      cfg.audioBase = $("audioBase").value.trim();
+      cfg.token = $("token").value.trim();
+      try {
+        localStorage.setItem("jmd_apiUrl", cfg.apiUrl);
+        localStorage.setItem("jmd_audioBase", cfg.audioBase);
+        localStorage.setItem("jmd_token", cfg.token);
+      } catch (e) {}
+    }
+
+    // ---- Status helpers ----
+    function setStatus(html, cls = "") {
+      $("status").innerHTML = html;
+      $("status").className = cls;
+    }
+    function loading(msg) { setStatus('<span class="spinner"></span>' + msg, "muted"); }
+
+    function esc(s) {
+      return (s == null ? "" : String(s)).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    // ---- API calls ----
+    async function post(path, payload) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
+      return data;
+    }
+
+    function requireConfig() {
+      if (!cfg.apiUrl) {
+        setStatus("⚠️ Please open Settings and add the GraphQL API URL.", "err");
+        $("settingsCard").classList.remove("hidden");
+        return false;
+      }
+      return true;
+    }
+
+    // ---- Load catalog ----
+    async function ensureArtists(force = false) {
+      if (artistsLoaded && !force) return true;
+      if (!requireConfig()) return false;
+      loading("Downloading artist catalog…");
+      try {
+        const data = await post("/api/artists", { apiUrl: cfg.apiUrl, force });
+        artists = data.artists || [];
+        artistsLoaded = true;
+        setStatus("🎉 Loaded " + artists.length + " artists" +
+          (data.fromCache ? " (from cache)" : "") + ".", "ok");
+        return true;
+      } catch (e) {
+        setStatus("❌ " + e.message, "err");
+        return false;
+      }
+    }
+
+    // ---- Rendering ----
+    function showResults(title, breadcrumbHtml, html) {
+      $("resultsCard").classList.remove("hidden");
+      $("resultsTitle").innerHTML = title;
+      $("breadcrumb").innerHTML = breadcrumbHtml || "";
+      $("results").innerHTML = html;
+    }
+
+    // ---- Search ----
+    async function doSearch() {
+      if (!(await ensureArtists())) return;
+      const q = $("search").value.trim().toLowerCase();
+      if (!q) { setStatus("Type part of an artist's name.", "muted"); return; }
+
+      const matching = artists.filter((a) => {
+        const en = (a.enName || "").toLowerCase();
+        const he = (a.heName || "").toLowerCase();
+        return en.includes(q) || he.includes(q);
+      }).sort((a, b) => (a.enName || "").localeCompare(b.enName || ""));
+
+      if (!matching.length) {
+        showResults("No results", "", '<p class="muted">No artists found matching “' + esc(q) + '”.</p>');
+        return;
+      }
+
+      const html = matching.map((a) =>
+        '<div class="list-item" onclick="openArtist(' + a.id + ')">' +
+          '<span>' + esc(a.enName || "Unknown") +
+          (a.heName ? ' <span class="he">(' + esc(a.heName) + ')</span>' : "") + '</span>' +
+          '<span class="meta">›</span>' +
+        '</div>').join("");
+      showResults("Search results for “" + esc(q) + "” (" + matching.length + ")", "", html);
+      setStatus("", "");
+    }
+
+    // ---- Open artist → albums ----
+    async function openArtist(id) {
+      if (!requireConfig()) return;
+      loading("Loading albums…");
+      try {
+        const data = await post("/api/artist", { apiUrl: cfg.apiUrl, id });
+        const artist = data.artist;
+        const albums = (artist && artist.albums) || [];
+        if (!albums.length) {
+          showResults(esc(artist ? artist.enName : "Artist"), backToSearch(),
+            '<p class="muted">No albums available for this artist.</p>');
+          setStatus("", "");
+          return;
+        }
+        window._albums = {};
+        const html = albums.map((al) => {
+          window._albums[al.id] = al;
+          const n = (al.tracks || []).length;
+          return '<div class="list-item" onclick="openAlbum(' + al.id + ')">' +
+            '<span>' + esc(al.enName || "Unknown Album") + '</span>' +
+            '<span class="meta">' + n + ' tracks ›</span>' +
+          '</div>';
+        }).join("");
+        showResults("Albums by " + esc(artist.enName), backToSearch(), html);
+        setStatus("", "");
+      } catch (e) {
+        setStatus("❌ " + e.message, "err");
+      }
+    }
+
+    function backToSearch() {
+      return '<a onclick="backToResults()">‹ Back to results</a>';
+    }
+    function backToResults() { doSearch(); }
+
+    // ---- Open album → tracks ----
+    function openAlbum(albumId) {
+      const al = (window._albums || {})[albumId];
+      if (!al) return;
+      const tracks = al.tracks || [];
+      if (!tracks.length) {
+        showResults(esc(al.enName), "", '<p class="muted">No tracks in this album.</p>');
+        return;
+      }
+      let html = '<div class="row" style="margin-bottom:12px;">' +
+        '<button onclick="downloadAlbum(' + albumId + ')">📥 Download entire album (' + tracks.length + ')</button>' +
+      '</div>';
+      html += tracks.map((t, i) =>
+        '<div class="list-item no-click">' +
+          '<span>' + (i + 1) + '. ' + esc((t.file || "").split("/").pop() || ("Track " + t.id)) + '</span>' +
+          '<button onclick="downloadTrack(' + t.id + ', ' + esc(JSON.stringify(t.file || "")).replace(/"/g, "&quot;") + ')">⬇️</button>' +
+        '</div>').join("");
+      showResults("Album: " + esc(al.enName || "Unknown"), "", html);
+    }
+
+    // ---- Downloads ----
+    function downloadUrl(trackId, file) {
+      const p = new URLSearchParams({
+        audioBase: cfg.audioBase,
+        token: cfg.token,
+        trackId: trackId,
+        file: file || "",
+      });
+      return "/api/download?" + p.toString();
+    }
+
+    function downloadTrack(trackId, file) {
+      if (!cfg.audioBase) { setStatus("⚠️ Add the Audio API Base URL in Settings.", "err"); return; }
+      const a = document.createElement("a");
+      a.href = downloadUrl(trackId, file);
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setStatus("⬇️ Download started…", "ok");
+    }
+
+    async function downloadAlbum(albumId) {
+      if (!cfg.audioBase) { setStatus("⚠️ Add the Audio API Base URL in Settings.", "err"); return; }
+      const al = (window._albums || {})[albumId];
+      if (!al) return;
+      const tracks = al.tracks || [];
+      for (let i = 0; i < tracks.length; i++) {
+        setStatus("⬇️ Downloading " + (i + 1) + " / " + tracks.length + "…", "muted");
+        downloadTrack(tracks[i].id, tracks[i].file || "");
+        // small gap so the browser queues each download
+        await new Promise((r) => setTimeout(r, 800));
+      }
+      setStatus("✨ Started all " + tracks.length + " downloads.", "ok");
+    }
+
+    // ---- New releases ----
+    async function doNew() {
+      if (!requireConfig()) return;
+      loading("Fetching recent releases…");
+      try {
+        const data = await post("/api/new", { apiUrl: cfg.apiUrl });
+        const albums = data.albums || [];
+        if (!albums.length) {
+          showResults("New Releases", "", '<p class="muted">No new releases found.</p>');
+          setStatus("", "");
+          return;
+        }
+        window._albums = {};
+        const html = albums.map((al) => {
+          window._albums[al.id] = al;
+          const artistNames = (al.artists || []).map((a) => a.enName || "Unknown").join(", ") || "Various";
+          const n = (al.tracks || []).length;
+          return '<div class="list-item" onclick="openAlbum(' + al.id + ')">' +
+            '<span>' + esc(al.enName || "Unknown") + ' <span class="he">— ' + esc(artistNames) + '</span></span>' +
+            '<span class="meta">' + n + ' tracks ›</span>' +
+          '</div>';
+        }).join("");
+        showResults("🔥 Latest " + albums.length + " New Releases", "", html);
+        setStatus("", "");
+      } catch (e) {
+        setStatus("❌ " + e.message, "err");
+      }
+    }
+
+    // ---- Wire up ----
+    $("settingsBtn").onclick = () => $("settingsCard").classList.toggle("hidden");
+    $("saveSettings").onclick = () => {
+      saveCfg();
+      setStatus("💾 Settings saved.", "ok");
+      $("settingsCard").classList.add("hidden");
+      artistsLoaded = false;
+    };
+    $("reloadArtists").onclick = () => { saveCfg(); ensureArtists(true); };
+    $("searchBtn").onclick = doSearch;
+    $("newBtn").onclick = doNew;
+    $("search").addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
+
+    loadCfg();
+    if (!cfg.apiUrl) $("settingsCard").classList.remove("hidden");
+  </script>
+</body>
+</html>
