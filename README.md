@@ -5,18 +5,20 @@ browse albums, view new releases, and download tracks — all from a browser.
 
 ## 🔒 Your private info stays private
 
-Your secrets (API URL, audio URL, JWT token) live **only** in a local
-`.env` file that is **never** uploaded to GitHub (it's in `.gitignore`).
+Your secrets (API URL, audio URL, JWT token) stay in **one local file on
+your own computer** that is **never** uploaded to GitHub. Only the website
+code goes to GitHub — your secrets never do, so **nobody else (not even the
+author of this code) ever sees them.**
 
-- **You** fill in the `.env` file yourself.
-- The values stay on the **server** — the token is never sent to the browser.
-- Nobody reading the repository ever sees your secrets.
+> ⚠️ **Important:** Do NOT paste your token into a file you upload to GitHub
+> (like `app.py`) and push it. Anything committed to GitHub is visible in the
+> repository and its history forever. Keep secrets only in the local file
+> below, which is git-ignored.
 
-> ⚠️ Never paste your token into a tracked file (like `app.py`) and push it —
-> anything committed to GitHub is visible in the repo and its history forever.
-> Always keep secrets in `.env`.
+## Setup — the easy way (use your existing script)
 
-## Setup
+You already have your original script with your info filled in. You don't
+have to change it.
 
 **1. Install dependencies**
 
@@ -24,19 +26,16 @@ Your secrets (API URL, audio URL, JWT token) live **only** in a local
 pip install -r requirements.txt
 ```
 
-**2. Create your `.env` file** (copy the example and fill it in)
+**2. Point it at your script** (runs on your computer — your info is not sent anywhere)
 
 ```bash
-cp .env.example .env
+python configure.py
 ```
 
-Then open `.env` and add your own values:
-
-```
-API_URL=https://.../graphql
-AUDIO_API_BASE=https://.../stream
-USER_TOKEN=your-jwt-token-here
-```
+It asks for the path to your original script and copies it in as
+`local_config.py`. That file is git-ignored, so it is **never uploaded to
+GitHub**. (You can also just copy your script into this folder and rename it
+to `local_config.py` yourself — same result.)
 
 **3. Run**
 
@@ -44,8 +43,24 @@ USER_TOKEN=your-jwt-token-here
 python app.py
 ```
 
-Open <http://localhost:5000>. If the `.env` is filled in, it just works —
-no settings to enter in the browser. Change the port with `PORT=8080 python app.py`.
+Open <http://localhost:5000>. It reads `API_URL`, `AUDIO_API_BASE` and
+`USER_TOKEN` straight from your script and just works — nothing to type in
+the browser. Change the port with `PORT=8080 python app.py`.
+
+### Alternative: a `.env` file
+
+If you prefer, instead of `local_config.py` you can create a `.env` file
+(also git-ignored):
+
+```bash
+cp .env.example .env
+```
+
+```
+API_URL=https://.../graphql
+AUDIO_API_BASE=https://.../stream
+USER_TOKEN=your-jwt-token-here
+```
 
 ## Features
 
@@ -70,4 +85,4 @@ The app reads from the environment automatically.
 | `fetch_new_releases()` | `POST /api/new` |
 | `download_track()` | `GET /api/download` (streamed, token added server-side) |
 | terminal menus | the web UI |
-| `API_URL` / `AUDIO_API_BASE` / `USER_TOKEN` constants | `.env` file |
+| `API_URL` / `AUDIO_API_BASE` / `USER_TOKEN` constants | `local_config.py` (your script) or `.env` |

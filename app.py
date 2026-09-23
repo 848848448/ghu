@@ -4,10 +4,18 @@ Jewish Music Downloader — Web Edition (Flask backend)
 Web version of the original command-line Python downloader.
 
 All private configuration (GraphQL API URL, audio API base URL, JWT token)
-is read from environment variables / a local `.env` file that is NEVER
-committed to git. The values stay entirely on the server — the browser
-never sends or receives the token. You fill in your own `.env`; nobody
-else (and no one reading the repo) ever sees your secrets.
+is read from ONE of these, in order, all of which are ignored by git and
+NEVER uploaded to GitHub:
+
+  1. environment variables / a local `.env` file, or
+  2. a local `local_config.py` file — you can simply drop your ORIGINAL
+     script in as `local_config.py` and it will be read automatically
+     (it only needs to define API_URL, AUDIO_API_BASE and USER_TOKEN,
+     which the original script already does at the top).
+
+The values stay entirely on your machine / server — the browser never
+sends or receives the token, and nobody reading the repo (or anyone else)
+ever sees your secrets, because the file holding them is never committed.
 """
 
 import hashlib
@@ -44,6 +52,25 @@ app = Flask(__name__)
 API_URL = os.environ.get("API_URL", "").strip()
 AUDIO_API_BASE = os.environ.get("AUDIO_API_BASE", "").strip()
 USER_TOKEN = os.environ.get("USER_TOKEN", "").strip()
+
+# Fallback: read the values from a local, git-ignored `local_config.py`.
+# You can drop your ORIGINAL script in as `local_config.py` — importing it
+# only defines its top-level constants (the `if __name__ == "__main__"` menu
+# does NOT run on import), so we can read API_URL / AUDIO_API_BASE / USER_TOKEN
+# straight from it. This file is never committed to git.
+if not (API_URL and AUDIO_API_BASE and USER_TOKEN):
+    try:
+        import local_config as _lc  # noqa: WPS433
+
+        API_URL = API_URL or str(getattr(_lc, "API_URL", "") or "").strip()
+        AUDIO_API_BASE = AUDIO_API_BASE or str(getattr(_lc, "AUDIO_API_BASE", "") or "").strip()
+        USER_TOKEN = USER_TOKEN or str(getattr(_lc, "USER_TOKEN", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        print("Note: could not import local_config.py:", exc)
+
+# The original script ships with this placeholder; treat it as "not set".
+if USER_TOKEN in ("PASTE_YOUR_JWT_TOKEN_HERE", "PASTE YOUR JWT TOKEN HERE"):
+    USER_TOKEN = ""
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 CACHE_TTL = 86400  # 24 hours, same as the original script
