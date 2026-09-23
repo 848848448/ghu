@@ -16,9 +16,22 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // Password protection is ON when the SITE_PASSWORD secret is set.
+    const locked = !!env.SITE_PASSWORD;
+
     try {
+      // Login / logout are always reachable.
+      if (path === "/api/login" && request.method === "POST") {
+        return await handleLogin(request, env);
+      }
+      if (path === "/api/logout") {
+        return logout();
+      }
+
+      const authed = !locked || (await isAuthed(request, env));
+
       if (path === "/" || path === "/index.html") {
-        return html(PAGE);
+        return html(authed ? PAGE : LOGIN);
       }
       if (path === "/api/status") {
         return json({
@@ -26,8 +39,16 @@ export default {
           audioBase: !!env.AUDIO_API_BASE,
           token: !!env.USER_TOKEN,
           configured: !!(env.API_URL && env.AUDIO_API_BASE && env.USER_TOKEN),
+          locked: locked,
+          authed: authed,
         });
       }
+
+      // Everything below requires a login when the site is locked.
+      if (!authed) {
+        return json({ error: "Please log in.", needLogin: true }, 401);
+      }
+
       if (path === "/api/artists" && request.method === "POST") {
         return await handleArtists(env);
       }
@@ -46,6 +67,62 @@ export default {
     }
   },
 };
+
+// --------------------------------------------------------------------------- //
+// Access control (optional): active only when the SITE_PASSWORD secret is set.
+// Only people you give the password to can open the site.
+// --------------------------------------------------------------------------- //
+async function sha256hex(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function authToken(env) {
+  // A non-reversible token derived from the password; safe to store in a cookie.
+  return await sha256hex("zing-auth-v1:" + (env.SITE_PASSWORD || ""));
+}
+
+function parseCookies(request) {
+  const out = {};
+  const h = request.headers.get("Cookie") || "";
+  h.split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > -1) out[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return out;
+}
+
+async function isAuthed(request, env) {
+  if (!env.SITE_PASSWORD) return true;
+  const c = parseCookies(request).auth;
+  return !!c && c === (await authToken(env));
+}
+
+async function handleLogin(request, env) {
+  if (!env.SITE_PASSWORD) return json({ ok: true });
+  const body = await request.json().catch(() => ({}));
+  const pw = (body.password || "").toString();
+  if (pw && pw === env.SITE_PASSWORD) {
+    const token = await authToken(env);
+    const cookie =
+      "auth=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000";
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Set-Cookie": cookie },
+    });
+  }
+  return json({ error: "Wrong password." }, 401);
+}
+
+function logout() {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      "Set-Cookie": "auth=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
+      Location: "/",
+    },
+  });
+}
 
 // --------------------------------------------------------------------------- //
 // GraphQL helpers
@@ -170,6 +247,64 @@ function html(body) {
     headers: { "Content-Type": "text/html; charset=utf-8" },
   });
 }
+
+// --------------------------------------------------------------------------- //
+// Login page — shown when the site is password-protected and you're not in yet.
+// --------------------------------------------------------------------------- //
+const LOGIN = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Niggun — Sign in</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet" />
+<style>
+  :root{color-scheme:dark;}
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{font-family:"Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#f4f4fb;
+    background:radial-gradient(900px 500px at 20% -10%, rgba(124,92,255,.28), transparent 60%),
+      radial-gradient(800px 460px at 100% 0%, rgba(255,77,141,.18), transparent 55%), #0a0a12;
+    display:grid; place-items:center; padding:24px;}
+  .box{width:100%; max-width:360px; text-align:center;}
+  .logo{width:60px;height:60px;border-radius:18px;display:grid;place-items:center;margin:0 auto 18px;font-size:28px;
+    background:linear-gradient(135deg,#7c5cff,#ff4d8d); box-shadow:0 12px 30px rgba(124,92,255,.5);}
+  h1{font-size:1.5rem; margin:0 0 6px; font-weight:800;}
+  p{color:#a3a3c2; margin:0 0 22px;}
+  input{width:100%; padding:14px 16px; border-radius:13px; border:1px solid rgba(255,255,255,.1);
+    background:#161627; color:#f4f4fb; font-size:1.05rem; font-family:inherit; outline:none; text-align:center;}
+  input:focus{border-color:#7c5cff;}
+  button{width:100%; margin-top:12px; padding:14px; border:none; border-radius:13px; cursor:pointer;
+    font-family:inherit; font-weight:800; font-size:1rem; color:#fff;
+    background:linear-gradient(135deg,#7c5cff,#ff4d8d); box-shadow:0 10px 24px rgba(124,92,255,.4);}
+  .msg{min-height:20px; margin-top:14px; font-size:.92rem; color:#fb7185;}
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo">♪</div>
+    <h1>Niggun Music</h1>
+    <p>Enter the password to continue.</p>
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password" />
+    <button id="go">Sign in</button>
+    <div class="msg" id="msg"></div>
+  </div>
+  <script>
+    var pw = document.getElementById("pw"), go = document.getElementById("go"), msg = document.getElementById("msg");
+    function submit(){
+      msg.textContent = "";
+      fetch("/api/login", { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ password: pw.value }) })
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+      .then(function(x){ if(x.ok){ location.href = "/"; } else { msg.textContent = (x.d && x.d.error) || "Wrong password."; pw.value=""; pw.focus(); } })
+      .catch(function(){ msg.textContent = "Something went wrong. Try again."; });
+    }
+    go.onclick = submit;
+    pw.addEventListener("keydown", function(e){ if(e.key === "Enter") submit(); });
+    pw.focus();
+  </script>
+</body>
+</html>`;
 
 // --------------------------------------------------------------------------- //
 // Frontend (served at /). Artist catalog is cached in the browser for 24h.
@@ -406,6 +541,7 @@ const PAGE = `<!DOCTYPE html>
     function post(path, payload){
       return fetch(path, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload||{}) })
         .then(function(res){ return res.json().catch(function(){return {};}).then(function(data){
+          if(res.status===401 && data.needLogin){ location.href = "/"; throw new Error("Please log in."); }
           if(!res.ok) throw new Error(data.error || ("Request failed ("+res.status+")")); return data; }); });
     }
 
