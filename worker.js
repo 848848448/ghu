@@ -667,7 +667,12 @@ function json(obj, status = 200) {
 
 function html(body) {
   return new Response(body, {
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      // Never let the phone/browser serve a stale copy of the app after a
+      // new deploy — always fetch the latest page.
+      "Cache-Control": "no-store, must-revalidate",
+    },
   });
 }
 
@@ -935,7 +940,7 @@ const PAGE = `<!DOCTYPE html>
 </head>
 <body>
   <div class="top">
-    <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span></div>
+    <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span><span style="font-size:.6rem;font-weight:800;letter-spacing:.5px;color:#fff;background:var(--grad);padding:2px 7px;border-radius:7px;align-self:center">v2</span></div>
     <div class="spacer"></div>
     <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
     <button class="iconbtn" title="Settings" onclick="openSettings()"><span class="ms">settings</span></button>
