@@ -1036,7 +1036,17 @@ const PAGE = `<!DOCTYPE html>
     }
 
     function openAlbum(id){
-      var al=(window._albums||{})[id]; if(!al) return;
+      // Fetch the album fresh via /api/query (same reliable path as playlists),
+      // so real track names, durations and lyrics work everywhere.
+      loading("Loading album…");
+      gql("query { album(where:{id:"+Number(id)+"}) { id enName heName artists { enName heName } tracks { id enName heName file duration trackNumber } } }").then(function(d){
+        var al=d.album; setStatus("","");
+        if(!al){ setView('<div class="empty">Album not found.</div>'); return; }
+        window._albums=window._albums||{}; window._albums[id]=al;
+        renderAlbum(id, al);
+      }).catch(function(e){ if(e.message==="login")return; setStatus("❌ "+e.message,"err"); });
+    }
+    function renderAlbum(id, al){
       var tracks=al.tracks||[];
       var artistName = (al.artists&&al.artists.length) ? artNames(al.artists) : (window._curArtist||"");
       var back=window._albumBack?'<div class="back" onclick="_albumBack()">‹ Back</div>':'<div class="back" onclick="doNew()">‹ Back</div>';
