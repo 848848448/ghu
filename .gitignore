@@ -17,3 +17,6 @@ __pycache__/
 *.m4a
 .venv/
 venv/
+
+.env2
+.dev.vars
