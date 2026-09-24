@@ -72,8 +72,81 @@ if not (API_URL and AUDIO_API_BASE and USER_TOKEN):
 if USER_TOKEN in ("PASTE_YOUR_JWT_TOKEN_HERE", "PASTE YOUR JWT TOKEN HERE"):
     USER_TOKEN = ""
 
+# Optional auto-login: when set, the app logs in itself to refresh the token.
+ZING_EMAIL = os.environ.get("ZING_EMAIL", "").strip()
+ZING_PASSWORD = os.environ.get("ZING_PASSWORD", "").strip()
+_CACHED_TOKEN = None
+
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 CACHE_TTL = 86400  # 24 hours, same as the original script
+
+
+# --------------------------------------------------------------------------- #
+# Auto-login (optional)
+# --------------------------------------------------------------------------- #
+def can_auto_login():
+    return bool(API_URL and ZING_EMAIL and ZING_PASSWORD)
+
+
+def zing_login():
+    """Log in and return {'ok': bool, 'token'|'error': ...}, caching the token."""
+    global _CACHED_TOKEN
+    if not can_auto_login():
+        return {"ok": False, "error": "ZING_EMAIL / ZING_PASSWORD not set."}
+    query = (
+        "mutation($e: String!, $p: String!) { authenticateUserWithPassword"
+        "(email: $e, password: $p) { __typename "
+        "... on UserAuthenticationWithPasswordSuccess { sessionToken } "
+        "... on UserAuthenticationWithPasswordFailure { message } } }"
+    )
+    try:
+        r = requests.post(
+            API_URL,
+            json={"query": query, "variables": {"e": ZING_EMAIL, "p": ZING_PASSWORD}},
+            verify=False,
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+        )
+        if not r.ok:
+            return {"ok": False, "error": f"Login endpoint returned {r.status_code}."}
+        d = r.json()
+        if d.get("errors"):
+            return {"ok": False, "error": d["errors"][0].get("message", "GraphQL error.")}
+        res = d.get("data", {}).get("authenticateUserWithPassword") or {}
+        if res.get("sessionToken"):
+            _CACHED_TOKEN = res["sessionToken"]
+            return {"ok": True, "token": _CACHED_TOKEN}
+        return {"ok": False, "error": res.get("message", "Login failed (no token).")}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+def current_token(force_login=False):
+    if not force_login:
+        if _CACHED_TOKEN:
+            return _CACHED_TOKEN
+        if USER_TOKEN:
+            return USER_TOKEN
+    if can_auto_login():
+        res = zing_login()
+        if res["ok"]:
+            return res["token"]
+    return USER_TOKEN or ""
+
+
+def fetch_audio(track_id, extra_headers=None, stream=True):
+    """GET the audio, retrying once with a fresh login on a 403."""
+    def build(tok):
+        return f"{AUDIO_API_BASE}?trackId={track_id}&token={tok}"
+
+    token = current_token(False)
+    r = requests.get(build(token), verify=False, stream=stream, timeout=60,
+                     headers=extra_headers or {})
+    if r.status_code == 403 and can_auto_login():
+        token = current_token(True)
+        r = requests.get(build(token), verify=False, stream=stream, timeout=60,
+                         headers=extra_headers or {})
+    return r
 
 
 # --------------------------------------------------------------------------- #
@@ -216,12 +289,14 @@ def index():
 @app.route("/api/status")
 def api_status():
     """Report ONLY whether each secret is configured — never the values."""
+    has_auth = bool(USER_TOKEN or (ZING_EMAIL and ZING_PASSWORD))
     return jsonify(
         {
             "apiUrl": bool(API_URL),
             "audioBase": bool(AUDIO_API_BASE),
-            "token": bool(USER_TOKEN),
-            "configured": bool(API_URL and AUDIO_API_BASE and USER_TOKEN),
+            "token": has_auth,
+            "autoLogin": bool(ZING_EMAIL and ZING_PASSWORD),
+            "configured": bool(API_URL and AUDIO_API_BASE and has_auth),
         }
     )
 
@@ -262,6 +337,12 @@ def api_check():
     """Diagnose whether the server can actually reach your API and audio host."""
     out = {"api": {}, "audio": {}}
 
+    if ZING_EMAIL and ZING_PASSWORD:
+        res = zing_login()
+        out["login"] = {"ok": True} if res["ok"] else {"ok": False, "error": res["error"]}
+    else:
+        out["login"] = {"configured": False}
+
     real_track_id = None
     if not API_URL:
         out["api"] = {"configured": False}
@@ -294,13 +375,7 @@ def api_check():
     else:
         tid = real_track_id if real_track_id is not None else 1
         try:
-            r = requests.get(
-                f"{AUDIO_API_BASE}?trackId={tid}&token={USER_TOKEN}",
-                verify=False,
-                headers={"Range": "bytes=0-0"},
-                stream=True,
-                timeout=20,
-            )
+            r = fetch_audio(tid, {"Range": "bytes=0-0"})
             out["audio"] = {
                 "reachable": True,
                 "status": r.status_code,
@@ -324,18 +399,17 @@ def api_play():
     if not track_id:
         return jsonify({"error": "Missing track id."}), 400
 
-    full_url = f"{AUDIO_API_BASE}?trackId={track_id}&token={USER_TOKEN}"
     fwd = {}
     if request.headers.get("Range"):
         fwd["Range"] = request.headers["Range"]
 
     try:
-        upstream = requests.get(full_url, verify=False, stream=True, timeout=60, headers=fwd)
+        upstream = fetch_audio(track_id, fwd)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"Playback error: {exc}"}), 502
 
     if upstream.status_code == 403:
-        return jsonify({"error": "Access Denied (403). Your JWT token may have expired."}), 403
+        return jsonify({"error": "Access Denied (403). Token expired and re-login failed."}), 403
     if upstream.status_code not in (200, 206):
         return jsonify({"error": f"Server returned code {upstream.status_code}."}), 502
 
@@ -373,15 +447,13 @@ def api_download():
     if not filename.endswith((".mp3", ".wav", ".m4a")):
         filename += ".mp3"
 
-    full_url = f"{AUDIO_API_BASE}?trackId={track_id}&token={USER_TOKEN}"
-
     try:
-        upstream = requests.get(full_url, verify=False, stream=True, timeout=60)
+        upstream = fetch_audio(track_id)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"Download error: {exc}"}), 502
 
     if upstream.status_code == 403:
-        return jsonify({"error": "Access Denied (403). Your JWT token may have expired."}), 403
+        return jsonify({"error": "Access Denied (403). Token expired and re-login failed."}), 403
     if upstream.status_code != 200:
         return jsonify({"error": f"Server returned code {upstream.status_code}."}), 502
 

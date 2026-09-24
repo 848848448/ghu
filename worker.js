@@ -34,11 +34,13 @@ export default {
         return html(authed ? PAGE : LOGIN);
       }
       if (path === "/api/status") {
+        const hasAuth = !!(env.USER_TOKEN || (env.ZING_EMAIL && env.ZING_PASSWORD));
         return json({
           apiUrl: !!env.API_URL,
           audioBase: !!env.AUDIO_API_BASE,
-          token: !!env.USER_TOKEN,
-          configured: !!(env.API_URL && env.AUDIO_API_BASE && env.USER_TOKEN),
+          token: hasAuth,
+          autoLogin: !!(env.ZING_EMAIL && env.ZING_PASSWORD),
+          configured: !!(env.API_URL && env.AUDIO_API_BASE && hasAuth),
           locked: locked,
           authed: authed,
         });
@@ -131,6 +133,70 @@ function logout() {
 }
 
 // --------------------------------------------------------------------------- //
+// Auto-login (optional): when ZING_EMAIL + ZING_PASSWORD are set, the Worker
+// logs in itself to get a fresh session token, so the token never has to be
+// updated by hand. Falls back to the USER_TOKEN secret when auto-login is off.
+// --------------------------------------------------------------------------- //
+let CACHED_TOKEN = null; // per-isolate cache of the latest session token
+
+function canAutoLogin(env) {
+  return !!(env.API_URL && env.ZING_EMAIL && env.ZING_PASSWORD);
+}
+
+async function zingLogin(env) {
+  if (!canAutoLogin(env)) return { ok: false, error: "ZING_EMAIL / ZING_PASSWORD not set." };
+  const query =
+    "mutation($e: String!, $p: String!) { authenticateUserWithPassword(email: $e, password: $p) { __typename ... on UserAuthenticationWithPasswordSuccess { sessionToken } ... on UserAuthenticationWithPasswordFailure { message } } }";
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables: { e: env.ZING_EMAIL, p: env.ZING_PASSWORD } }),
+    });
+    if (!r.ok) return { ok: false, error: "Login endpoint returned " + r.status + "." };
+    const d = await r.json().catch(() => ({}));
+    if (d && d.errors && d.errors.length) {
+      return { ok: false, error: (d.errors[0] && d.errors[0].message) || "GraphQL error." };
+    }
+    const res = (d && d.data && d.data.authenticateUserWithPassword) || {};
+    if (res.sessionToken) {
+      CACHED_TOKEN = res.sessionToken;
+      return { ok: true, token: res.sessionToken };
+    }
+    return { ok: false, error: res.message || "Login failed (no session token returned)." };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+async function currentToken(env, forceLogin) {
+  if (!forceLogin) {
+    if (CACHED_TOKEN) return CACHED_TOKEN;
+    if (env.USER_TOKEN) return env.USER_TOKEN;
+  }
+  if (canAutoLogin(env)) {
+    const res = await zingLogin(env);
+    if (res.ok) return res.token;
+  }
+  return env.USER_TOKEN || "";
+}
+
+// Fetch from the audio server, retrying once with a fresh login on a 403.
+async function fetchAudio(env, trackId, extraHeaders) {
+  let token = await currentToken(env, false);
+  const build = (t) =>
+    env.AUDIO_API_BASE +
+    "?trackId=" + encodeURIComponent(trackId) +
+    "&token=" + encodeURIComponent(t || "");
+  let r = await fetch(build(token), { headers: extraHeaders || {} });
+  if (r.status === 403 && canAutoLogin(env)) {
+    token = await currentToken(env, true); // force a fresh login
+    r = await fetch(build(token), { headers: extraHeaders || {} });
+  }
+  return r;
+}
+
+// --------------------------------------------------------------------------- //
 // GraphQL helpers
 // --------------------------------------------------------------------------- //
 async function graphql(env, query) {
@@ -208,6 +274,14 @@ async function handleCheck(env) {
   const out = { api: {}, audio: {} };
   let realTrackId = null;
 
+  // Test auto-login when it's configured.
+  if (env.ZING_EMAIL && env.ZING_PASSWORD) {
+    const res = await zingLogin(env);
+    out.login = res.ok ? { ok: true } : { ok: false, error: res.error };
+  } else {
+    out.login = { configured: false };
+  }
+
   // Test the GraphQL API and grab a real track id to test playback with.
   if (!env.API_URL) {
     out.api = { configured: false };
@@ -240,11 +314,7 @@ async function handleCheck(env) {
   } else {
     const tid = realTrackId != null ? realTrackId : 1;
     try {
-      const testUrl =
-        env.AUDIO_API_BASE +
-        "?trackId=" + encodeURIComponent(tid) +
-        "&token=" + encodeURIComponent(env.USER_TOKEN || "");
-      const r = await fetch(testUrl, { headers: { Range: "bytes=0-0" } });
+      const r = await fetchAudio(env, tid, { Range: "bytes=0-0" });
       out.audio = { reachable: true, status: r.status, realTrack: realTrackId != null };
     } catch (e) {
       out.audio = { reachable: false, error: String((e && e.message) || e) };
@@ -262,20 +332,15 @@ async function handlePlay(url, request, env) {
   const trackId = (url.searchParams.get("trackId") || "").trim();
   if (!trackId) return json({ error: "Missing track id." }, 400);
 
-  const fullUrl =
-    env.AUDIO_API_BASE +
-    "?trackId=" + encodeURIComponent(trackId) +
-    "&token=" + encodeURIComponent(env.USER_TOKEN || "");
-
   const range = request.headers.get("Range");
   let upstream;
   try {
-    upstream = await fetch(fullUrl, { headers: range ? { Range: range } : {} });
+    upstream = await fetchAudio(env, trackId, range ? { Range: range } : {});
   } catch (exc) {
     return json({ error: "Playback error: " + (exc && exc.message) }, 502);
   }
   if (upstream.status === 403) {
-    return json({ error: "Access Denied (403). Your JWT token may have expired." }, 403);
+    return json({ error: "Access Denied (403). Token expired and re-login failed." }, 403);
   }
   if (!upstream.ok && upstream.status !== 206) {
     return json({ error: "Server returned code " + upstream.status + "." }, 502);
@@ -307,14 +372,14 @@ async function handleDownload(url, env) {
   // Keep the header safe.
   filename = filename.replace(/["\\\r\n]/g, "_");
 
-  const fullUrl =
-    env.AUDIO_API_BASE +
-    "?trackId=" + encodeURIComponent(trackId) +
-    "&token=" + encodeURIComponent(env.USER_TOKEN || "");
-
-  const upstream = await fetch(fullUrl);
+  let upstream;
+  try {
+    upstream = await fetchAudio(env, trackId, {});
+  } catch (exc) {
+    return json({ error: "Download error: " + (exc && exc.message) }, 502);
+  }
   if (upstream.status === 403) {
-    return json({ error: "Access Denied (403). Your JWT token may have expired." }, 403);
+    return json({ error: "Access Denied (403). Token expired and re-login failed." }, 403);
   }
   if (!upstream.ok) {
     return json({ error: "Server returned code " + upstream.status + "." }, 502);
@@ -784,23 +849,29 @@ const PAGE = `<!DOCTYPE html>
     function runCheck(auto){
       diagBox('<span class="spinner"></span>Checking connection…');
       fetch("/api/check").then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); }).then(function(s){
-        var api=s.api||{}, audio=s.audio||{}, lines=[], hint="";
+        var api=s.api||{}, audio=s.audio||{}, login=s.login||{}, lines=[], hint="";
         // API line
         if(api.configured===false) lines.push("❌ API_URL is not set.");
         else if(api.reachable===false) lines.push("❌ Can't reach your music API. Error: "+esc(api.error||"connection failed"));
         else if(api.status!==200) lines.push("⚠️ Music API answered with code "+api.status+".");
         else if(!api.hasData) lines.push("⚠️ Music API is reachable but returned no artists — check API_URL.");
         else lines.push("✅ Music API is connected.");
+        // Login line (auto-login)
+        if(login.configured===false) lines.push("ℹ️ Auto-login is off (using a fixed USER_TOKEN).");
+        else if(login.ok) lines.push("✅ Auto-login works — the token refreshes itself.");
+        else lines.push("❌ Auto-login failed. Error: "+esc(login.error||"unknown"));
         // Audio line
         if(audio.configured===false) lines.push("❌ AUDIO_API_BASE is not set.");
         else if(audio.reachable===false) lines.push("❌ Can't reach your audio server. Error: "+esc(audio.error||"connection failed"));
-        else if(audio.status===403) lines.push("❌ Audio server said 403 — your USER_TOKEN is expired or wrong.");
+        else if(audio.status===403) lines.push("❌ Audio server said 403 — the login did not produce a valid token.");
         else lines.push("✅ Audio server is reachable (code "+audio.status+").");
         // Hint
         if(api.reachable===false || audio.reachable===false){
           hint='<div style="margin-top:10px">🔎 The server cannot be reached. This usually means the music server uses a self-signed certificate that Cloudflare cannot accept. The fix is to host this on a Python server instead — tell me and I will set it up.</div>';
-        } else if(audio.status===403){
-          hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, then redeploy.</div>';
+        } else if(login.ok===false && login.configured!==false){
+          hint='<div style="margin-top:10px">🔑 Auto-login failed — check the ZING_EMAIL and ZING_PASSWORD secrets, then redeploy. Send me the error above and I will adjust it.</div>';
+        } else if(audio.status===403 && login.configured===false){
+          hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, or set up ZING_EMAIL + ZING_PASSWORD for automatic login.</div>';
         }
         diagBox('<b>Connection check</b><div style="margin-top:8px;line-height:1.9">'+lines.join("<br>")+'</div>'+hint);
       }).catch(function(e){ if(e&&e.message==="login") return; diagBox("❌ Could not run the check: "+esc(e.message||e)); });
