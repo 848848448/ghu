@@ -651,6 +651,7 @@
         '</div></div>'+
         '<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
+          '<button class="chip" onclick="showZingConfig()">Zing settings</button>'+
           '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
@@ -742,6 +743,28 @@
           '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:10px;max-height:52vh;overflow:auto">'+esc(s.text||"")+'</pre>');
       }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
     }
+    function showZingConfig(){ diagBox('<span class="spinner"></span>Reading Zing settings…');
+      gql("query { appConfigs(take: 500, orderBy: [{ priority: desc }]) { id key category value description os zingPlayer isActive appVersion minApiVersion priority updatedAt } }").then(function(d){
+        var items=d.appConfigs||[];
+        if(!items.length){ diagBox('<b>Zing settings</b><div class="muted" style="margin-top:8px">No settings were returned (they may be admin-only).</div>'); return; }
+        var byCat={}; items.forEach(function(c){ var k=c.category||"other"; (byCat[k]=byCat[k]||[]).push(c); });
+        var text="ZING SETTINGS (appConfigs) — "+items.length+" entries\n\n"; var html='<b>Zing settings</b> ('+items.length+')';
+        html+='<div class="chips" style="padding:0;margin:8px 0"><button class="chip" onclick="copyText(this)">Copy</button><button class="chip" onclick="downloadText(\'zing-settings.txt\', window._copy)">Download file</button></div>';
+        Object.keys(byCat).sort().forEach(function(cat){
+          text+="===== "+cat+" =====\n";
+          html+='<div class="set-sec"><h3>'+esc(cat)+'</h3>';
+          byCat[cat].forEach(function(c){
+            var val; try{ val=JSON.stringify(c.value); }catch(e){ val=String(c.value); }
+            text+="- "+c.key+(c.os?(" ["+c.os+"]"):"")+(c.isActive===false?" (inactive)":"")+" = "+val+(c.description?("   // "+c.description):"")+"\n";
+            html+='<div class="card" style="padding:12px;margin-bottom:8px"><div style="font-weight:700;word-break:break-word">'+esc(c.key)+(c.os?' <span class="muted" style="font-weight:400">['+esc(c.os)+']</span>':'')+(c.isActive===false?' <span class="muted">(inactive)</span>':'')+'</div>'+
+              (c.description?'<div class="muted" style="font-size:.82rem;margin:3px 0">'+esc(c.description)+'</div>':'')+
+              '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.74rem;margin:6px 0 0">'+esc(val)+'</pre></div>';
+          });
+          text+="\n"; html+='</div>';
+        });
+        window._copy=text; diagBox(html);
+      }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
     function showImageInfo(){ diagBox('<span class="spinner"></span>Reading…');
       gql('query { t: __type(name:"Images"){ fields { name type { kind name ofType { kind name } } } } }').then(function(d){
         var fs=(d.t&&d.t.fields)||[]; var scalar=fs.filter(function(f){ var t=f.type||{}; return t.kind==="SCALAR"||(t.kind==="NON_NULL"&&t.ofType&&t.ofType.kind==="SCALAR"); }).map(function(f){return f.name;});
@@ -763,7 +786,7 @@
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
     window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText;
-    window.showFullSchema=showFullSchema; window.downloadText=downloadText;
+    window.showFullSchema=showFullSchema; window.downloadText=downloadText; window.showZingConfig=showZingConfig;
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
 
