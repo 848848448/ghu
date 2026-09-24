@@ -501,6 +501,41 @@ def api_new():
     return jsonify({"albums": fetch_new_releases()})
 
 
+@app.route("/api/albums", methods=["POST"])
+def api_albums():
+    """A page of ALL albums, newest first (old + new), with skip/take."""
+    if not API_URL:
+        return jsonify({"error": "Server not configured."}), 400
+    body = request.get_json(silent=True) or {}
+    try:
+        take = min(max(int(body.get("take") or 30), 1), 60)
+    except (TypeError, ValueError):
+        take = 30
+    try:
+        skip = max(int(body.get("skip") or 0), 0)
+    except (TypeError, ValueError):
+        skip = 0
+    fields = (
+        "id enName heName releasedAt "
+        "images { cdnSmall cdnMedium medium small } "
+        "artists { enName heName image } tracks { id }"
+    )
+    attempts = [
+        f"query {{ albums(take: {take}, skip: {skip}, orderBy: [{{ releasedAt: desc }}]) {{ {fields} }} }}",
+        f"query {{ albums(take: {take}, skip: {skip}, orderBy: [{{ id: desc }}]) {{ {fields} }} }}",
+        f"query {{ albums(take: {take}, skip: {skip}) {{ {fields} }} }}",
+    ]
+    for i, q in enumerate(attempts):
+        data = graphql(q)
+        if not data or data.get("errors"):
+            continue
+        albums = data.get("data", {}).get("albums") or []
+        if i == len(attempts) - 1:
+            albums = sorted(albums, key=lambda x: int(x.get("id", 0)), reverse=True)
+        return jsonify({"albums": albums})
+    return jsonify({"albums": []})
+
+
 @app.route("/api/check")
 def api_check():
     """Diagnose whether the server can actually reach your API and audio host."""
