@@ -336,14 +336,8 @@ def fetch_artist_details(artist_id):
           id
           enName
           heName
-          tracks {{
-            id
-            enName
-            heName
-            file
-            duration
-            trackNumber
-          }}
+          images {{ cdnSmall cdnMedium medium small }}
+          tracks {{ id }}
         }}
       }}
     }}
@@ -361,18 +355,13 @@ def fetch_new_releases():
         id
         enName
         heName
+        images { cdnSmall cdnMedium medium small }
         artists {
           enName
           heName
+          image
         }
-        tracks {
-          id
-          enName
-          heName
-          file
-          duration
-          trackNumber
-        }
+        tracks { id }
       }
     }
     """
