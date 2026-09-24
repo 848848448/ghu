@@ -169,6 +169,32 @@ async function zingLogin(env) {
   }
 }
 
+// Ask the GraphQL schema which login-related mutations exist (to find the
+// right one when our guess fails). Returns a list like ["name(arg, arg)"].
+async function introspectAuthMutations(env) {
+  const q =
+    "query { __schema { mutationType { fields { name args { name } } } } }";
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q }),
+    });
+    if (!r.ok) return { error: "introspection returned " + r.status };
+    const d = await r.json().catch(() => ({}));
+    if (d && d.errors && d.errors.length) return { error: "introspection blocked" };
+    const fields =
+      (((d.data || {}).__schema || {}).mutationType || {}).fields || [];
+    const re = /auth|login|session|token|sign|password/i;
+    const cand = fields
+      .filter((f) => re.test(f.name))
+      .map((f) => f.name + "(" + (f.args || []).map((a) => a.name).join(", ") + ")");
+    return { total: fields.length, candidates: cand };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+
 async function currentToken(env, forceLogin) {
   if (!forceLogin) {
     if (CACHED_TOKEN) return CACHED_TOKEN;
@@ -278,6 +304,10 @@ async function handleCheck(env) {
   if (env.ZING_EMAIL && env.ZING_PASSWORD) {
     const res = await zingLogin(env);
     out.login = res.ok ? { ok: true } : { ok: false, error: res.error };
+    // If login failed, ask the schema what the real login mutation is called.
+    if (!res.ok && env.API_URL) {
+      out.authMutations = await introspectAuthMutations(env);
+    }
   } else {
     out.login = { configured: false };
   }
@@ -870,6 +900,16 @@ const PAGE = `<!DOCTYPE html>
           hint='<div style="margin-top:10px">🔎 The server cannot be reached. This usually means the music server uses a self-signed certificate that Cloudflare cannot accept. The fix is to host this on a Python server instead — tell me and I will set it up.</div>';
         } else if(login.ok===false && login.configured!==false){
           hint='<div style="margin-top:10px">🔑 Auto-login failed — check the ZING_EMAIL and ZING_PASSWORD secrets, then redeploy. Send me the error above and I will adjust it.</div>';
+          var am=s.authMutations;
+          if(am){
+            if(am.candidates && am.candidates.length){
+              hint+='<div style="margin-top:10px">🔎 Found these login methods in the API — <b>send me this screenshot</b>:<br>'+am.candidates.map(function(x){ return '<code>'+esc(x)+'</code>'; }).join("<br>")+'</div>';
+            } else if(am.candidates){
+              hint+='<div style="margin-top:10px">🔎 No login mutation found in the schema (total mutations: '+(am.total||0)+'). Tell me and we will capture the real login request.</div>';
+            } else if(am.error){
+              hint+='<div style="margin-top:10px">🔎 Could not read the API schema ('+esc(am.error)+'). We will capture the real login request instead — tell me.</div>';
+            }
+          }
         } else if(audio.status===403 && login.configured===false){
           hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, or set up ZING_EMAIL + ZING_PASSWORD for automatic login.</div>';
         }

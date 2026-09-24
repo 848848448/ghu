@@ -121,6 +121,30 @@ def zing_login():
         return {"ok": False, "error": str(exc)}
 
 
+def introspect_auth_mutations():
+    """Find login-related mutation names from the GraphQL schema."""
+    import re as _re
+    q = "query { __schema { mutationType { fields { name args { name } } } } }"
+    try:
+        r = requests.post(API_URL, json={"query": q}, verify=False,
+                          headers={"Content-Type": "application/json"}, timeout=20)
+        if not r.ok:
+            return {"error": f"introspection returned {r.status_code}"}
+        d = r.json()
+        if d.get("errors"):
+            return {"error": "introspection blocked"}
+        fields = (d.get("data", {}).get("__schema", {}) or {}).get("mutationType", {})
+        fields = (fields or {}).get("fields") or []
+        pat = _re.compile(r"auth|login|session|token|sign|password", _re.I)
+        cand = [
+            f["name"] + "(" + ", ".join(a["name"] for a in (f.get("args") or [])) + ")"
+            for f in fields if pat.search(f.get("name", ""))
+        ]
+        return {"total": len(fields), "candidates": cand}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 def current_token(force_login=False):
     if not force_login:
         if _CACHED_TOKEN:
@@ -340,6 +364,8 @@ def api_check():
     if ZING_EMAIL and ZING_PASSWORD:
         res = zing_login()
         out["login"] = {"ok": True} if res["ok"] else {"ok": False, "error": res["error"]}
+        if not res["ok"] and API_URL:
+            out["authMutations"] = introspect_auth_mutations()
     else:
         out["login"] = {"configured": False}
 
