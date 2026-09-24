@@ -1079,14 +1079,36 @@ const PAGE = `<!DOCTYPE html>
         Object.keys(types).forEach(function(k){
           trows+='<div style="margin-top:10px"><b>'+esc(k)+'</b><br><span style="font-size:.82rem">'+types[k].map(function(x){return esc(x);}).join(" · ")+'</span></div>';
         });
-        diagBox('<b>API structure — '+f.length+' queries</b><div style="margin-top:8px;line-height:1.8;font-size:.86rem">'+rows+'</div>'+
+        // Plain-text version for the Copy button
+        var plain="API STRUCTURE\\n\\nQUERIES:\\n";
+        f.forEach(function(x){ plain+="- "+x.name+"("+(x.args||[]).join(", ")+") -> "+(x.returns||"?")+"\\n"; });
+        plain+="\\nTYPES:\\n";
+        Object.keys(types).forEach(function(k){ plain+=k+": "+types[k].join(", ")+"\\n\\n"; });
+        window._schemaText=plain;
+        diagBox('<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><b>API structure — '+f.length+' queries</b>'+
+          '<button class="btn sm" style="padding:7px 13px" onclick="copySchema(this)">📋 Copy all</button></div>'+
+          '<div style="margin-top:8px;line-height:1.8;font-size:.86rem">'+rows+'</div>'+
           (trows?'<div style="margin-top:14px"><b>Types (fields):</b>'+trows+'</div>':'')+
-          '<div style="margin-top:10px" class="muted">Send me this whole screenshot and I will build the full app around it.</div>');
+          '<div style="margin-top:10px" class="muted">Tap “Copy all”, then paste it to me — or screenshot it.</div>');
       }).catch(function(e){ if(e&&e.message==="login")return; diagBox("❌ "+esc(e.message||e)); });
     }
 
+    function copySchema(btn){
+      var txt=window._schemaText||"";
+      function done(){ if(btn){ var o=btn.textContent; btn.textContent="✅ Copied!"; setTimeout(function(){ btn.textContent=o; }, 1800); } }
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(txt).then(done).catch(function(){ fallbackCopy(txt); done(); });
+        } else { fallbackCopy(txt); done(); }
+      }catch(e){ fallbackCopy(txt); done(); }
+    }
+    function fallbackCopy(txt){
+      try{ var ta=document.createElement("textarea"); ta.value=txt; ta.style.cssText="position:fixed;left:-9999px";
+        document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand("copy"); ta.remove(); }catch(e){}
+    }
+
     // expose
-    window.showSchema=showSchema;
+    window.showSchema=showSchema; window.copySchema=copySchema;
     window.openArtist=openArtist; window.openAlbum=openAlbum; window.playAlbum=playAlbum;
     window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum; window.doNew=doNew;
     window.browseArtists=browseArtists; window.filterGrid=filterGrid; window.runCheck=runCheck;
