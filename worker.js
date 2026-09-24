@@ -591,7 +591,7 @@ async function handleArtist(request, env) {
     return json({ error: "Missing artist id." }, 400);
   }
   const query =
-    "query { artist(where: { id: " + Number(id) + " }) { id enName heName image " +
+    "query { artist(where: { id: " + Number(id) + " }) { id enName heName image bio heDesc enDesc " +
     "albums { id enName heName images { cdnSmall cdnMedium medium small } tracks { id } } } }";
   const data = await graphql(env, query);
   const artist = data && data.data ? data.data.artist : null;
@@ -1115,7 +1115,7 @@ const PAGE = `<!DOCTYPE html>
   <div class="player" id="player" hidden>
     <div class="np-seek-wrap"><input type="range" class="np-seek" id="seek" min="0" max="1000" value="0" /></div>
     <div class="np-cover" id="npCover"><span class="disc"></span></div>
-    <div class="np-meta" onclick="showLyrics()"><div class="np-title" id="npTitle">—</div><div class="np-artist" id="npArtist"></div></div>
+    <div class="np-meta" onclick="openNowPlaying()"><div class="np-title" id="npTitle">—</div><div class="np-artist" id="npArtist"></div></div>
     <button class="np-btn prev" title="Previous" onclick="prevTrack()"><span class="ms">skip_previous</span></button>
     <button class="np-btn main" id="playBtn" title="Play/Pause" onclick="togglePlay()"><span class="ms">play_arrow</span></button>
     <button class="np-btn" title="Next" onclick="nextTrack()"><span class="ms">skip_next</span></button>
@@ -1435,8 +1435,10 @@ const PAGE = `<!DOCTYPE html>
 
     function openArtist(id){ loading("Loading…");
       post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; setStatus(""); var anm=a?(pick(a.enName,a.heName)||"Artist"):"Artist"; var aalt=a?((SET.lang==="he")?(a.enName||""):(a.heName||"")):""; window._curArtist=anm;
+        var abio=a?(a.bio||pick(a.enDesc,a.heDesc)||""):"";
         var head='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Back</div>'+
-          '<div class="hero">'+coverHtml(anm,{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(anm)+'</h2>'+(aalt?'<div class="sub">'+esc(aalt)+'</div>':'')+'</div></div>';
+          '<div class="hero">'+coverHtml(anm,{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(anm)+'</h2>'+(aalt?'<div class="sub">'+esc(aalt)+'</div>':'')+'</div></div>'+
+          (abio?'<p class="muted" style="margin:-6px 18px 18px;line-height:1.7;font-size:.92rem">'+esc(abio)+'</p>':'');
         window._albumBack=function(){ openArtist(id); };
         if(!albums.length){ setView(head+'<div class="empty">No albums available.</div>'); return; }
         window._albums=window._albums||{}; setView(head+secHead("Albums")+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al,(al.tracks||[]).length+" tracks"); }).join("")+'</div>');
@@ -1512,6 +1514,34 @@ const PAGE = `<!DOCTYPE html>
         overlay((tr.enName||tr.heName||t.title), '<pre dir="auto">'+esc(lyr)+'</pre>');
       }).catch(function(e){ if(e.message==="login")return; toast("Could not load lyrics."); });
     }
+    // ---------- Now Playing sheet (lyrics + similar songs) ----------
+    function openNowPlaying(){ var t=queue[qi]; if(!t){ return; }
+      var cu=imgUrl(t.coverImg);
+      var cover = cu ? '<div class="cover" style="width:210px;height:210px;margin:0 auto 16px;background-image:url(\\''+esc(cu)+'\\');background-size:cover;background-position:center"></div>'
+                     : '<div class="cover" style="width:210px;height:210px;margin:0 auto 16px;background:'+grad(t.cover||t.title)+'"><span class="disc"></span></div>';
+      overlay("Now Playing", cover+
+        '<div style="text-align:center"><div style="font-weight:800;font-size:1.25rem;word-break:break-word">'+esc(t.title)+'</div><div class="muted" style="margin-top:3px">'+esc(t.artist||"")+'</div></div>'+
+        '<div class="chips" style="justify-content:center;padding:0;margin:18px 0"><button class="chip" onclick="npLyrics()">Lyrics</button><button class="chip" onclick="npSimilar()">Similar songs</button></div>'+
+        '<div id="npExtra"></div>');
+    }
+    function npBox(h){ var e=$("npExtra"); if(e) e.innerHTML=h; }
+    function npLyrics(){ var t=queue[qi]; if(!t) return; npBox('<div class="empty"><span class="spinner"></span>Loading lyrics…</div>');
+      gql("query { track(where:{id:"+Number(t.id)+"}) { heLyrics enLyrics } }").then(function(d){ var tr=d.track||{};
+        var lyr=(SET.lang==="he"?(tr.heLyrics||tr.enLyrics):(tr.enLyrics||tr.heLyrics))||"";
+        npBox(lyr?'<pre dir="auto" style="white-space:pre-wrap;line-height:1.85;font-size:1.02rem;margin:0">'+esc(lyr)+'</pre>':'<div class="empty">No lyrics for this song.</div>');
+      }).catch(function(e){ if(e.message==="login")return; npBox('<div class="empty">Could not load lyrics.</div>'); });
+    }
+    function npSimilar(){ var t=queue[qi]; if(!t) return; npBox('<div class="empty"><span class="spinner"></span>Finding similar songs…</div>');
+      gql("query { relatedTracks(trackId:"+Number(t.id)+", take: 30) { track { id enName heName file duration artists { enName heName } } } }").then(function(d){
+        var list=(d.relatedTracks||[]).map(function(x){return x.track;}).filter(Boolean); window._npSimilar=list;
+        if(!list.length){ npBox('<div class="empty">No similar songs found.</div>'); return; }
+        npBox('<div class="tracks">'+list.map(function(tk,i){ return '<div class="track" onclick="playSimilar('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
+          '<div class="tk">'+esc(trackName(tk))+(tk.artists&&tk.artists.length?'<div class="sub">'+esc(artNames(tk.artists))+'</div>':'')+'</div>'+
+          (tk.duration?'<div class="time">'+fmt(tk.duration)+'</div>':'')+'</div>'; }).join("")+'</div>');
+      }).catch(function(e){ if(e.message==="login")return; npBox('<div class="empty">Could not load similar songs.</div>'); });
+    }
+    function playSimilar(i){ playTracks(window._npSimilar||[], i, ""); closeOverlay(true); }
+
     function overlay(title, bodyHtml){ closeOverlay(true); var o=document.createElement("div"); o.className="ovl"; o.id="ovl";
       o.innerHTML='<div class="obar"><h2 id="ovlTitle">'+esc(title)+'</h2><button class="iconbtn" onclick="closeOverlay()">'+ic("close")+'</button></div><div id="ovlBody">'+bodyHtml+'</div>'; document.body.appendChild(o); }
     function ovlSet(title, bodyHtml){ var t=$("ovlTitle"), b=$("ovlBody"); if(t) t.textContent=title; if(b){ b.innerHTML=bodyHtml; b.scrollIntoView&&window.scrollTo(0,0); } }
@@ -1546,6 +1576,7 @@ const PAGE = `<!DOCTYPE html>
         '<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
           '<button class="chip" onclick="showZingConfig()">Zing settings</button>'+
+          '<button class="chip" onclick="showZingActions()">Zing actions</button>'+
           '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
@@ -1659,6 +1690,23 @@ const PAGE = `<!DOCTYPE html>
         window._copy=text; diagBox(html);
       }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
     }
+    function showZingActions(){ diagBox('<span class="spinner"></span>Reading Zing actions…');
+      gql("query { __schema { mutationType { fields { name args { name } } } } }").then(function(d){
+        var fields=((((d.__schema)||{}).mutationType)||{}).fields||[];
+        if(!fields.length){ diagBox('<b>Zing actions</b><div class="muted" style="margin-top:8px">No actions were returned (they may be admin-only).</div>'); return; }
+        function verb(n){ var m=n.match(/^(createOne|updateOne|deleteOne|upsertOne|createMany|updateMany|deleteMany|create|update|delete|upsert|set|add|remove|send|generate|import|approve|reject|toggle|assign|revoke|link|unlink|move|reorder|sync|refresh|start|stop|cancel|restore|claim|submit|review)/); return m?m[1]:"other"; }
+        var groups={}; fields.forEach(function(f){ var v=verb(f.name); (groups[v]=groups[v]||[]).push(f); });
+        var text="ZING ACTIONS (operations you can do on the system) — "+fields.length+"\\n\\n"; var html='<b>Zing actions</b> ('+fields.length+')';
+        html+='<div class="muted" style="font-size:.82rem;margin:6px 0">These are the operations Zing\\'s system supports. Shown for reference only.</div>';
+        html+='<div class="chips" style="padding:0;margin:8px 0"><button class="chip" onclick="copyText(this)">Copy</button><button class="chip" onclick="downloadText(\\'zing-actions.txt\\', window._copy)">Download file</button></div>';
+        Object.keys(groups).sort().forEach(function(g){ text+="===== "+g+" ("+groups[g].length+") =====\\n";
+          html+='<div class="set-sec"><h3>'+esc(g)+' ('+groups[g].length+')</h3><div class="card" style="padding:8px 14px">';
+          groups[g].forEach(function(f){ var line=f.name+"("+(f.args||[]).map(function(a){return a.name;}).join(", ")+")"; text+="- "+line+"\\n";
+            html+='<div style="font-size:.8rem;padding:4px 0;border-bottom:1px solid var(--line);word-break:break-word">'+esc(line)+'</div>'; });
+          text+="\\n"; html+='</div></div>'; });
+        window._copy=text; diagBox(html);
+      }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
     function showImageInfo(){ diagBox('<span class="spinner"></span>Reading…');
       gql('query { t: __type(name:"Images"){ fields { name type { kind name ofType { kind name } } } } }').then(function(d){
         var fs=(d.t&&d.t.fields)||[]; var scalar=fs.filter(function(f){ var t=f.type||{}; return t.kind==="SCALAR"||(t.kind==="NON_NULL"&&t.ofType&&t.ofType.kind==="SCALAR"); }).map(function(f){return f.name;});
@@ -1680,7 +1728,8 @@ const PAGE = `<!DOCTYPE html>
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
     window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText;
-    window.showFullSchema=showFullSchema; window.downloadText=downloadText; window.showZingConfig=showZingConfig;
+    window.showFullSchema=showFullSchema; window.downloadText=downloadText; window.showZingConfig=showZingConfig; window.showZingActions=showZingActions;
+    window.openNowPlaying=openNowPlaying; window.npLyrics=npLyrics; window.npSimilar=npSimilar; window.playSimilar=playSimilar;
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
 
