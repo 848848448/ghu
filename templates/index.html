@@ -170,7 +170,9 @@
     <div class="nav">
       <button id="navNew" class="active" onclick="doNew()">🔥 New Releases</button>
       <button id="navArtists" onclick="browseArtists()">🎤 All Artists</button>
+      <button id="navCheck" onclick="runCheck(false)">🔧 Check connection</button>
     </div>
+    <div id="diag"></div>
     <div id="status"></div>
     <div id="view"></div>
   </div>
@@ -232,7 +234,7 @@
       var c=loadCache(); if(c){ artists=c; artistsLoaded=true; return Promise.resolve(true); }
       loading("Loading artist catalog…");
       return post("/api/artists",{}).then(function(d){ artists=d.artists||[]; artistsLoaded=true; saveCache(artists); setStatus("",""); return true; })
-        .catch(function(e){ setStatus("❌ "+e.message,"err"); return false; });
+        .catch(function(e){ setStatus("❌ "+e.message,"err"); runCheck(true); return false; });
     }
 
     function setNav(id){ ["navNew","navArtists"].forEach(function(n){ $(n).classList.toggle("active", n===id); }); }
@@ -252,13 +254,13 @@
       setNav("navNew"); loading("Loading new releases…");
       post("/api/new",{}).then(function(d){
         var albums=d.albums||[]; setStatus("","");
-        if(!albums.length){ setView('<div class="empty">No new releases found.</div>'); return; }
+        if(!albums.length){ setView('<div class="empty">No new releases found.</div>'); runCheck(true); return; }
         window._albums={}; window._albumBack=doNew;
         var cards=albums.map(function(al){ window._albums[al.id]=al;
           var names=(al.artists||[]).map(function(a){return a.enName||"Unknown";}).join(", ")||"Various";
           return albumCard(al, names); }).join("");
         setView('<div class="sec"><div class="sec-head"><h2>🔥 New Releases</h2></div><div class="grid albums">'+cards+'</div></div>');
-      }).catch(function(e){ setStatus("❌ "+e.message,"err"); });
+      }).catch(function(e){ setStatus("❌ "+e.message,"err"); runCheck(true); });
     }
 
     function browseArtists(){
@@ -295,7 +297,7 @@
     function openArtist(id){
       loading("Loading albums…");
       post("/api/artist",{id:id}).then(function(d){
-        var a=d.artist, albums=(a&&a.albums)||[]; setStatus("",""); window._backView=null;
+        var a=d.artist, albums=(a&&a.albums)||[]; setStatus("",""); window._curArtist=(a&&a.enName)||"";
         var head='<div class="back" onclick="doNew()">‹ Back</div><div class="sec-head"><h2>'+esc(a?a.enName:"Artist")+'</h2>'+
           (a&&a.heName?'<span class="count">'+esc(a.heName)+'</span>':'')+'</div>';
         if(!albums.length){ setView(head+'<div class="empty">No albums available for this artist.</div>'); return; }
@@ -358,7 +360,7 @@
       $("curTime").textContent=fmt(audio.currentTime);
       if(audio.duration){ $("seek").value=String(Math.round(audio.currentTime/audio.duration*1000)); } });
     audio.addEventListener("loadedmetadata", function(){ $("durTime").textContent=fmt(audio.duration); });
-    audio.addEventListener("error", function(){ toast("Could not play this track."); });
+    audio.addEventListener("error", function(){ toast("Could not play this track — running a check…"); runCheck(true); });
     $("seek").addEventListener("input", function(){ if(audio.duration){ audio.currentTime=this.value/1000*audio.duration; } });
     $("playBtn").onclick=togglePlay; $("nextBtn").onclick=nextTrack; $("prevBtn").onclick=prevTrack;
     $("npDl").onclick=function(){ var t=queue[qi]; if(t) downloadTrack(t.id, t.file); };
@@ -369,10 +371,37 @@
     function downloadAlbum(albumId){ var al=(window._albums||{})[albumId]; if(!al) return; var tr=al.tracks||[]; var i=0;
       (function nx(){ if(i>=tr.length){ toast("✨ Started all "+tr.length+" downloads."); return; } downloadTrack(tr[i].id, tr[i].file||""); i++; setTimeout(nx,900); })(); }
 
+    // ---------- Diagnostics ----------
+    function diagBox(html){ var d=$("diag"); if(d) d.innerHTML = html ? '<div class="banner" style="border-color:rgba(124,92,255,.4);background:rgba(124,92,255,.08);color:var(--text)">'+html+'</div>' : ''; }
+    function runCheck(auto){
+      diagBox('<span class="spinner"></span>Checking connection…');
+      fetch("/api/check").then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); }).then(function(s){
+        var api=s.api||{}, audio=s.audio||{}, lines=[], hint="";
+        // API line
+        if(api.configured===false) lines.push("❌ API_URL is not set.");
+        else if(api.reachable===false) lines.push("❌ Can't reach your music API. Error: "+esc(api.error||"connection failed"));
+        else if(api.status!==200) lines.push("⚠️ Music API answered with code "+api.status+".");
+        else if(!api.hasData) lines.push("⚠️ Music API is reachable but returned no artists — check API_URL.");
+        else lines.push("✅ Music API is connected.");
+        // Audio line
+        if(audio.configured===false) lines.push("❌ AUDIO_API_BASE is not set.");
+        else if(audio.reachable===false) lines.push("❌ Can't reach your audio server. Error: "+esc(audio.error||"connection failed"));
+        else if(audio.status===403) lines.push("❌ Audio server said 403 — your USER_TOKEN is expired or wrong.");
+        else lines.push("✅ Audio server is reachable (code "+audio.status+").");
+        // Hint
+        if(api.reachable===false || audio.reachable===false){
+          hint='<div style="margin-top:10px">🔎 The server cannot be reached. This usually means the music server uses a self-signed certificate that Cloudflare cannot accept. The fix is to host this on a Python server instead — tell me and I will set it up.</div>';
+        } else if(audio.status===403){
+          hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, then redeploy.</div>';
+        }
+        diagBox('<b>Connection check</b><div style="margin-top:8px;line-height:1.9">'+lines.join("<br>")+'</div>'+hint);
+      }).catch(function(e){ if(e&&e.message==="login") return; diagBox("❌ Could not run the check: "+esc(e.message||e)); });
+    }
+
     // expose
     window.openArtist=openArtist; window.openAlbum=openAlbum; window.playAlbum=playAlbum;
     window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum; window.doNew=doNew;
-    window.browseArtists=browseArtists; window.filterGrid=filterGrid;
+    window.browseArtists=browseArtists; window.filterGrid=filterGrid; window.runCheck=runCheck;
 
     $("q").addEventListener("keydown", function(e){ if(e.key==="Enter") doSearch(); });
     $("q").addEventListener("input", function(){ if(!this.value.trim()){} });
