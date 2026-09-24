@@ -1,0 +1,3 @@
+API_URL=http://localhost:5098/graphql
+AUDIO_API_BASE=http://localhost:5098/stream
+USER_TOKEN=FRESH-TOKEN-123
