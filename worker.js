@@ -203,10 +203,12 @@ async function handleNew(env) {
 }
 
 async function handleCheck(env) {
-  // Diagnose connectivity: can the Worker actually reach your servers?
+  // Diagnose connectivity: can the Worker actually reach your servers, and
+  // does a REAL track play with the current token?
   const out = { api: {}, audio: {} };
+  let realTrackId = null;
 
-  // Test the GraphQL API.
+  // Test the GraphQL API and grab a real track id to test playback with.
   if (!env.API_URL) {
     out.api = { configured: false };
   } else {
@@ -214,28 +216,36 @@ async function handleCheck(env) {
       const r = await fetch(env.API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: "query { artists(skip: 0, take: 1) { id } }" }),
+        body: JSON.stringify({ query: "query { albums(take: 5) { id tracks { id } } }" }),
       });
       out.api = { reachable: true, status: r.status };
       if (r.ok) {
         const d = await r.json().catch(() => ({}));
-        out.api.hasData = !!(d && d.data && d.data.artists && d.data.artists.length);
         if (d && d.errors) out.api.graphqlError = true;
+        const albums = ((d.data || {}).albums) || [];
+        out.api.hasData = albums.length > 0;
+        for (let i = 0; i < albums.length; i++) {
+          const tracks = albums[i].tracks || [];
+          if (tracks.length) { realTrackId = tracks[0].id; break; }
+        }
       }
     } catch (e) {
       out.api = { reachable: false, error: String((e && e.message) || e) };
     }
   }
 
-  // Test the audio server (does it respond at all?).
+  // Test the audio server with a real track id when we have one.
   if (!env.AUDIO_API_BASE) {
     out.audio = { configured: false };
   } else {
+    const tid = realTrackId != null ? realTrackId : 1;
     try {
       const testUrl =
-        env.AUDIO_API_BASE + "?trackId=1&token=" + encodeURIComponent(env.USER_TOKEN || "");
+        env.AUDIO_API_BASE +
+        "?trackId=" + encodeURIComponent(tid) +
+        "&token=" + encodeURIComponent(env.USER_TOKEN || "");
       const r = await fetch(testUrl, { headers: { Range: "bytes=0-0" } });
-      out.audio = { reachable: true, status: r.status };
+      out.audio = { reachable: true, status: r.status, realTrack: realTrackId != null };
     } catch (e) {
       out.audio = { reachable: false, error: String((e && e.message) || e) };
     }
