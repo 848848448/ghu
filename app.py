@@ -72,6 +72,9 @@ if not (API_URL and AUDIO_API_BASE and USER_TOKEN):
 if USER_TOKEN in ("PASTE_YOUR_JWT_TOKEN_HERE", "PASTE YOUR JWT TOKEN HERE"):
     USER_TOKEN = ""
 
+# Optional master password for the in-app admin (managing access codes).
+SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "").strip()
+
 # Optional auto-login: when set, the app logs in itself to refresh the token.
 ZING_EMAIL = os.environ.get("ZING_EMAIL", "").strip()
 ZING_PASSWORD = os.environ.get("ZING_PASSWORD", "").strip()
@@ -88,6 +91,33 @@ CACHE_TTL = 86400  # 24 hours, same as the original script
 # --------------------------------------------------------------------------- #
 # Auto-login (optional)
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Access codes (local mirror of the Worker's KV-backed admin feature).
+# Stored in a local, git-ignored JSON file so the same admin UI works here.
+# --------------------------------------------------------------------------- #
+def _codes_path():
+    return os.path.join(CACHE_DIR, "access_codes.json")
+
+
+def load_codes():
+    try:
+        with open(_codes_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def save_codes(codes):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(_codes_path(), "w", encoding="utf-8") as f:
+        json.dump(codes, f, ensure_ascii=False)
+
+
+def is_admin(body):
+    return bool(SITE_PASSWORD) and str((body or {}).get("admin", "")) == SITE_PASSWORD
+
+
 def can_firebase():
     return bool(FIREBASE_API_KEY and FIREBASE_REFRESH_TOKEN)
 
@@ -393,8 +423,51 @@ def api_status():
             "autoLogin": bool(can_firebase() or can_auto_login()),
             "firebase": bool(can_firebase()),
             "configured": bool(API_URL and AUDIO_API_BASE and has_auth()),
+            "kv": True,
         }
     )
+
+
+@app.route("/api/admin/list", methods=["POST"])
+def api_admin_list():
+    body = request.get_json(silent=True) or {}
+    if not is_admin(body):
+        return jsonify({"error": "Wrong password."}), 403
+    return jsonify({"kv": True, "codes": load_codes()})
+
+
+@app.route("/api/admin/add", methods=["POST"])
+def api_admin_add():
+    body = request.get_json(silent=True) or {}
+    if not is_admin(body):
+        return jsonify({"error": "Wrong password."}), 403
+    name = str(body.get("name", "")).strip()[:60]
+    code = str(body.get("code", "")).strip()
+    if not code:
+        return jsonify({"error": "Enter a code."}), 400
+    if len(code) < 3:
+        return jsonify({"error": "Use at least 3 characters."}), 400
+    if code == SITE_PASSWORD:
+        return jsonify({"error": "That is the main password. Pick a different code."}), 400
+    codes = load_codes()
+    existing = next((c for c in codes if c.get("code") == code), None)
+    if existing:
+        existing["name"] = name or existing.get("name")
+    else:
+        codes.append({"name": name or "Someone", "code": code, "added": int(time.time() * 1000)})
+    save_codes(codes)
+    return jsonify({"ok": True, "codes": codes})
+
+
+@app.route("/api/admin/remove", methods=["POST"])
+def api_admin_remove():
+    body = request.get_json(silent=True) or {}
+    if not is_admin(body):
+        return jsonify({"error": "Wrong password."}), 403
+    code = str(body.get("code", ""))
+    codes = [c for c in load_codes() if c.get("code") != code]
+    save_codes(codes)
+    return jsonify({"ok": True, "codes": codes})
 
 
 @app.route("/api/artists", methods=["POST"])

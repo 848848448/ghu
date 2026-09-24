@@ -13,3 +13,19 @@
 name = "jewish-music-downloader"
 main = "worker.js"
 compatibility_date = "2025-01-01"
+
+# --- Optional: per-person access codes (the "Who can access" admin screen) ---
+# To let the owner give each person their own sign-in code from inside the app,
+# bind a KV namespace named ZING_KV. It is free.
+#
+#   1. Create a namespace:  npx wrangler kv namespace create ZING_KV
+#      (or in the dashboard: Storage & Databases -> KV -> Create instance)
+#   2. Put the id it prints below and uncomment these two lines:
+#
+# [[kv_namespaces]]
+# binding = "ZING_KV"
+# id = "PASTE_YOUR_KV_NAMESPACE_ID_HERE"
+#
+# The master password is the SITE_PASSWORD secret; it always works and is what
+# unlocks the admin screen. Without ZING_KV the app still works — everyone just
+# uses the one SITE_PASSWORD.
