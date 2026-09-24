@@ -379,28 +379,28 @@ def fetch_artist_details(artist_id):
 
 
 def fetch_new_releases():
-    query = """
-    query {
-      albums(take: 50) {
-        id
-        enName
-        heName
-        images { cdnSmall cdnMedium medium small }
-        artists {
-          enName
-          heName
-          image
-        }
-        tracks { id }
-      }
-    }
-    """
-    data = graphql(query)
-    if not data or "errors" in data:
-        return []
-    albums = data.get("data", {}).get("albums", [])
-    if albums:
-        return sorted(albums, key=lambda x: int(x.get("id", 0)), reverse=True)[:10]
+    fields = (
+        "id enName heName releasedAt "
+        "images { cdnSmall cdnMedium medium small } "
+        "artists { enName heName image } tracks { id }"
+    )
+    # Ask the API for the newest albums directly (Album has a releasedAt date);
+    # fall back to id order, then to an unordered page sorted here.
+    attempts = [
+        "query { albums(take: 20, orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
+        "query { albums(take: 20, orderBy: [{ id: desc }]) { " + fields + " } }",
+        "query { albums(take: 50) { " + fields + " } }",
+    ]
+    for i, q in enumerate(attempts):
+        data = graphql(q)
+        if not data or data.get("errors"):
+            continue
+        albums = data.get("data", {}).get("albums") or []
+        if not albums:
+            continue
+        if i == len(attempts) - 1:
+            albums = sorted(albums, key=lambda x: int(x.get("id", 0)), reverse=True)
+        return albums[:12]
     return []
 
 

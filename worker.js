@@ -487,15 +487,29 @@ async function handleArtist(request, env) {
 
 async function handleNew(env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
-  const query =
-    "query { albums(take: 50) { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id } } }";
-  const data = await graphql(env, query);
-  if (!data || data.errors) return json({ albums: [] });
-  let albums = ((data.data || {}).albums) || [];
-  albums = albums
-    .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
-    .slice(0, 10);
-  return json({ albums });
+  const fields =
+    "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
+  // Ask the API for the newest albums directly. Album has a releasedAt date;
+  // fall back to id order, then to an unordered page sorted here, so this
+  // keeps working even if the API rejects an orderBy field.
+  const attempts = [
+    "query { albums(take: 20, orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
+    "query { albums(take: 20, orderBy: [{ id: desc }]) { " + fields + " } }",
+    "query { albums(take: 50) { " + fields + " } }",
+  ];
+  let albums = [];
+  for (let i = 0; i < attempts.length; i++) {
+    const data = await graphql(env, attempts[i]);
+    if (data && !data.errors && ((data.data || {}).albums || []).length) {
+      albums = data.data.albums;
+      if (i === attempts.length - 1) {
+        // Unordered fallback: sort newest-first ourselves.
+        albums = albums.slice().sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+      }
+      break;
+    }
+  }
+  return json({ albums: albums.slice(0, 12) });
 }
 
 // Read a JWT's non-secret claims (issuer, audience, expiry) to identify the
