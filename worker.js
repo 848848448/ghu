@@ -43,7 +43,8 @@ export default {
           configured: !!(env.API_URL && env.AUDIO_API_BASE && hasAuth(env)),
           locked: locked,
           authed: authed,
-          kv: !!env.ZING_KV,
+          kv: hasStore(env),
+          d1: !!env.DB,
         });
       }
       if (path === "/api/config") {
@@ -164,27 +165,64 @@ function logout() {
 }
 
 // --------------------------------------------------------------------------- //
-// Access codes (optional): when a KV namespace named ZING_KV is bound, the
-// owner can give named access codes to other people from the in-app admin
-// screen. Any stored code — or the master SITE_PASSWORD — can sign in.
-// Managing codes requires the master password on every admin request.
+// Storage for accounts + site settings. Uses a Cloudflare D1 SQL database
+// (binding DB) when one is bound, otherwise a KV namespace (binding ZING_KV).
+// With either bound, the owner can manage access codes and app settings from
+// the in-app admin screen. Any stored code — or the master SITE_PASSWORD —
+// can sign in. Managing anything requires the master password.
 // --------------------------------------------------------------------------- //
 const CODES_KEY = "access_codes";
+const CONFIG_KEY = "site_config";
+const CONFIG_FEATURES = ["albums", "search", "genres", "playlists", "artists", "stories", "downloads", "favorites"];
+
+function hasStore(env) {
+  return !!(env.DB || env.ZING_KV);
+}
+
+let D1_READY = false;
+async function ensureD1(env) {
+  if (!env.DB || D1_READY) return;
+  try {
+    await env.DB.batch([
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS accounts (code TEXT PRIMARY KEY, name TEXT, added INTEGER)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)"),
+    ]);
+    D1_READY = true;
+  } catch (e) { /* ignore; calls below will surface errors */ }
+}
 
 async function getCodes(env) {
-  if (!env.ZING_KV) return null; // KV not bound → feature unavailable
-  try {
-    const raw = await env.ZING_KV.get(CODES_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return Array.isArray(list) ? list : [];
-  } catch (e) {
-    return [];
+  if (env.DB) {
+    await ensureD1(env);
+    try {
+      const r = await env.DB.prepare("SELECT code, name, added FROM accounts ORDER BY added").all();
+      return (r.results || []).map((x) => ({ code: x.code, name: x.name, added: x.added }));
+    } catch (e) { return []; }
   }
+  if (env.ZING_KV) {
+    try {
+      const raw = await env.ZING_KV.get(CODES_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (e) { return []; }
+  }
+  return null; // no store bound → feature unavailable
 }
 
 async function saveCodes(env, list) {
-  if (!env.ZING_KV) return;
-  await env.ZING_KV.put(CODES_KEY, JSON.stringify(list));
+  if (env.DB) {
+    await ensureD1(env);
+    const stmts = [env.DB.prepare("DELETE FROM accounts")];
+    list.forEach((c) => {
+      stmts.push(env.DB.prepare("INSERT OR REPLACE INTO accounts (code, name, added) VALUES (?, ?, ?)")
+        .bind(c.code, c.name || "", c.added || Date.now()));
+    });
+    await env.DB.batch(stmts);
+    return;
+  }
+  if (env.ZING_KV) {
+    await env.ZING_KV.put(CODES_KEY, JSON.stringify(list));
+  }
 }
 
 async function codeMatches(env, pw) {
@@ -199,17 +237,23 @@ function isAdmin(env, body) {
 
 // --------------------------------------------------------------------------- //
 // Site settings (admin-controlled, shared for everyone): app name, an
-// announcement, and feature on/off toggles. Stored in KV so the whole site
-// picks them up. Reads are public (no secrets); writes need the master password.
+// announcement, and feature on/off toggles. Stored in D1 or KV so the whole
+// site picks them up. Reads are public (no secrets); writes need the master
+// password.
 // --------------------------------------------------------------------------- //
-const CONFIG_KEY = "site_config";
-const CONFIG_FEATURES = ["albums", "search", "genres", "playlists", "artists", "stories", "downloads", "favorites"];
-
 async function getConfig(env) {
   const out = { appName: "", announcement: "", features: {} };
-  if (!env.ZING_KV) return out;
+  let raw = null;
+  if (env.DB) {
+    await ensureD1(env);
+    try {
+      const r = await env.DB.prepare("SELECT v FROM settings WHERE k = ?").bind(CONFIG_KEY).first();
+      raw = r ? r.v : null;
+    } catch (e) { /* ignore */ }
+  } else if (env.ZING_KV) {
+    try { raw = await env.ZING_KV.get(CONFIG_KEY); } catch (e) { /* ignore */ }
+  }
   try {
-    const raw = await env.ZING_KV.get(CONFIG_KEY);
     const c = raw ? JSON.parse(raw) : {};
     if (c && typeof c === "object") {
       out.appName = typeof c.appName === "string" ? c.appName : "";
@@ -220,10 +264,20 @@ async function getConfig(env) {
   return out;
 }
 
+async function saveConfig(env, cfg) {
+  const s = JSON.stringify(cfg);
+  if (env.DB) {
+    await ensureD1(env);
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (k, v) VALUES (?, ?)").bind(CONFIG_KEY, s).run();
+    return;
+  }
+  if (env.ZING_KV) await env.ZING_KV.put(CONFIG_KEY, s);
+}
+
 async function handleAdminConfig(request, env) {
   const body = await request.json().catch(() => ({}));
   if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
-  if (!env.ZING_KV) return json({ error: "Settings storage is not set up yet." }, 400);
+  if (!hasStore(env)) return json({ error: "Settings storage is not set up yet." }, 400);
   const inC = (body.config && typeof body.config === "object") ? body.config : {};
   const clean = {
     appName: (inC.appName || "").toString().trim().slice(0, 60),
@@ -232,15 +286,15 @@ async function handleAdminConfig(request, env) {
   };
   const inF = (inC.features && typeof inC.features === "object") ? inC.features : {};
   CONFIG_FEATURES.forEach((k) => { clean.features[k] = inF[k] !== false; });
-  await env.ZING_KV.put(CONFIG_KEY, JSON.stringify(clean));
+  await saveConfig(env, clean);
   return json({ ok: true, config: clean });
 }
 
-// GET the list of access codes (admin only). Reports whether KV is available.
+// GET the list of access codes (admin only). Reports whether a store is set up.
 async function handleAdminList(request, env) {
   const body = await request.json().catch(() => ({}));
   if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
-  if (!env.ZING_KV) return json({ kv: false, codes: [] });
+  if (!hasStore(env)) return json({ kv: false, codes: [] });
   const codes = await getCodes(env);
   return json({ kv: true, codes: codes || [] });
 }
@@ -249,7 +303,7 @@ async function handleAdminList(request, env) {
 async function handleAdminAdd(request, env) {
   const body = await request.json().catch(() => ({}));
   if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
-  if (!env.ZING_KV) return json({ error: "Access-code storage is not set up yet." }, 400);
+  if (!hasStore(env)) return json({ error: "Account storage is not set up yet." }, 400);
   const name = (body.name || "").toString().trim().slice(0, 60);
   const code = (body.code || "").toString().trim();
   if (!code) return json({ error: "Enter a code." }, 400);
@@ -270,7 +324,7 @@ async function handleAdminAdd(request, env) {
 async function handleAdminRemove(request, env) {
   const body = await request.json().catch(() => ({}));
   if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
-  if (!env.ZING_KV) return json({ error: "Access-code storage is not set up yet." }, 400);
+  if (!hasStore(env)) return json({ error: "Account storage is not set up yet." }, 400);
   const code = (body.code || "").toString();
   const codes = (await getCodes(env)) || [];
   const next = codes.filter((c) => !(c && c.code === code));
@@ -1797,11 +1851,18 @@ const PAGE = `<!DOCTYPE html>
         .catch(function(e){ toast(e.message||"Could not remove."); }); }
     function kvSetupHtml(){ return '<div class="card" style="padding:16px;line-height:1.6">'+
       '<div style="font-weight:700;margin-bottom:8px">One quick setup step</div>'+
-      '<p class="muted" style="margin:0 0 12px">To give each person their own code, the app needs a small storage area (Cloudflare KV — it is free).</p>'+
+      '<p class="muted" style="margin:0 0 12px">To manage accounts and app settings, the app needs a small storage area (free). You can use a <b>D1 SQL database</b> or a <b>KV namespace</b> — either one.</p>'+
+      '<div style="font-weight:600;margin:2px 0 4px">Option A — D1 (SQL database)</div>'+
       '<ol class="steps muted">'+
-        '<li>In Cloudflare, open <b>Storage &amp; Databases → KV</b> and click <b>Create instance</b>. Give it any name.</li>'+
-        '<li>Open your Worker → <b>Settings → Bindings</b> → <b>Add binding</b> → <b>KV namespace</b>. Set the variable name to <code>ZING_KV</code> and choose the namespace you just made.</li>'+
-        '<li>Deploy again, then come back to this screen.</li>'+
+        '<li>In Cloudflare, open <b>Storage &amp; Databases → D1</b> → <b>Create</b>. Give it any name.</li>'+
+        '<li>Open your Worker → <b>Settings → Bindings</b> → <b>Add binding</b> → <b>D1 database</b>. Set the variable name to <code>DB</code> and choose the database you just made.</li>'+
+        '<li>Deploy again, then come back. (The tables are created automatically.)</li>'+
+      '</ol>'+
+      '<div style="font-weight:600;margin:10px 0 4px">Option B — KV</div>'+
+      '<ol class="steps muted">'+
+        '<li><b>Storage &amp; Databases → KV</b> → <b>Create instance</b>.</li>'+
+        '<li>Worker → <b>Settings → Bindings</b> → <b>KV namespace</b>, variable name <code>ZING_KV</code>.</li>'+
+        '<li>Deploy again.</li>'+
       '</ol>'+
       '<p class="muted" style="margin:12px 0 0">Until then, everyone signs in with the one main password — that keeps working.</p></div>'; }
 
