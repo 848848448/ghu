@@ -759,6 +759,35 @@ def api_query():
         return jsonify({"error": str(exc)}), 502
 
 
+@app.route("/api/authquery", methods=["POST"])
+def api_authquery():
+    """Authenticated GraphQL passthrough (attaches the login token)."""
+    if not API_URL:
+        return jsonify({"error": "Server not configured."}), 400
+    body = request.get_json(silent=True) or {}
+    if not body.get("query"):
+        return jsonify({"error": "Missing query."}), 400
+    payload = {"query": body["query"], "variables": body.get("variables", {})}
+
+    def call(tok):
+        return requests.post(API_URL, json=payload, verify=False, timeout=30,
+                             headers={"Content-Type": "application/json",
+                                      "Authorization": "Bearer " + (tok or "")})
+    try:
+        r = call(current_token(False))
+        d = r.json()
+        import re as _re
+        looks_auth = r.status_code == 401 or (
+            d.get("errors") and _re.search(r"auth|forbidden|denied|token|unauthor|login|permission",
+                                           str(d.get("errors")), _re.I))
+        if looks_auth and (can_firebase() or can_auto_login()):
+            r = call(current_token(True))
+            d = r.json()
+        return jsonify(d)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 502
+
+
 @app.route("/api/play")
 def api_play():
     """Stream a track for in-browser playback (inline), forwarding Range
