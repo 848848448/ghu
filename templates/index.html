@@ -574,6 +574,7 @@
         '</div></div>'+
         '<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
+          '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
           '<div id="diag" style="margin-top:14px"></div></div>'+
@@ -649,6 +650,21 @@
         window._copy=txt; diagBox('<b>API structure</b> <button class="btn sm" onclick="copyText(this)">Copy</button><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.75rem;margin-top:8px">'+esc(txt)+'</pre>');
       }).catch(function(e){ diagBox("Error: "+esc(e.message||e)); });
     }
+    function downloadText(name, text){
+      try{ var blob=new Blob([text||""],{type:"text/plain;charset=utf-8"}); var url=URL.createObjectURL(blob);
+        var a=document.createElement("a"); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 4000); toast("Saved "+name); }catch(e){ toast("Could not download."); }
+    }
+    function showFullSchema(){ diagBox('<span class="spinner"></span>Reading the whole structure…');
+      fetch("/api/schema/full").then(function(r){ if(r.status===401){location.href="/";throw new Error("login");} return r.json(); }).then(function(s){
+        if(s.error){ diagBox("Error: "+esc(s.error)); return; }
+        window._copy=s.text||""; var c=s.counts||{};
+        diagBox('<b>Full structure</b>'+
+          '<div class="muted" style="margin:8px 0;font-size:.85rem">'+(c.queries||0)+' queries · '+(c.types||0)+' types · '+(c.inputs||0)+' filters · '+(c.enums||0)+' enums'+(c.mutations?(' · '+c.mutations+' mutations'):'')+'</div>'+
+          '<div class="chips" style="padding:0"><button class="chip" onclick="copyText(this)">Copy</button><button class="chip" onclick="downloadText(\'zing-structure.txt\', window._copy)">Download file</button></div>'+
+          '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:10px;max-height:52vh;overflow:auto">'+esc(s.text||"")+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
     function showImageInfo(){ diagBox('<span class="spinner"></span>Reading…');
       gql('query { t: __type(name:"Images"){ fields { name type { kind name ofType { kind name } } } } }').then(function(d){
         var fs=(d.t&&d.t.fields)||[]; var scalar=fs.filter(function(f){ var t=f.type||{}; return t.kind==="SCALAR"||(t.kind==="NON_NULL"&&t.ofType&&t.ofType.kind==="SCALAR"); }).map(function(f){return f.name;});
@@ -669,6 +685,7 @@
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
     window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText;
+    window.showFullSchema=showFullSchema; window.downloadText=downloadText;
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
 
