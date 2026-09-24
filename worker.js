@@ -960,6 +960,8 @@ const PAGE = `<!DOCTYPE html>
     .hcard{ flex:0 0 auto; width:150px; scroll-snap-align:start; cursor:pointer; }
     .hcard.artist{ width:120px; text-align:center; }
     .hcard.wide{ width:200px; }
+    .banner-card{ flex:0 0 auto; width:300px; max-width:82vw; aspect-ratio:16/9; border-radius:16px; scroll-snap-align:start; cursor:pointer;
+      background-size:cover; background-position:center; background-color:var(--surface-2); box-shadow:0 8px 22px rgba(0,0,0,.35); }
 
     .cover{ width:100%; aspect-ratio:1/1; border-radius:14px; display:grid; place-items:center; margin-bottom:9px;
       color:rgba(255,255,255,.95); box-shadow:0 8px 20px rgba(0,0,0,.3), inset 0 0 40px rgba(0,0,0,.18);
@@ -1253,23 +1255,46 @@ const PAGE = `<!DOCTYPE html>
       return '<div class="sec-head"><h2>'+esc(title)+'</h2>'+see+'</div>'; }
 
     // ---------- Home ----------
+    function bannerImg(b){ return (SET.lang==="he") ? (b.heImage||b.enImage) : (b.enImage||b.heImage); }
+    function bannerCard(b){ var u=imgUrl(bannerImg(b)); if(!u) return "";
+      return '<div class="banner-card" onclick="openBannerUrl('+esc(JSON.stringify(b.url||"")).replace(/"/g,"&quot;")+')" style="background-image:url(\\''+esc(u)+'\\')"></div>'; }
+    function openBannerUrl(url){ url=url||""; var m;
+      if((m=url.match(/album[s]?[\\/=](\\d+)/i))){ openAlbum(+m[1]); return; }
+      if((m=url.match(/artist[s]?[\\/=](\\d+)/i))){ openArtist(+m[1]); return; }
+      if((m=url.match(/playlist[s]?[\\/=](\\d+)/i))){ openPlaylist(+m[1]); return; }
+      if(/^https?:/i.test(url)){ window.open(url,"_blank"); } }
     function home(){
       loading("Loading…");
+      var pBan=gql("query { banners(take: 15, orderBy: [{ index: asc }]) { id enName heName enImage heImage url index platform } }").then(function(d){return d.banners||[];}).catch(function(){return [];});
       var pNew=post("/api/new",{}).then(function(d){return d.albums||[];}).catch(function(){return [];});
+      var pPop=gql("query { getMostPlayed(input: { type: ALBUMS, period: MONTH, limit: 12 }) { albumsWithEntities { plays album { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } } }").then(function(d){ return (((d.getMostPlayed||{}).albumsWithEntities)||[]).map(function(x){return x.album;}).filter(Boolean); }).catch(function(){return [];});
       var pGen=gql("query { genres(take: 20) { id enName heName } }").then(function(d){return d.genres||[];}).catch(function(){return [];});
+      var pCat=gql("query { categories(take: 40) { id enName heName } }").then(function(d){return d.categories||[];}).catch(function(){return [];});
       var pPl=gql("query { playlists(take: 20) { id name enName heName image cdnImage } }").then(function(d){return d.playlists||[];}).catch(function(){return [];});
-      Promise.all([pNew,pGen,pPl]).then(function(res){
+      Promise.all([pBan,pNew,pPop,pGen,pCat,pPl]).then(function(res){
         setStatus("");
-        var albums=res[0], genres=res[1], playlists=res[2];
+        var banners=res[0], albums=res[1], popular=res[2], genres=res[3], categories=res[4], playlists=res[5];
         window._albums=window._albums||{};
         var html="";
+        if(banners.length){
+          var bcards=banners.map(bannerCard).filter(Boolean).join("");
+          if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
+        }
         if(albums.length){
           html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow">'+albums.map(function(al){ window._albums[al.id]=al;
+            return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
+        }
+        if(popular.length){
+          html+='<div class="sec">'+secHead("Popular this month")+'<div class="hrow">'+popular.map(function(al){ window._albums[al.id]=al;
             return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
         }
         if(genres.length){
           html+='<div class="sec">'+secHead("Genres","genres")+'<div class="chips">'+genres.map(function(g){
             return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div></div>';
+        }
+        if(categories.length){
+          html+='<div class="sec">'+secHead("Categories")+'<div class="chips">'+categories.map(function(c){
+            return '<button class="chip" onclick="openCategory('+c.id+')">'+esc(genName(c))+'</button>'; }).join("")+'</div></div>';
         }
         if(playlists.length){
           html+='<div class="sec">'+secHead("Playlists","playlists")+'<div class="hrow">'+playlists.map(function(p){ var nm=plName(p);
@@ -1278,6 +1303,14 @@ const PAGE = `<!DOCTYPE html>
         if(!html) html='<div class="empty">Nothing to show yet. Check Settings.</div>';
         setView(html);
       });
+    }
+    function openCategory(id){ loading("Loading…");
+      gql("query { category(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
+        var g=d.category; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=function(){ go("home"); };
+        var head='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead(g?genName(g):"Category");
+        if(!albums.length){ setView(head+'<div class="empty">No albums in this category.</div>'); return; }
+        window._albums=window._albums||{}; setView(head+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al, artNames(al.artists)); }).join("")+'</div>');
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
 
     // ---------- Search (real, across songs / albums / artists) ----------
@@ -1601,6 +1634,7 @@ const PAGE = `<!DOCTYPE html>
 
     // expose
     window.go=go; window.openArtist=openArtist; window.openAlbum=openAlbum; window.openGenre=openGenre; window.openPlaylist=openPlaylist;
+    window.openCategory=openCategory; window.openBannerUrl=openBannerUrl;
     window.browseAlbums=browseAlbums; window.loadMoreAlbums=loadMoreAlbums; window.playSearchTrack=playSearchTrack;
     window.playAlbum=playAlbum; window.playList=playList; window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum;
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
