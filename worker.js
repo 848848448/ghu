@@ -397,7 +397,7 @@ async function handleFullSchema(env) {
   const q =
     "query { __schema { queryType { name } mutationType { name } types { " +
     "kind name " +
-    "fields(includeDeprecated: true) { name args { name type { " + TYPE_REF + " } type { " + TYPE_REF + " } } " +
+    "fields(includeDeprecated: true) { name args { name type { " + TYPE_REF + " } } type { " + TYPE_REF + " } } " +
     "inputFields { name type { " + TYPE_REF + " } } " +
     "enumValues(includeDeprecated: true) { name } " +
     "} } }";
