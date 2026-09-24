@@ -1280,22 +1280,49 @@ const PAGE = `<!DOCTYPE html>
       });
     }
 
-    // ---------- Search ----------
+    // ---------- Search (real, across songs / albums / artists) ----------
+    var _searchT, _searchSeq=0, _searchTracks=[];
     function searchView(){
-      setView('<div class="searchbar">'+ic("search")+'<input id="q" type="text" placeholder="Search artists…" autocomplete="off" /></div><div id="sres" class="pad"></div>');
+      setView('<div class="searchbar">'+ic("search")+'<input id="q" type="text" placeholder="Search songs, albums, artists…" autocomplete="off" /></div><div id="sres"></div>');
       var q=$("q"); q.focus();
-      q.addEventListener("input", function(){ doSearch(this.value); });
+      q.addEventListener("input", function(){ var val=this.value; clearTimeout(_searchT); _searchT=setTimeout(function(){ doSearch(val); }, 280); });
+      doSearch("");
     }
+    function nameFilter(){ return "OR:[{enName:{contains:$t,mode:insensitive}},{heName:{contains:$t,mode:insensitive}}]"; }
     function doSearch(v){
-      var q=(v||"").trim().toLowerCase();
-      ensureArtists().then(function(ok){ if(!ok) return;
-        var box=$("sres"); if(!box) return;
-        if(!q){ box.innerHTML='<div class="empty">Type an artist name.</div>'; return; }
-        var m=artists.filter(function(a){ return (a.enName||"").toLowerCase().indexOf(q)>=0 || (a.heName||"").toLowerCase().indexOf(q)>=0; })
-          .sort(function(a,b){ return (a.enName||"").localeCompare(b.enName||""); }).slice(0,60);
-        box.innerHTML = m.length ? '<div class="grid artists">'+m.map(artistTile).join("")+'</div>' : '<div class="empty">No artists for “'+esc(q)+'”.</div>';
-      });
+      var q=(v||"").trim(); var box=$("sres"); if(!box) return;
+      if(!q){ box.innerHTML='<div class="empty">Type to search songs, albums and artists.</div>'; return; }
+      box.innerHTML='<div class="empty"><span class="spinner"></span>Searching…</div>';
+      var seq=++_searchSeq;
+      var query="query($t:String!){"+
+        " artists(take:24, where:{"+nameFilter()+"}){ id enName heName image }"+
+        " albums(take:24, where:{"+nameFilter()+"}){ id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } }"+
+        " tracks(take:30, where:{"+nameFilter()+"}){ id enName heName file duration album { images { cdnSmall cdnMedium medium small } } artists { enName heName } }"+
+        " }";
+      gql(query,{t:q}).then(function(d){
+        if(seq!==_searchSeq) return; // a newer search superseded this one
+        var arts=d.artists||[], albs=d.albums||[], trks=d.tracks||[];
+        window._albums=window._albums||{}; albs.forEach(function(al){ window._albums[al.id]=al; });
+        _searchTracks=trks;
+        if(!arts.length&&!albs.length&&!trks.length){ box.innerHTML='<div class="empty">Nothing found for “'+esc(q)+'”.</div>'; return; }
+        var html="";
+        if(trks.length){
+          html+='<div class="sec">'+secHead("Songs")+'<div class="tracks" style="margin:0 18px">'+trks.map(function(t,i){
+            return '<div class="track" onclick="playSearchTrack('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
+              '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
+              (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
+              '<button class="dl" onclick="event.stopPropagation();downloadTrack('+t.id+', '+esc(JSON.stringify(t.file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button></div>'; }).join("")+'</div></div>';
+        }
+        if(albs.length){
+          html+='<div class="sec">'+secHead("Albums")+'<div class="grid albums">'+albs.map(function(al){ return albumTile(al, artNames(al.artists)); }).join("")+'</div></div>';
+        }
+        if(arts.length){
+          html+='<div class="sec">'+secHead("Artists")+'<div class="grid artists">'+arts.map(artistTile).join("")+'</div></div>';
+        }
+        box.innerHTML=html;
+      }).catch(function(e){ if(seq!==_searchSeq) return; if(e.message==="login")return; box.innerHTML='<div class="empty">Search error: '+esc(e.message)+'</div>'; });
     }
+    function playSearchTrack(i){ playTracks(_searchTracks||[], i, ""); }
 
     // ---------- Genres ----------
     function browseGenres(){ loading("Loading genres…");
@@ -1574,7 +1601,7 @@ const PAGE = `<!DOCTYPE html>
 
     // expose
     window.go=go; window.openArtist=openArtist; window.openAlbum=openAlbum; window.openGenre=openGenre; window.openPlaylist=openPlaylist;
-    window.browseAlbums=browseAlbums; window.loadMoreAlbums=loadMoreAlbums;
+    window.browseAlbums=browseAlbums; window.loadMoreAlbums=loadMoreAlbums; window.playSearchTrack=playSearchTrack;
     window.playAlbum=playAlbum; window.playList=playList; window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum;
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
