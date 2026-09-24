@@ -243,11 +243,15 @@ async function introspectAuthMutations(env) {
   }
 }
 
-// List the top-level Query fields (the "structure" of the API).
+// List the top-level Query fields AND the content types' fields (the full
+// "structure" of the API), so the UI can show real names, durations, etc.
 async function handleSchema(env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
   const q =
-    "query { __schema { queryType { fields { name args { name } type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } } }";
+    "query { __schema { " +
+    "queryType { fields { name args { name } type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } " +
+    "types { name kind fields { name type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } " +
+    "} }";
   try {
     const r = await fetch(env.API_URL, {
       method: "POST",
@@ -258,17 +262,26 @@ async function handleSchema(env) {
     if (d && d.errors && d.errors.length) {
       return json({ error: (d.errors[0] && d.errors[0].message) || "introspection blocked" }, 502);
     }
-    const fields = (((d.data || {}).__schema || {}).queryType || {}).fields || [];
+    const schema = (d.data || {}).__schema || {};
     const tn = (t) => {
       while (t && !t.name && t.ofType) t = t.ofType;
       return t ? t.name : null;
     };
-    const out = fields.map((f) => ({
+    const queryFields = ((schema.queryType || {}).fields || []).map((f) => ({
       name: f.name,
       args: (f.args || []).map((a) => a.name),
       returns: tn(f.type),
     }));
-    return json({ queryFields: out });
+    // Content types worth showing (real track/album/artist fields, etc.).
+    const wanted = /track|album|artist|song|genre|playlist|podcast|episode|profile/i;
+    const types = {};
+    (schema.types || []).forEach((t) => {
+      if (t.kind !== "OBJECT" || !t.name || t.name.indexOf("__") === 0) return;
+      if (!wanted.test(t.name)) return;
+      const fs = (t.fields || []).map((f) => f.name + ": " + (tn(f.type) || "?"));
+      if (fs.length) types[t.name] = fs;
+    });
+    return json({ queryFields, types });
   } catch (e) {
     return json({ error: String((e && e.message) || e) }, 502);
   }
@@ -1062,7 +1075,13 @@ const PAGE = `<!DOCTYPE html>
         if(s.error){ diagBox("❌ "+esc(s.error)); return; }
         var f=s.queryFields||[];
         var rows=f.map(function(x){ return '<code>'+esc(x.name)+'('+(x.args||[]).join(", ")+') → '+esc(x.returns||"?")+'</code>'; }).join("<br>");
-        diagBox('<b>API structure — '+f.length+' queries</b><div style="margin-top:8px;line-height:1.8;font-size:.86rem">'+rows+'</div><div style="margin-top:10px" class="muted">Send me this screenshot and I will build the full app around it.</div>');
+        var types=s.types||{}, trows="";
+        Object.keys(types).forEach(function(k){
+          trows+='<div style="margin-top:10px"><b>'+esc(k)+'</b><br><span style="font-size:.82rem">'+types[k].map(function(x){return esc(x);}).join(" · ")+'</span></div>';
+        });
+        diagBox('<b>API structure — '+f.length+' queries</b><div style="margin-top:8px;line-height:1.8;font-size:.86rem">'+rows+'</div>'+
+          (trows?'<div style="margin-top:14px"><b>Types (fields):</b>'+trows+'</div>':'')+
+          '<div style="margin-top:10px" class="muted">Send me this whole screenshot and I will build the full app around it.</div>');
       }).catch(function(e){ if(e&&e.message==="login")return; diagBox("❌ "+esc(e.message||e)); });
     }
 

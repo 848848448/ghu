@@ -495,25 +495,37 @@ def api_schema():
     """List the top-level Query fields (the structure of the API)."""
     if not API_URL:
         return jsonify({"error": "Server not configured."}), 400
-    q = ("query { __schema { queryType { fields { name args { name } "
-         "type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } } }")
+    import re as _re
+    q = ("query { __schema { "
+         "queryType { fields { name args { name } type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } "
+         "types { name kind fields { name type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } } }")
     try:
         r = requests.post(API_URL, json={"query": q}, verify=False,
                           headers={"Content-Type": "application/json"}, timeout=20)
         d = r.json()
         if d.get("errors"):
             return jsonify({"error": d["errors"][0].get("message", "introspection blocked")}), 502
-        fields = (d.get("data", {}).get("__schema", {}) or {}).get("queryType", {})
-        fields = (fields or {}).get("fields") or []
+        schema = d.get("data", {}).get("__schema", {}) or {}
 
         def tn(t):
             while t and not t.get("name") and t.get("ofType"):
                 t = t["ofType"]
             return t.get("name") if t else None
 
-        out = [{"name": f["name"], "args": [a["name"] for a in (f.get("args") or [])],
-                "returns": tn(f.get("type"))} for f in fields]
-        return jsonify({"queryFields": out})
+        qfields = (schema.get("queryType") or {}).get("fields") or []
+        query_fields = [{"name": f["name"], "args": [a["name"] for a in (f.get("args") or [])],
+                         "returns": tn(f.get("type"))} for f in qfields]
+        wanted = _re.compile(r"track|album|artist|song|genre|playlist|podcast|episode|profile", _re.I)
+        types = {}
+        for t in (schema.get("types") or []):
+            if t.get("kind") != "OBJECT" or not t.get("name") or t["name"].startswith("__"):
+                continue
+            if not wanted.search(t["name"]):
+                continue
+            fs = [f["name"] + ": " + (tn(f.get("type")) or "?") for f in (t.get("fields") or [])]
+            if fs:
+                types[t["name"]] = fs
+        return jsonify({"queryFields": query_fields, "types": types})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 502
 

@@ -427,7 +427,13 @@
         if(s.error){ diagBox("❌ "+esc(s.error)); return; }
         var f=s.queryFields||[];
         var rows=f.map(function(x){ return '<code>'+esc(x.name)+'('+(x.args||[]).join(", ")+') → '+esc(x.returns||"?")+'</code>'; }).join("<br>");
-        diagBox('<b>API structure — '+f.length+' queries</b><div style="margin-top:8px;line-height:1.8;font-size:.86rem">'+rows+'</div><div style="margin-top:10px" class="muted">Send me this screenshot and I will build the full app around it.</div>');
+        var types=s.types||{}, trows="";
+        Object.keys(types).forEach(function(k){
+          trows+='<div style="margin-top:10px"><b>'+esc(k)+'</b><br><span style="font-size:.82rem">'+types[k].map(function(x){return esc(x);}).join(" · ")+'</span></div>';
+        });
+        diagBox('<b>API structure — '+f.length+' queries</b><div style="margin-top:8px;line-height:1.8;font-size:.86rem">'+rows+'</div>'+
+          (trows?'<div style="margin-top:14px"><b>Types (fields):</b>'+trows+'</div>':'')+
+          '<div style="margin-top:10px" class="muted">Send me this whole screenshot and I will build the full app around it.</div>');
       }).catch(function(e){ if(e&&e.message==="login")return; diagBox("❌ "+esc(e.message||e)); });
     }
 
