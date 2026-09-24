@@ -376,23 +376,29 @@
     function runCheck(auto){
       diagBox('<span class="spinner"></span>Checking connection…');
       fetch("/api/check").then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); }).then(function(s){
-        var api=s.api||{}, audio=s.audio||{}, lines=[], hint="";
+        var api=s.api||{}, audio=s.audio||{}, login=s.login||{}, lines=[], hint="";
         // API line
         if(api.configured===false) lines.push("❌ API_URL is not set.");
         else if(api.reachable===false) lines.push("❌ Can't reach your music API. Error: "+esc(api.error||"connection failed"));
         else if(api.status!==200) lines.push("⚠️ Music API answered with code "+api.status+".");
         else if(!api.hasData) lines.push("⚠️ Music API is reachable but returned no artists — check API_URL.");
         else lines.push("✅ Music API is connected.");
+        // Login line (auto-login)
+        if(login.configured===false) lines.push("ℹ️ Auto-login is off (using a fixed USER_TOKEN).");
+        else if(login.ok) lines.push("✅ Auto-login works — the token refreshes itself.");
+        else lines.push("❌ Auto-login failed. Error: "+esc(login.error||"unknown"));
         // Audio line
         if(audio.configured===false) lines.push("❌ AUDIO_API_BASE is not set.");
         else if(audio.reachable===false) lines.push("❌ Can't reach your audio server. Error: "+esc(audio.error||"connection failed"));
-        else if(audio.status===403) lines.push("❌ Audio server said 403 — your USER_TOKEN is expired or wrong.");
+        else if(audio.status===403) lines.push("❌ Audio server said 403 — the login did not produce a valid token.");
         else lines.push("✅ Audio server is reachable (code "+audio.status+").");
         // Hint
         if(api.reachable===false || audio.reachable===false){
           hint='<div style="margin-top:10px">🔎 The server cannot be reached. This usually means the music server uses a self-signed certificate that Cloudflare cannot accept. The fix is to host this on a Python server instead — tell me and I will set it up.</div>';
-        } else if(audio.status===403){
-          hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, then redeploy.</div>';
+        } else if(login.ok===false && login.configured!==false){
+          hint='<div style="margin-top:10px">🔑 Auto-login failed — check the ZING_EMAIL and ZING_PASSWORD secrets, then redeploy. Send me the error above and I will adjust it.</div>';
+        } else if(audio.status===403 && login.configured===false){
+          hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, or set up ZING_EMAIL + ZING_PASSWORD for automatic login.</div>';
         }
         diagBox('<b>Connection check</b><div style="margin-top:8px;line-height:1.9">'+lines.join("<br>")+'</div>'+hint);
       }).catch(function(e){ if(e&&e.message==="login") return; diagBox("❌ Could not run the check: "+esc(e.message||e)); });
