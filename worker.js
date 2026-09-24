@@ -46,6 +46,9 @@ export default {
           kv: !!env.ZING_KV,
         });
       }
+      if (path === "/api/config") {
+        return json(await getConfig(env));
+      }
 
       // Everything below requires a login when the site is locked.
       if (!authed) {
@@ -60,6 +63,9 @@ export default {
       }
       if (path === "/api/admin/remove" && request.method === "POST") {
         return await handleAdminRemove(request, env);
+      }
+      if (path === "/api/admin/config" && request.method === "POST") {
+        return await handleAdminConfig(request, env);
       }
       if (path === "/api/artists" && request.method === "POST") {
         return await handleArtists(env);
@@ -189,6 +195,45 @@ async function codeMatches(env, pw) {
 
 function isAdmin(env, body) {
   return !!env.SITE_PASSWORD && (body.admin || "").toString() === env.SITE_PASSWORD;
+}
+
+// --------------------------------------------------------------------------- //
+// Site settings (admin-controlled, shared for everyone): app name, an
+// announcement, and feature on/off toggles. Stored in KV so the whole site
+// picks them up. Reads are public (no secrets); writes need the master password.
+// --------------------------------------------------------------------------- //
+const CONFIG_KEY = "site_config";
+const CONFIG_FEATURES = ["albums", "search", "genres", "playlists", "artists", "stories", "downloads", "favorites"];
+
+async function getConfig(env) {
+  const out = { appName: "", announcement: "", features: {} };
+  if (!env.ZING_KV) return out;
+  try {
+    const raw = await env.ZING_KV.get(CONFIG_KEY);
+    const c = raw ? JSON.parse(raw) : {};
+    if (c && typeof c === "object") {
+      out.appName = typeof c.appName === "string" ? c.appName : "";
+      out.announcement = typeof c.announcement === "string" ? c.announcement : "";
+      if (c.features && typeof c.features === "object") out.features = c.features;
+    }
+  } catch (e) { /* ignore */ }
+  return out;
+}
+
+async function handleAdminConfig(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!env.ZING_KV) return json({ error: "Settings storage is not set up yet." }, 400);
+  const inC = (body.config && typeof body.config === "object") ? body.config : {};
+  const clean = {
+    appName: (inC.appName || "").toString().trim().slice(0, 60),
+    announcement: (inC.announcement || "").toString().trim().slice(0, 500),
+    features: {},
+  };
+  const inF = (inC.features && typeof inC.features === "object") ? inC.features : {};
+  CONFIG_FEATURES.forEach((k) => { clean.features[k] = inF[k] !== false; });
+  await env.ZING_KV.put(CONFIG_KEY, JSON.stringify(clean));
+  return json({ ok: true, config: clean });
 }
 
 // GET the list of access codes (admin only). Reports whether KV is available.
@@ -1188,6 +1233,26 @@ const PAGE = `<!DOCTYPE html>
     function applyTheme(){ document.documentElement.setAttribute("data-theme", SET.theme); }
     applyTheme();
 
+    // Admin-controlled site settings (shared for everyone; loaded from the server).
+    var CFG_FEATURES=["albums","search","genres","playlists","artists","stories","downloads","favorites"];
+    var CFG={appName:"",announcement:"",features:{}};
+    CFG_FEATURES.forEach(function(k){ CFG.features[k]=true; });
+    function feat(k){ return CFG.features[k]!==false; }
+    function applyConfig(c){
+      c=c||{}; CFG.appName=(typeof c.appName==="string"?c.appName:""); CFG.announcement=(typeof c.announcement==="string"?c.announcement:"");
+      var f=(c.features&&typeof c.features==="object")?c.features:{}; CFG_FEATURES.forEach(function(k){ CFG.features[k]=f[k]!==false; });
+      var bn=document.querySelector(".brand .name"); if(bn) bn.textContent=CFG.appName||"Zing";
+      try{ document.title=(CFG.appName||"Zing")+" — Jewish Music"; }catch(e){}
+      var tabMap={tabAlbums:"albums",tabSearch:"search",tabGenres:"genres",tabPlaylists:"playlists",tabArtists:"artists"};
+      Object.keys(tabMap).forEach(function(id){ var el=$(id); if(el) el.style.display=feat(tabMap[id])?"":"none"; });
+      var favBtn=document.querySelector('.iconbtn[title="My Music"]'); if(favBtn) favBtn.style.display=feat("favorites")?"":"none";
+      var npdl=$("npDl"); if(npdl) npdl.style.display=feat("downloads")?"":"none";
+      var ann=$("annBanner");
+      if(CFG.announcement){ if(!ann){ ann=document.createElement("div"); ann.id="annBanner"; ann.className="banner"; ann.style.marginTop="10px"; var st=$("status"); if(st&&st.parentNode) st.parentNode.insertBefore(ann, st); } ann.textContent=CFG.announcement; ann.hidden=false; }
+      else if(ann){ ann.hidden=true; }
+    }
+    function loadConfig(){ return fetch("/api/config").then(function(r){return r.json();}).then(function(c){ applyConfig(c); }).catch(function(){}); }
+
     function $(id){ return document.getElementById(id); }
     function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
     var ICONS={
@@ -1344,15 +1409,15 @@ const PAGE = `<!DOCTYPE html>
           var bcards=banners.map(bannerCard).filter(Boolean).join("");
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
         }
-        if(albums.length){
+        if(albums.length && feat("albums")){
           html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow">'+albums.map(function(al){ window._albums[al.id]=al;
             return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
         }
-        if(popular.length){
+        if(popular.length && feat("albums")){
           html+='<div class="sec">'+secHead("Popular this month")+'<div class="hrow">'+popular.map(function(al){ window._albums[al.id]=al;
             return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
         }
-        if(genres.length){
+        if(genres.length && feat("genres")){
           html+='<div class="sec">'+secHead("Genres","genres")+'<div class="chips">'+genres.map(function(g){
             return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div></div>';
         }
@@ -1360,11 +1425,11 @@ const PAGE = `<!DOCTYPE html>
           html+='<div class="sec">'+secHead("Categories")+'<div class="chips">'+categories.map(function(c){
             return '<button class="chip" onclick="openCategory('+c.id+')">'+esc(genName(c))+'</button>'; }).join("")+'</div></div>';
         }
-        if(playlists.length){
+        if(playlists.length && feat("playlists")){
           html+='<div class="sec">'+secHead("Playlists","playlists")+'<div class="hrow">'+playlists.map(function(p){ var nm=plName(p);
             return '<div class="hcard" onclick="openPlaylist('+p.id+')">'+coverHtml(nm,{img:p.cdnImage||p.image,fab:true})+'<div class="c-name">'+esc(nm)+'</div><div class="c-sub">Playlist</div></div>'; }).join("")+'</div></div>';
         }
-        if(stories.length){
+        if(stories.length && feat("stories")){
           html+='<div class="sec">'+secHead("Stories")+'<div class="hrow">'+stories.map(function(s){ var nm=pick(s.enName,s.heName)||"Story";
             return '<div class="hcard" onclick="openStory('+s.id+')">'+coverHtml(nm,{img:s.imageUrl})+'<div class="c-name">'+esc(nm)+'</div></div>'; }).join("")+'</div></div>';
         }
@@ -1424,7 +1489,7 @@ const PAGE = `<!DOCTYPE html>
             return '<div class="track" onclick="playSearchTrack('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
               '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
               (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
-              '<button class="dl" onclick="event.stopPropagation();downloadTrack('+t.id+', '+esc(JSON.stringify(t.file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button></div>'; }).join("")+'</div></div>';
+              dlBtn(t.id,t.file)+'</div>'; }).join("")+'</div></div>';
         }
         if(albs.length){
           html+='<div class="sec">'+secHead("Albums")+'<div class="grid albums">'+albs.map(function(al){ return albumTile(al, artNames(al.artists)); }).join("")+'</div></div>';
@@ -1501,7 +1566,7 @@ const PAGE = `<!DOCTYPE html>
         var abio=a?(a.bio||pick(a.enDesc,a.heDesc)||""):"";
         var head='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Back</div>'+
           '<div class="hero">'+coverHtml(anm,{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(anm)+'</h2>'+(aalt?'<div class="sub">'+esc(aalt)+'</div>':'')+
-            '<div class="actions"><button class="btn ghost sm" onclick="saveArtist('+Number(id)+')">'+ic("favorite_border")+' Save</button></div></div></div>'+
+            (feat("favorites")?'<div class="actions"><button class="btn ghost sm" onclick="saveArtist('+Number(id)+')">'+ic("favorite_border")+' Save</button></div>':'')+'</div></div>'+
           (abio?'<p class="muted" style="margin:-6px 18px 18px;line-height:1.7;font-size:.92rem">'+esc(abio)+'</p>':'');
         window._albumBack=function(){ openArtist(id); };
         if(!albums.length){ setView(head+'<div class="empty">No albums available.</div>'); return; }
@@ -1521,9 +1586,9 @@ const PAGE = `<!DOCTYPE html>
       var back='<div class="back" onclick="'+(window._albumBack?'window._albumBack()':'go(\\'home\\')')+'">'+ic("arrow_back_ios_new")+'Back</div>';
       var rows=tracks.map(function(t,i){ return '<div class="track" id="trk'+t.id+'" onclick="playAlbum('+id+','+i+')"><div class="num">'+(t.trackNumber||i+1)+'</div>'+
         '<div class="tk">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
-        '<button class="dl" onclick="event.stopPropagation();downloadTrack('+t.id+', '+esc(JSON.stringify(t.file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button></div>'; }).join("");
+        dlBtn(t.id,t.file)+'</div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(albName(al),{img:albImg(al)})+'<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2><div class="sub">'+tracks.length+' tracks</div>'+
-        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>'+(tracks.length?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((feat("downloads")&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
         (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
       highlightPlaying();
     }
@@ -1535,7 +1600,7 @@ const PAGE = `<!DOCTYPE html>
       var rows=tracks.map(function(t,i){ return '<div class="track" id="ltrk'+t.id+'" onclick="playList('+i+')"><div class="num">'+(i+1)+'</div>'+
         '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
         (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
-        '<button class="dl" onclick="event.stopPropagation();downloadTrack('+t.id+', '+esc(JSON.stringify(t.file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button></div>'; }).join("");
+        dlBtn(t.id,t.file)+'</div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(title,{img:img})+'<div><div class="kicker">'+esc(kicker||"Collection")+'</div><h2>'+esc(title)+'</h2><div class="sub">'+esc(subtitle)+'</div>'+
         '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playList(0)">'+ic("play_arrow")+' Play all</button>':'')+'</div></div></div>'+
         (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
@@ -1627,6 +1692,7 @@ const PAGE = `<!DOCTYPE html>
     function closeOverlay(quiet){ var d=$("ovl"); if(d) d.remove(); if(quiet!==true && _dirtyView){ _dirtyView=false; go(curTab); } }
 
     // ---------- Downloads ----------
+    function dlBtn(id,file){ if(!feat("downloads")) return ""; return '<button class="dl" onclick="event.stopPropagation();downloadTrack('+id+', '+esc(JSON.stringify(file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button>'; }
     function dlUrl(id,file){ var p=new URLSearchParams({trackId:id, file:file||""}); return "/api/download?"+p.toString(); }
     function downloadTrack(id,file){ var a=document.createElement("a"); a.href=dlUrl(id,file); a.download=""; document.body.appendChild(a); a.click(); a.remove(); toast("Download started…"); }
     function downloadAlbum(albumId){ var al=(window._albums||{})[albumId]; if(!al) return; var tr=al.tracks||[]; var i=0;
@@ -1649,8 +1715,8 @@ const PAGE = `<!DOCTYPE html>
           row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
           row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
         '</div></div>'+
-        '<div class="set-sec"><h3>Access</h3><div class="card">'+
-          row("Who can access","Add or remove people\\'s codes", ic("chevron_right"), "openAccess()")+
+        '<div class="set-sec"><h3>Admin</h3><div class="card">'+
+          row("Admin panel","Accounts, app name, features, announcement", ic("chevron_right"), "openAccess()")+
         '</div></div>'+
         '<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
@@ -1669,32 +1735,58 @@ const PAGE = `<!DOCTYPE html>
     function backToSettings(){ ovlSet("Settings", settingsHtml()); }
     function accessUnlockHtml(msg){ return '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>'+
       '<div class="card" style="padding:16px">'+
-      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+ic("lock")+'<b>Manage who can access</b></div>'+
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+ic("lock")+'<b>Admin panel</b></div>'+
       '<p class="muted" style="margin:0 0 12px">Enter the main password (the one set in Cloudflare) to continue.</p>'+
       '<input id="admpw" class="field" type="password" placeholder="Main password" autocomplete="off" />'+
       '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="unlockAccess()">Unlock</button>'+
       '<div id="accmsg" class="err" style="margin-top:10px;min-height:18px">'+esc(msg||"")+'</div></div>'; }
-    function openAccess(){ if(_admPw){ loadAccess(); } else { ovlSet("Who can access", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
+    function openAccess(){ if(_admPw){ loadAccess(); } else { ovlSet("Admin", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
     function unlockAccess(){ var i=$("admpw"); var pw=i?i.value:""; if(!pw){ return; } _admPw=pw; loadAccess(); }
-    function loadAccess(){ ovlSet("Who can access", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
-      post("/api/admin/list",{admin:_admPw}).then(function(d){ renderAccess(d); })
-        .catch(function(e){ _admPw=""; ovlSet("Who can access", accessUnlockHtml(e.message||"Wrong password.")); var i=$("admpw"); if(i) i.focus(); }); }
-    function renderAccess(d){
+    function loadAccess(){ ovlSet("Admin", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
+      Promise.all([ post("/api/admin/list",{admin:_admPw}),
+        fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}) ])
+        .then(function(res){ renderAdmin(res[0], res[1]||{}); })
+        .catch(function(e){ _admPw=""; ovlSet("Admin", accessUnlockHtml(e.message||"Wrong password.")); var i=$("admpw"); if(i) i.focus(); }); }
+    var _cfgEdit={features:{}};
+    function toggleRow(k,label){ var on=_cfgEdit.features[k]!==false;
+      return '<div class="row"><div class="rlabel"><div class="rt">'+esc(label)+'</div></div><div class="seg" id="cf_'+k+'">'+
+        '<button data-v="on" class="'+(on?"on":"")+'" onclick="cfgSet(\\''+k+'\\',\\'on\\')">On</button>'+
+        '<button data-v="off" class="'+(on?"":"on")+'" onclick="cfgSet(\\''+k+'\\',\\'off\\')">Off</button></div></div>'; }
+    function cfgSet(k,v){ _cfgEdit.features[k]=(v==="on"); segMark("cf_"+k, v); }
+    function saveAdminConfig(){ var an=$("cfgApp"), am=$("cfgAnn"), m=$("cfgMsg"); if(m) m.textContent="";
+      _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:"";
+      post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ applyConfig(d.config||_cfgEdit); toast("Saved."); })
+        .catch(function(e){ if(m) m.textContent=e.message||"Could not save."; }); }
+    function renderAdmin(d, cfg){
       var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
-      if(!d.kv){ ovlSet("Who can access", back+kvSetupHtml()); return; }
+      if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
+      _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",features:{}};
+      CFG_FEATURES.forEach(function(k){ _cfgEdit.features[k]=(cfg.features&&cfg.features[k])!==false; });
+      var appCard='<div class="set-sec"><h3>App settings</h3><div class="card" style="padding:15px">'+
+        '<label class="muted" style="font-size:.8rem">App name</label>'+
+        '<input id="cfgApp" class="field" style="margin:5px 0 12px" placeholder="Zing" value="'+esc(_cfgEdit.appName)+'" />'+
+        '<label class="muted" style="font-size:.8rem">Announcement (shown at the top for everyone)</label>'+
+        '<input id="cfgAnn" class="field" style="margin:5px 0 0" placeholder="(none)" value="'+esc(_cfgEdit.announcement)+'" />'+
+        '</div></div>';
+      var featCard='<div class="set-sec"><h3>Features — show / hide for everyone</h3><div class="card">'+
+        toggleRow("albums","Albums")+toggleRow("search","Search")+toggleRow("genres","Genres")+toggleRow("playlists","Playlists")+
+        toggleRow("artists","Artists")+toggleRow("stories","Stories")+toggleRow("downloads","Downloads")+toggleRow("favorites","Favorites (♥)")+
+        '</div></div>'+
+        '<div style="margin:12px 0"><button class="btn" style="width:100%;justify-content:center" onclick="saveAdminConfig()">Save app settings</button><div id="cfgMsg" class="err" style="margin-top:8px;min-height:16px"></div></div>';
       var codes=d.codes||[];
       var list = codes.length
         ? '<div class="card">'+codes.map(function(c){ return '<div class="code-item"><div style="min-width:0"><div class="ci-name">'+esc(c.name||"Someone")+'</div><div class="ci-code">'+esc(c.code)+'</div></div>'+
             '<button class="trash" title="Remove" data-code="'+esc(c.code)+'" onclick="removeCode(this)">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
-        : '<p class="muted" style="margin:2px 0 0">No access codes yet. Add one below.</p>';
-      ovlSet("Who can access", back+
-        '<p class="muted" style="margin:0 0 14px">Give each person their own code to sign in with. Remove a code to take away that person\\'s access. Your main password always works.</p>'+
+        : '<p class="muted" style="margin:2px 0 0">No accounts yet. Add one below.</p>';
+      var accCard='<div class="set-sec"><h3>Accounts — who can sign in</h3>'+
+        '<p class="muted" style="margin:0 0 10px;font-size:.85rem">Give each person their own code to sign in with. Remove a code to take away access. Your main password always works.</p>'+
         list+
-        '<div class="set-sec"><h3>Add a person</h3><div class="card" style="padding:15px">'+
+        '<div class="card" style="padding:15px;margin-top:10px">'+
           '<input id="cn" class="field" placeholder="Name (for example: Yossi)" autocomplete="off" />'+
           '<input id="cc" class="field" style="margin-top:10px" placeholder="Access code / password" autocomplete="off" />'+
-          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add person</button>'+
-          '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>');
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add account</button>'+
+          '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
+      ovlSet("Admin", back+appCard+featCard+accCard);
     }
     function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
       if(!c.trim()){ if(m) m.textContent="Enter a code."; return; }
@@ -1812,8 +1904,9 @@ const PAGE = `<!DOCTYPE html>
     window.browseLibrary=browseLibrary; window.saveArtist=saveArtist; window.saveAlbum=saveAlbum;
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
+    window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig;
 
-    hydrateIcons(); checkStatus(); home();
+    hydrateIcons(); checkStatus(); loadConfig().then(function(){ home(); });
   </script>
 </body>
 </html>`;
