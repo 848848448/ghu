@@ -391,8 +391,8 @@ async function handleArtist(request, env) {
     return json({ error: "Missing artist id." }, 400);
   }
   const query =
-    "query { artist(where: { id: " + Number(id) + " }) { id enName heName " +
-    "albums { id enName tracks { id file } } } }";
+    "query { artist(where: { id: " + Number(id) + " }) { id enName heName image " +
+    "albums { id enName heName tracks { id enName heName file duration trackNumber } } } }";
   const data = await graphql(env, query);
   const artist = data && data.data ? data.data.artist : null;
   if (!artist) return json({ error: "No details found for this artist." }, 502);
@@ -402,7 +402,7 @@ async function handleArtist(request, env) {
 async function handleNew(env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
   const query =
-    "query { albums(take: 50) { id enName artists { enName } tracks { id file } } }";
+    "query { albums(take: 50) { id enName heName artists { enName heName } tracks { id enName heName file duration trackNumber } } }";
   const data = await graphql(env, query);
   if (!data || data.errors) return json({ albums: [] });
   let albums = ((data.data || {}).albums) || [];
@@ -855,6 +855,9 @@ const PAGE = `<!DOCTYPE html>
     function grad(name){ var h=hash(name); var a=h%360; var b=(a+45+(h>>3)%70)%360; return "linear-gradient(135deg, hsl("+a+",72%,56%), hsl("+b+",70%,44%))"; }
     function ini(name){ var p=(name||"?").trim().split(/\\s+/).filter(Boolean); if(!p.length) return "?"; return (p.length===1?p[0].slice(0,2):(p[0][0]+p[1][0])).toUpperCase(); }
     function fmt(sec){ if(!isFinite(sec)||sec<0) sec=0; var m=Math.floor(sec/60), s=Math.floor(sec%60); return m+":"+(s<10?"0":"")+s; }
+    function trackName(t){ return (t.enName||t.heName||(t.file||"").split("/").pop()||("Track "+t.id)); }
+    function albName(al){ return (al.enName||al.heName||"Unknown Album"); }
+    function artNames(list){ return (list||[]).map(function(a){return a.enName||a.heName||"Unknown";}).join(", "); }
 
     function setStatus(h,c){ $("status").innerHTML=h; $("status").className=c||""; }
     function loading(m){ setStatus('<span class="spinner"></span>'+m,"muted"); }
@@ -894,9 +897,9 @@ const PAGE = `<!DOCTYPE html>
 
     function artistCard(a){ return '<div class="tile artist" onclick="openArtist('+a.id+')">'+coverHtml(a.enName||a.heName,{round:true})+
       '<div class="t-name">'+esc(a.enName||"Unknown")+'</div><div class="t-sub">'+esc(a.heName||"Artist")+'</div></div>'; }
-    function albumCard(al,sub){ return '<div class="tile album" onclick="openAlbum('+al.id+')">'+coverHtml(al.enName)+
+    function albumCard(al,sub){ return '<div class="tile album" onclick="openAlbum('+al.id+')">'+coverHtml(albName(al))+
       '<div class="fab"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>'+
-      '<div class="t-name">'+esc(al.enName||"Unknown Album")+'</div><div class="t-sub">'+esc(sub)+'</div></div>'; }
+      '<div class="t-name">'+esc(albName(al))+'</div><div class="t-sub">'+esc(sub)+'</div></div>'; }
 
     // ---------- Views ----------
     function doNew(){
@@ -906,7 +909,7 @@ const PAGE = `<!DOCTYPE html>
         if(!albums.length){ setView('<div class="empty">No new releases found.</div>'); runCheck(true); return; }
         window._albums={}; window._albumBack=doNew;
         var cards=albums.map(function(al){ window._albums[al.id]=al;
-          var names=(al.artists||[]).map(function(a){return a.enName||"Unknown";}).join(", ")||"Various";
+          var names=artNames(al.artists)||"Various";
           return albumCard(al, names); }).join("");
         setView('<div class="sec"><div class="sec-head"><h2>🔥 New Releases</h2></div><div class="grid albums">'+cards+'</div></div>');
       }).catch(function(e){ setStatus("❌ "+e.message,"err"); runCheck(true); });
@@ -959,15 +962,16 @@ const PAGE = `<!DOCTYPE html>
     function openAlbum(id){
       var al=(window._albums||{})[id]; if(!al) return;
       var tracks=al.tracks||[];
-      var artistName = (al.artists&&al.artists.length) ? al.artists.map(function(a){return a.enName;}).join(", ") : (window._curArtist||"");
+      var artistName = (al.artists&&al.artists.length) ? artNames(al.artists) : (window._curArtist||"");
       var back=window._albumBack?'<div class="back" onclick="_albumBack()">‹ Back</div>':'<div class="back" onclick="doNew()">‹ Back</div>';
-      var rows=tracks.map(function(t,i){ var nm=(t.file||"").split("/").pop()||("Track "+t.id);
-        return '<div class="track" id="trk'+t.id+'" onclick="playAlbum('+id+','+i+')"><div class="num">'+(i+1)+'</div>'+
+      var rows=tracks.map(function(t,i){ var nm=trackName(t);
+        return '<div class="track" id="trk'+t.id+'" onclick="playAlbum('+id+','+i+')"><div class="num">'+(t.trackNumber||i+1)+'</div>'+
           '<div class="tk">'+esc(nm)+'</div>'+
+          (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
           '<button class="dl" title="Download" onclick="event.stopPropagation();downloadTrack('+t.id+', '+esc(JSON.stringify(t.file||"")).replace(/"/g,"&quot;")+')">'+
           '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg></button></div>'; }).join("");
-      setView(back+'<div class="album-hero">'+coverHtml(al.enName)+
-        '<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(al.enName||"Unknown")+'</h2>'+
+      setView(back+'<div class="album-hero">'+coverHtml(albName(al))+
+        '<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2>'+
         '<div class="sub">'+tracks.length+' tracks</div><div class="actions">'+
         (tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Play all</button>':'')+
         (tracks.length?'<button class="btn ghost" onclick="downloadAlbum('+id+')">⬇️ Download all</button>':'')+
@@ -980,8 +984,8 @@ const PAGE = `<!DOCTYPE html>
     var audio=$("audio");
     function playAlbum(albumId, index){
       var al=(window._albums||{})[albumId]; if(!al) return; var tracks=al.tracks||[];
-      var artistName=(al.artists&&al.artists.length)?al.artists.map(function(a){return a.enName;}).join(", "):(window._curArtist||"");
-      queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:(t.file||"").split("/").pop()||("Track "+t.id), artist:artistName, cover:al.enName}; });
+      var artistName=(al.artists&&al.artists.length)?artNames(al.artists):(window._curArtist||"");
+      queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al)}; });
       playIndex(index);
     }
     function playIndex(i){
