@@ -330,12 +330,18 @@ def fetch_artist_details(artist_id):
         id
         enName
         heName
+        image
         albums {{
           id
           enName
+          heName
           tracks {{
             id
+            enName
+            heName
             file
+            duration
+            trackNumber
           }}
         }}
       }}
@@ -353,12 +359,18 @@ def fetch_new_releases():
       albums(take: 50) {
         id
         enName
+        heName
         artists {
           enName
+          heName
         }
         tracks {
           id
+          enName
+          heName
           file
+          duration
+          trackNumber
         }
       }
     }
