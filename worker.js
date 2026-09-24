@@ -70,6 +70,9 @@ export default {
       if (path === "/api/new" && request.method === "POST") {
         return await handleNew(env);
       }
+      if (path === "/api/albums" && request.method === "POST") {
+        return await handleAlbumsPage(request, env);
+      }
       if (path === "/api/check") {
         return await handleCheck(env);
       }
@@ -510,6 +513,33 @@ async function handleNew(env) {
     }
   }
   return json({ albums: albums.slice(0, 12) });
+}
+
+// A page of ALL albums, newest first (old + new together), for the Albums
+// browse view. Supports skip/take for "load more". Same ordering fallbacks.
+async function handleAlbumsPage(request, env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const body = await request.json().catch(() => ({}));
+  const take = Math.min(Math.max(parseInt(body.take, 10) || 30, 1), 60);
+  const skip = Math.max(parseInt(body.skip, 10) || 0, 0);
+  const fields =
+    "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
+  const attempts = [
+    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
+    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ id: desc }]) { " + fields + " } }",
+    "query { albums(take: " + take + ", skip: " + skip + ") { " + fields + " } }",
+  ];
+  for (let i = 0; i < attempts.length; i++) {
+    const data = await graphql(env, attempts[i]);
+    if (data && !data.errors) {
+      let albums = ((data.data || {}).albums) || [];
+      if (i === attempts.length - 1) {
+        albums = albums.slice().sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+      }
+      return json({ albums });
+    }
+  }
+  return json({ albums: [] });
 }
 
 // Read a JWT's non-secret claims (issuer, audience, expiry) to identify the
@@ -982,6 +1012,7 @@ const PAGE = `<!DOCTYPE html>
   <!-- Bottom tabs -->
   <nav class="tabs">
     <button class="tab active" id="tabHome" onclick="go('home')"><span class="ms">home</span><span class="lbl">Home</span></button>
+    <button class="tab" id="tabAlbums" onclick="go('albums')"><span class="ms">album</span><span class="lbl">Albums</span></button>
     <button class="tab" id="tabSearch" onclick="go('search')"><span class="ms">search</span><span class="lbl">Search</span></button>
     <button class="tab" id="tabGenres" onclick="go('genres')"><span class="ms">category</span><span class="lbl">Genres</span></button>
     <button class="tab" id="tabPlaylists" onclick="go('playlists')"><span class="ms">featured_play_list</span><span class="lbl">Playlists</span></button>
@@ -1018,6 +1049,7 @@ const PAGE = `<!DOCTYPE html>
       category:"M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z",
       featured_play_list:"M3 10h11v2H3v-2zm0-4h11v2H3V6zm0 8h7v2H3v-2zm13-1v6l5-3-5-3z",
       artist:"M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z",
+      album:"M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm0-5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z",
       play_arrow:"M8 5v14l11-7z",
       pause:"M6 5h4v14H6zm8 0h4v14h-4z",
       skip_previous:"M6 6h2v12H6zm3.5 6 8.5 6V6z",
@@ -1082,10 +1114,11 @@ const PAGE = `<!DOCTYPE html>
     }
 
     // ---------- Tabs ----------
-    function setTab(id){ ["tabHome","tabSearch","tabGenres","tabPlaylists","tabArtists"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
+    function setTab(id){ ["tabHome","tabAlbums","tabSearch","tabGenres","tabPlaylists","tabArtists"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
     function go(where){
       curTab=where;
       if(where==="home"){ setTab("tabHome"); home(); }
+      else if(where==="albums"){ setTab("tabAlbums"); browseAlbums(); }
       else if(where==="search"){ setTab("tabSearch"); searchView(); }
       else if(where==="genres"){ setTab("tabGenres"); browseGenres(); }
       else if(where==="playlists"){ setTab("tabPlaylists"); browsePlaylists(); }
@@ -1103,7 +1136,10 @@ const PAGE = `<!DOCTYPE html>
       return '<div class="tile artist" onclick="openArtist('+a.id+')">'+coverHtml(nm,{round:true,img:a.image})+
       '<div class="c-name">'+esc(nm)+'</div><div class="c-sub">'+esc(alt)+'</div></div>'; }
 
-    function secHead(title, seeTab){ return '<div class="sec-head"><h2>'+esc(title)+'</h2>'+(seeTab?'<button class="see" onclick="go(\\''+seeTab+'\\')">See all '+ic("chevron_right")+'</button>':'')+'</div>'; }
+    function secHead(title, seeTab, seeFn){
+      var see = seeFn ? '<button class="see" onclick="'+seeFn+'">See all '+ic("chevron_right")+'</button>'
+        : (seeTab ? '<button class="see" onclick="go(\\''+seeTab+'\\')">See all '+ic("chevron_right")+'</button>' : '');
+      return '<div class="sec-head"><h2>'+esc(title)+'</h2>'+see+'</div>'; }
 
     // ---------- Home ----------
     function home(){
@@ -1117,7 +1153,7 @@ const PAGE = `<!DOCTYPE html>
         window._albums=window._albums||{};
         var html="";
         if(albums.length){
-          html+='<div class="sec">'+secHead("New Releases")+'<div class="hrow">'+albums.map(function(al){ window._albums[al.id]=al;
+          html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow">'+albums.map(function(al){ window._albums[al.id]=al;
             return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
         }
         if(genres.length){
@@ -1181,6 +1217,26 @@ const PAGE = `<!DOCTYPE html>
         var nm=p?plName(p):"Playlist";
         renderTrackList(nm, tracks.length+" tracks", tracks, browsePlaylists, (p&&(p.cdnImage||p.image)), "Playlist");
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+
+    // ---------- Albums (all, newest first, with load more) ----------
+    var _albPage={skip:0,take:30,loading:false,end:false};
+    function browseAlbums(){
+      _albPage={skip:0,take:30,loading:false,end:false};
+      setView(secHead("Albums")+'<p class="muted" style="margin:-4px 18px 10px">All albums, newest first — old and new together.</p><div id="albGrid" class="grid albums"></div><div id="albMore" style="text-align:center;padding:18px"></div>');
+      loadMoreAlbums();
+    }
+    function loadMoreAlbums(){
+      if(_albPage.loading||_albPage.end) return; _albPage.loading=true;
+      var more=$("albMore"); if(more) more.innerHTML='<span class="spinner"></span>Loading…';
+      post("/api/albums",{skip:_albPage.skip,take:_albPage.take}).then(function(d){
+        var got=d.albums||[]; window._albums=window._albums||{};
+        got.forEach(function(al){ window._albums[al.id]=al; });
+        var grid=$("albGrid"); if(grid) grid.insertAdjacentHTML("beforeend", got.map(function(al){ return albumTile(al, artNames(al.artists)); }).join(""));
+        _albPage.skip+=got.length; _albPage.loading=false;
+        if(got.length<_albPage.take){ _albPage.end=true; if(more) more.innerHTML=(_albPage.skip?'<span class="muted">That\\'s everything ('+_albPage.skip+' albums).</span>':'<span class="empty">No albums.</span>'); }
+        else if(more){ more.innerHTML='<button class="btn ghost" onclick="loadMoreAlbums()">Load more</button>'; }
+      }).catch(function(e){ _albPage.loading=false; if(e.message==="login")return; var more=$("albMore"); if(more) more.innerHTML='<span class="err">'+esc(e.message)+'</span>'; });
     }
 
     // ---------- Artists ----------
@@ -1391,6 +1447,7 @@ const PAGE = `<!DOCTYPE html>
 
     // expose
     window.go=go; window.openArtist=openArtist; window.openAlbum=openAlbum; window.openGenre=openGenre; window.openPlaylist=openPlaylist;
+    window.browseAlbums=browseAlbums; window.loadMoreAlbums=loadMoreAlbums;
     window.playAlbum=playAlbum; window.playList=playList; window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum;
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
