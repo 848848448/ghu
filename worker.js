@@ -1271,9 +1271,10 @@ const PAGE = `<!DOCTYPE html>
       var pGen=gql("query { genres(take: 20) { id enName heName } }").then(function(d){return d.genres||[];}).catch(function(){return [];});
       var pCat=gql("query { categories(take: 40) { id enName heName } }").then(function(d){return d.categories||[];}).catch(function(){return [];});
       var pPl=gql("query { playlists(take: 20) { id name enName heName image cdnImage } }").then(function(d){return d.playlists||[];}).catch(function(){return [];});
-      Promise.all([pBan,pNew,pPop,pGen,pCat,pPl]).then(function(res){
+      var pStr=gql("query { stories(take: 15, orderBy: [{ releaseDate: desc }]) { id enName heName imageUrl } }").then(function(d){return d.stories||[];}).catch(function(){return [];});
+      Promise.all([pBan,pNew,pPop,pGen,pCat,pPl,pStr]).then(function(res){
         setStatus("");
-        var banners=res[0], albums=res[1], popular=res[2], genres=res[3], categories=res[4], playlists=res[5];
+        var banners=res[0], albums=res[1], popular=res[2], genres=res[3], categories=res[4], playlists=res[5], stories=res[6];
         window._albums=window._albums||{};
         var html="";
         if(banners.length){
@@ -1300,6 +1301,10 @@ const PAGE = `<!DOCTYPE html>
           html+='<div class="sec">'+secHead("Playlists","playlists")+'<div class="hrow">'+playlists.map(function(p){ var nm=plName(p);
             return '<div class="hcard" onclick="openPlaylist('+p.id+')">'+coverHtml(nm,{img:p.cdnImage||p.image,fab:true})+'<div class="c-name">'+esc(nm)+'</div><div class="c-sub">Playlist</div></div>'; }).join("")+'</div></div>';
         }
+        if(stories.length){
+          html+='<div class="sec">'+secHead("Stories")+'<div class="hrow">'+stories.map(function(s){ var nm=pick(s.enName,s.heName)||"Story";
+            return '<div class="hcard" onclick="openStory('+s.id+')">'+coverHtml(nm,{img:s.imageUrl})+'<div class="c-name">'+esc(nm)+'</div></div>'; }).join("")+'</div></div>';
+        }
         if(!html) html='<div class="empty">Nothing to show yet. Check Settings.</div>';
         setView(html);
       });
@@ -1312,6 +1317,18 @@ const PAGE = `<!DOCTYPE html>
         window._albums=window._albums||{}; setView(head+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al, artNames(al.artists)); }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
+    function openStory(id){ loading("Loading…");
+      gql("query { story(where:{id:"+Number(id)+"}) { id enName heName imageUrl articles(orderBy:[{ index: asc }]) { id enName heName pdfUrl releaseDate } } }").then(function(d){
+        var s=d.story; setStatus(""); if(!s){ setView('<div class="empty">Story not found.</div>'); return; }
+        var nm=pick(s.enName,s.heName)||"Story"; var arts=s.articles||[];
+        var back='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>';
+        var rows=arts.map(function(a){ var an=pick(a.enName,a.heName)||("Part "+a.id);
+          return '<div class="track" onclick="openArticle('+esc(JSON.stringify(a.pdfUrl||"")).replace(/"/g,"&quot;")+')"><div class="num">'+ic("featured_play_list")+'</div><div class="tk">'+esc(an)+'</div><div class="dl">'+ic("chevron_right")+'</div></div>'; }).join("");
+        setView(back+'<div class="hero">'+coverHtml(nm,{img:s.imageUrl})+'<div><div class="kicker">Story</div><h2>'+esc(nm)+'</h2><div class="sub">'+arts.length+' parts</div></div></div>'+
+          (arts.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No parts to read yet.</div>'));
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+    function openArticle(pdfUrl){ if(pdfUrl && /^https?:/i.test(pdfUrl)){ window.open(pdfUrl,"_blank"); } else { toast("This part is not available."); } }
 
     // ---------- Search (real, across songs / albums / artists) ----------
     var _searchT, _searchSeq=0, _searchTracks=[];
@@ -1634,7 +1651,7 @@ const PAGE = `<!DOCTYPE html>
 
     // expose
     window.go=go; window.openArtist=openArtist; window.openAlbum=openAlbum; window.openGenre=openGenre; window.openPlaylist=openPlaylist;
-    window.openCategory=openCategory; window.openBannerUrl=openBannerUrl;
+    window.openCategory=openCategory; window.openBannerUrl=openBannerUrl; window.openStory=openStory; window.openArticle=openArticle;
     window.browseAlbums=browseAlbums; window.loadMoreAlbums=loadMoreAlbums; window.playSearchTrack=playSearchTrack;
     window.playAlbum=playAlbum; window.playList=playList; window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum;
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
