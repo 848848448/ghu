@@ -294,11 +294,36 @@ async function handleNew(env) {
   return json({ albums });
 }
 
+// Read a JWT's non-secret claims (issuer, audience, expiry) to identify the
+// auth provider. Never exposes the token itself — only these public claims.
+function decodeJwtClaims(token) {
+  try {
+    const parts = (token || "").split(".");
+    if (parts.length < 2) return { error: "not a JWT" };
+    let b = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b.length % 4) b += "=";
+    const claims = JSON.parse(atob(b));
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      iss: claims.iss || null,
+      aud: typeof claims.aud === "string" ? claims.aud : null,
+      exp: claims.exp || null,
+      expired: claims.exp ? claims.exp < now : null,
+      ttlMinutes: claims.exp ? Math.round((claims.exp - now) / 60) : null,
+    };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+
 async function handleCheck(env) {
   // Diagnose connectivity: can the Worker actually reach your servers, and
   // does a REAL track play with the current token?
   const out = { api: {}, audio: {} };
   let realTrackId = null;
+
+  // Identify the token's provider/expiry (public claims only, no secrets).
+  if (env.USER_TOKEN) out.tokenInfo = decodeJwtClaims(env.USER_TOKEN);
 
   // Test auto-login when it's configured.
   if (env.ZING_EMAIL && env.ZING_PASSWORD) {
@@ -913,7 +938,13 @@ const PAGE = `<!DOCTYPE html>
         } else if(audio.status===403 && login.configured===false){
           hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, or set up ZING_EMAIL + ZING_PASSWORD for automatic login.</div>';
         }
-        diagBox('<b>Connection check</b><div style="margin-top:8px;line-height:1.9">'+lines.join("<br>")+'</div>'+hint);
+        // Token provider info (helps identify the auth provider)
+        var ti=s.tokenInfo, tline="";
+        if(ti && !ti.error){
+          var when = (ti.ttlMinutes==null) ? "" : (ti.expired ? " (expired "+Math.abs(ti.ttlMinutes)+" min ago)" : " (expires in "+ti.ttlMinutes+" min)");
+          tline='<div style="margin-top:10px">🪪 Token issuer: <code>'+esc(ti.iss||"unknown")+'</code>'+when+'<br><span class="muted">Send me this line — it tells me how to auto-refresh your token.</span></div>';
+        }
+        diagBox('<b>Connection check</b><div style="margin-top:8px;line-height:1.9">'+lines.join("<br>")+'</div>'+hint+tline);
       }).catch(function(e){ if(e&&e.message==="login") return; diagBox("❌ Could not run the check: "+esc(e.message||e)); });
     }
 

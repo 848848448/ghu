@@ -121,6 +121,31 @@ def zing_login():
         return {"ok": False, "error": str(exc)}
 
 
+def _decode_jwt_claims(token):
+    """Return a JWT's public claims (issuer/audience/expiry) — not the token."""
+    import base64
+    import json as _json
+    import time as _time
+    try:
+        parts = (token or "").split(".")
+        if len(parts) < 2:
+            return {"error": "not a JWT"}
+        b = parts[1].replace("-", "+").replace("_", "/")
+        b += "=" * (-len(b) % 4)
+        claims = _json.loads(base64.b64decode(b))
+        now = int(_time.time())
+        exp = claims.get("exp")
+        return {
+            "iss": claims.get("iss"),
+            "aud": claims.get("aud") if isinstance(claims.get("aud"), str) else None,
+            "exp": exp,
+            "expired": (exp < now) if exp else None,
+            "ttlMinutes": round((exp - now) / 60) if exp else None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 def introspect_auth_mutations():
     """Find login-related mutation names from the GraphQL schema."""
     import re as _re
@@ -360,6 +385,9 @@ def api_new():
 def api_check():
     """Diagnose whether the server can actually reach your API and audio host."""
     out = {"api": {}, "audio": {}}
+
+    if USER_TOKEN:
+        out["tokenInfo"] = _decode_jwt_claims(USER_TOKEN)
 
     if ZING_EMAIL and ZING_PASSWORD:
         res = zing_login()
