@@ -206,6 +206,7 @@
     <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span><span style="font-size:.6rem;font-weight:800;letter-spacing:.5px;color:#fff;background:var(--grad);padding:2px 7px;border-radius:7px;align-self:center">v2</span></div>
     <div class="spacer"></div>
     <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
+    <button class="iconbtn" title="My Music" onclick="browseLibrary()"><span class="ms">favorite</span></button>
     <button class="iconbtn" title="Settings" onclick="openSettings()"><span class="ms">settings</span></button>
   </div>
 
@@ -269,6 +270,8 @@
       featured_play_list:"M3 10h11v2H3v-2zm0-4h11v2H3V6zm0 8h7v2H3v-2zm13-1v6l5-3-5-3z",
       artist:"M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z",
       album:"M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm0-5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z",
+      favorite:"M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z",
+      favorite_border:"M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z",
       play_arrow:"M8 5v14l11-7z",
       pause:"M6 5h4v14H6zm8 0h4v14h-4z",
       skip_previous:"M6 6h2v12H6zm3.5 6 8.5 6V6z",
@@ -318,6 +321,30 @@
         .then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); })
         .then(function(d){ if(d&&d.errors&&d.errors.length) throw new Error(d.errors[0].message||"query error"); return (d&&d.data)||{}; });
     }
+    // Authenticated GraphQL (attaches the login token) for per-account actions.
+    function agql(query,vars){
+      return fetch("/api/authquery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:query,variables:vars||{}})})
+        .then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); })
+        .then(function(d){ if(d&&d.errors&&d.errors.length) throw new Error(d.errors[0].message||"query error"); return (d&&d.data)||{}; });
+    }
+    var _profileId=null, _profileTried=false;
+    function ensureProfile(){
+      if(_profileId) return Promise.resolve(_profileId);
+      if(_profileTried) return Promise.resolve(_profileId);
+      return agql("query { profiles { id name } }").then(function(d){ _profileTried=true; var ps=d.profiles||[]; _profileId=ps.length?ps[0].id:null; return _profileId; })
+        .catch(function(){ _profileTried=true; return null; });
+    }
+    function saveArtist(id){ toast("Saving…"); ensureProfile().then(function(pid){
+      var q = pid ? "mutation($a:Int!,$p:Int!){ saveMyArtistToProfile(artistId:$a, profileId:$p){ id } }"
+                  : "mutation($a:Int!){ createOneMyArtist(data:{ artist:{ connect:{ id:$a } } }){ id } }";
+      var v = pid ? {a:Number(id),p:Number(pid)} : {a:Number(id)};
+      agql(q,v).then(function(){ toast("Saved to My Music ♥"); }).catch(function(e){ if(e.message==="login")return; toast("Couldn’t save: "+(e.message||"login not connected")); }); }); }
+    function saveAlbum(id){ toast("Saving…"); ensureProfile().then(function(pid){
+      var q = pid ? "mutation($a:Int!,$p:Int!){ saveMyAlbumToProfile(albumId:$a, profileId:$p){ id } }"
+                  : "mutation($a:Int!){ createOneMyAlbum(data:{ album:{ connect:{ id:$a } } }){ id } }";
+      var v = pid ? {a:Number(id),p:Number(pid)} : {a:Number(id)};
+      agql(q,v).then(function(){ toast("Saved to My Music ♥"); }).catch(function(e){ if(e.message==="login")return; toast("Couldn’t save: "+(e.message||"login not connected")); }); }); }
+
     function checkStatus(){ fetch("/api/status").then(function(r){return r.json();}).then(function(s){
       if(s.configured){ $("cfgBanner").hidden=true; $("cfgBadge").textContent=""; }
       else { $("cfgBanner").hidden=false; $("cfgBadge").textContent="Not configured"; } }).catch(function(){}); }
@@ -543,7 +570,8 @@
       post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; setStatus(""); var anm=a?(pick(a.enName,a.heName)||"Artist"):"Artist"; var aalt=a?((SET.lang==="he")?(a.enName||""):(a.heName||"")):""; window._curArtist=anm;
         var abio=a?(a.bio||pick(a.enDesc,a.heDesc)||""):"";
         var head='<div class="back" onclick="go(\'home\')">'+ic("arrow_back_ios_new")+'Back</div>'+
-          '<div class="hero">'+coverHtml(anm,{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(anm)+'</h2>'+(aalt?'<div class="sub">'+esc(aalt)+'</div>':'')+'</div></div>'+
+          '<div class="hero">'+coverHtml(anm,{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(anm)+'</h2>'+(aalt?'<div class="sub">'+esc(aalt)+'</div>':'')+
+            '<div class="actions"><button class="btn ghost sm" onclick="saveArtist('+Number(id)+')">'+ic("favorite_border")+' Save</button></div></div></div>'+
           (abio?'<p class="muted" style="margin:-6px 18px 18px;line-height:1.7;font-size:.92rem">'+esc(abio)+'</p>':'');
         window._albumBack=function(){ openArtist(id); };
         if(!albums.length){ setView(head+'<div class="empty">No albums available.</div>'); return; }
@@ -565,7 +593,7 @@
         '<div class="tk">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
         '<button class="dl" onclick="event.stopPropagation();downloadTrack('+t.id+', '+esc(JSON.stringify(t.file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button></div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(albName(al),{img:albImg(al)})+'<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2><div class="sub">'+tracks.length+' tracks</div>'+
-        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(tracks.length?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>'+(tracks.length?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
         (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
       highlightPlaying();
     }
@@ -647,6 +675,21 @@
       }).catch(function(e){ if(e.message==="login")return; npBox('<div class="empty">Could not load similar songs.</div>'); });
     }
     function playSimilar(i){ playTracks(window._npSimilar||[], i, ""); closeOverlay(true); }
+
+    // ---------- My Music (saved favorites) ----------
+    function browseLibrary(){ curTab=""; setTab(""); loading("Loading your music…");
+      var pArt=agql("query { myArtists { id enName heName image } }").then(function(d){return d.myArtists||[];}).catch(function(){return null;});
+      var pAlb=agql("query { myAlbums(take:60) { album { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){return (d.myAlbums||[]).map(function(x){return x.album;}).filter(Boolean);}).catch(function(){return null;});
+      Promise.all([pArt,pAlb]).then(function(res){ setStatus("");
+        var arts=res[0], albs=res[1];
+        if(arts===null&&albs===null){ setView('<div class="back" onclick="go(\'home\')">'+ic("arrow_back_ios_new")+'Home</div><div class="empty">Couldn’t load your library — your login may not be connected for saving yet. Tell the developer what this says so it can be fixed.</div>'); return; }
+        var html='<div class="back" onclick="go(\'home\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead("My Music"); var any=false;
+        if(albs&&albs.length){ any=true; window._albums=window._albums||{}; albs.forEach(function(a){window._albums[a.id]=a;}); html+='<div class="sec">'+secHead("Saved Albums")+'<div class="grid albums">'+albs.map(function(al){return albumTile(al,artNames(al.artists));}).join("")+'</div></div>'; }
+        if(arts&&arts.length){ any=true; html+='<div class="sec">'+secHead("Saved Artists")+'<div class="grid artists">'+arts.map(artistTile).join("")+'</div></div>'; }
+        if(!any){ html+='<div class="empty">Nothing saved yet. Tap the ♥ on an album or artist to save it here.</div>'; }
+        setView(html);
+      });
+    }
 
     function overlay(title, bodyHtml){ closeOverlay(true); var o=document.createElement("div"); o.className="ovl"; o.id="ovl";
       o.innerHTML='<div class="obar"><h2 id="ovlTitle">'+esc(title)+'</h2><button class="iconbtn" onclick="closeOverlay()">'+ic("close")+'</button></div><div id="ovlBody">'+bodyHtml+'</div>'; document.body.appendChild(o); }
@@ -836,6 +879,7 @@
     window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText;
     window.showFullSchema=showFullSchema; window.downloadText=downloadText; window.showZingConfig=showZingConfig; window.showZingActions=showZingActions;
     window.openNowPlaying=openNowPlaying; window.npLyrics=npLyrics; window.npSimilar=npSimilar; window.playSimilar=playSimilar;
+    window.browseLibrary=browseLibrary; window.saveArtist=saveArtist; window.saveAlbum=saveAlbum;
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
 
