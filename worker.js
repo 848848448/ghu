@@ -63,6 +63,12 @@ export default {
       if (path === "/api/check") {
         return await handleCheck(env);
       }
+      if (path === "/api/schema") {
+        return await handleSchema(env);
+      }
+      if (path === "/api/query" && request.method === "POST") {
+        return await handleRawQuery(request, env);
+      }
       if (path === "/api/play") {
         return await handlePlay(url, request, env);
       }
@@ -234,6 +240,56 @@ async function introspectAuthMutations(env) {
     return { total: fields.length, candidates: cand };
   } catch (e) {
     return { error: String((e && e.message) || e) };
+  }
+}
+
+// List the top-level Query fields (the "structure" of the API).
+async function handleSchema(env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const q =
+    "query { __schema { queryType { fields { name args { name } type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } } }";
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d && d.errors && d.errors.length) {
+      return json({ error: (d.errors[0] && d.errors[0].message) || "introspection blocked" }, 502);
+    }
+    const fields = (((d.data || {}).__schema || {}).queryType || {}).fields || [];
+    const tn = (t) => {
+      while (t && !t.name && t.ofType) t = t.ofType;
+      return t ? t.name : null;
+    };
+    const out = fields.map((f) => ({
+      name: f.name,
+      args: (f.args || []).map((a) => a.name),
+      returns: tn(f.type),
+    }));
+    return json({ queryFields: out });
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 502);
+  }
+}
+
+// Run an arbitrary read query against the API (behind the site password).
+// Lets the UI fetch genres, playlists, podcasts, etc. without new endpoints.
+async function handleRawQuery(request, env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const body = await request.json().catch(() => ({}));
+  if (!body.query) return json({ error: "Missing query." }, 400);
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: body.query, variables: body.variables || {} }),
+    });
+    const d = await r.json().catch(() => ({}));
+    return json(d);
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 502);
   }
 }
 
@@ -750,6 +806,7 @@ const PAGE = `<!DOCTYPE html>
       <button id="navNew" class="active" onclick="doNew()">🔥 New Releases</button>
       <button id="navArtists" onclick="browseArtists()">🎤 All Artists</button>
       <button id="navCheck" onclick="runCheck(false)">🔧 Check connection</button>
+      <button id="navSchema" onclick="showSchema()">🗺️ API structure</button>
     </div>
     <div id="diag"></div>
     <div id="status"></div>
@@ -999,7 +1056,18 @@ const PAGE = `<!DOCTYPE html>
       }).catch(function(e){ if(e&&e.message==="login") return; diagBox("❌ Could not run the check: "+esc(e.message||e)); });
     }
 
+    function showSchema(){
+      diagBox('<span class="spinner"></span>Reading API structure…');
+      fetch("/api/schema").then(function(r){ if(r.status===401){location.href="/";throw new Error("login");} return r.json(); }).then(function(s){
+        if(s.error){ diagBox("❌ "+esc(s.error)); return; }
+        var f=s.queryFields||[];
+        var rows=f.map(function(x){ return '<code>'+esc(x.name)+'('+(x.args||[]).join(", ")+') → '+esc(x.returns||"?")+'</code>'; }).join("<br>");
+        diagBox('<b>API structure — '+f.length+' queries</b><div style="margin-top:8px;line-height:1.8;font-size:.86rem">'+rows+'</div><div style="margin-top:10px" class="muted">Send me this screenshot and I will build the full app around it.</div>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("❌ "+esc(e.message||e)); });
+    }
+
     // expose
+    window.showSchema=showSchema;
     window.openArtist=openArtist; window.openAlbum=openAlbum; window.playAlbum=playAlbum;
     window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum; window.doNew=doNew;
     window.browseArtists=browseArtists; window.filterGrid=filterGrid; window.runCheck=runCheck;
