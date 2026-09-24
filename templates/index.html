@@ -174,6 +174,7 @@
       <button id="navArtists" onclick="browseArtists()">🎤 All Artists</button>
       <button id="navCheck" onclick="runCheck(false)">🔧 Check</button>
       <button id="navSchema" onclick="showSchema()">🗺️ API</button>
+      <button id="navImg" onclick="showImageInfo()">🖼️ Images</button>
     </div>
     <div id="diag"></div>
     <div id="status"></div>
@@ -529,6 +530,29 @@
       }).catch(function(e){ if(e&&e.message==="login") return; diagBox("❌ Could not run the check: "+esc(e.message||e)); });
     }
 
+    function showImageInfo(){
+      diagBox('<span class="spinner"></span>Reading image format…');
+      gql('query { t: __type(name:"Images"){ fields { name type { kind name ofType { kind name } } } } }').then(function(d){
+        var fs=(d.t&&d.t.fields)||[];
+        var scalar=fs.filter(function(f){ var t=f.type||{}; return t.kind==="SCALAR" || (t.kind==="NON_NULL" && t.ofType && t.ofType.kind==="SCALAR"); }).map(function(f){return f.name;});
+        var sub = scalar.length ? "images { "+scalar.join(" ")+" }" : "";
+        var q="query { artists(take:2){ id enName image "+sub+" } playlists(take:2){ id name image cdnImage } genres(take:1){ id enName images } tracks(take:1){ id enName images } albums(take:2){ id enName "+sub+" } }";
+        return gql(q).then(function(dd){
+          function j(x){ return JSON.stringify(x); }
+          var out="Images fields (scalar): "+scalar.join(", ")+"\n\n";
+          out+="artist.image = "+j(dd.artists&&dd.artists[0]&&dd.artists[0].image)+"\n";
+          out+="artist.images = "+j(dd.artists&&dd.artists[0]&&dd.artists[0].images)+"\n";
+          out+="playlist.image = "+j(dd.playlists&&dd.playlists[0]&&dd.playlists[0].image)+"\n";
+          out+="playlist.cdnImage = "+j(dd.playlists&&dd.playlists[0]&&dd.playlists[0].cdnImage)+"\n";
+          out+="genre.images = "+j(dd.genres&&dd.genres[0]&&dd.genres[0].images)+"\n";
+          out+="track.images = "+j(dd.tracks&&dd.tracks[0]&&dd.tracks[0].images)+"\n";
+          out+="album.images = "+j(dd.albums&&dd.albums[0]&&dd.albums[0].images)+"\n";
+          window._schemaText=out;
+          diagBox('<b>Image format</b><pre dir="ltr" style="white-space:pre-wrap;word-break:break-all;font-size:.78rem;margin-top:8px">'+esc(out)+'</pre><button class="btn sm" onclick="copySchema(this)">📋 Copy</button><div class="muted" style="margin-top:8px">Tap Copy and paste it to me.</div>');
+        });
+      }).catch(function(e){ if(e.message==="login")return; diagBox("❌ "+esc(e.message||e)); });
+    }
+
     function showSchema(){
       diagBox('<span class="spinner"></span>Reading API structure…');
       fetch("/api/schema").then(function(r){ if(r.status===401){location.href="/";throw new Error("login");} return r.json(); }).then(function(s){
@@ -568,7 +592,7 @@
     }
 
     // expose
-    window.showSchema=showSchema; window.copySchema=copySchema;
+    window.showSchema=showSchema; window.copySchema=copySchema; window.showImageInfo=showImageInfo;
     window.openArtist=openArtist; window.openAlbum=openAlbum; window.playAlbum=playAlbum;
     window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum; window.doNew=doNew;
     window.browseArtists=browseArtists; window.filterGrid=filterGrid; window.runCheck=runCheck;
