@@ -19,16 +19,14 @@ compatibility_date = "2025-01-01"
 # small storage area. Use EITHER a D1 SQL database OR a KV namespace — both free.
 #
 # Option A — D1 (SQL database). Tables are created automatically on first use.
-#   1. Create it:  npx wrangler d1 create zing-db
-#      (or dashboard: Storage & Databases -> D1 -> Create)
-#   2. Put the database_id it prints below and uncomment these lines:
-#
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "zing-db"
-# database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
-#
-# Option B — KV namespace.
+# This project is bound to a D1 database (accounts + admin settings live here):
+
+[[d1_databases]]
+binding = "DB"
+database_name = "zing-db"
+database_id = "c3e8dbba-2651-4d9b-bd23-2cf9eecf4210"
+
+# Option B — KV namespace (alternative to D1; leave commented while D1 is used).
 #   1. npx wrangler kv namespace create ZING_KV  (or dashboard -> KV -> Create)
 #   2. Put the id below and uncomment these lines:
 #
