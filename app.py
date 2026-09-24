@@ -75,7 +75,11 @@ if USER_TOKEN in ("PASTE_YOUR_JWT_TOKEN_HERE", "PASTE YOUR JWT TOKEN HERE"):
 # Optional auto-login: when set, the app logs in itself to refresh the token.
 ZING_EMAIL = os.environ.get("ZING_EMAIL", "").strip()
 ZING_PASSWORD = os.environ.get("ZING_PASSWORD", "").strip()
+# Optional Firebase refresh (works forever without re-login).
+FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY", "").strip()
+FIREBASE_REFRESH_TOKEN = os.environ.get("FIREBASE_REFRESH_TOKEN", "").strip()
 _CACHED_TOKEN = None
+_CACHED_EXP = 0
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 CACHE_TTL = 86400  # 24 hours, same as the original script
@@ -84,6 +88,41 @@ CACHE_TTL = 86400  # 24 hours, same as the original script
 # --------------------------------------------------------------------------- #
 # Auto-login (optional)
 # --------------------------------------------------------------------------- #
+def can_firebase():
+    return bool(FIREBASE_API_KEY and FIREBASE_REFRESH_TOKEN)
+
+
+def has_auth():
+    return bool(USER_TOKEN or can_firebase() or can_auto_login())
+
+
+def firebase_refresh():
+    """Exchange the Firebase refresh token for a fresh ID token."""
+    global _CACHED_TOKEN, _CACHED_EXP
+    if not can_firebase():
+        return {"ok": False, "error": "FIREBASE_API_KEY / FIREBASE_REFRESH_TOKEN not set."}
+    try:
+        r = requests.post(
+            "https://securetoken.googleapis.com/v1/token",
+            params={"key": FIREBASE_API_KEY},
+            data={"grant_type": "refresh_token", "refresh_token": FIREBASE_REFRESH_TOKEN},
+            timeout=20,
+        )
+        d = r.json()
+        if not r.ok or d.get("error"):
+            err = d.get("error")
+            msg = err.get("message") if isinstance(err, dict) else err
+            return {"ok": False, "error": msg or f"Refresh returned {r.status_code}."}
+        idt = d.get("id_token") or d.get("access_token")
+        if idt:
+            _CACHED_TOKEN = idt
+            _CACHED_EXP = int(time.time()) + int(d.get("expires_in", 3600) or 3600)
+            return {"ok": True, "token": idt}
+        return {"ok": False, "error": "No id_token in the refresh response."}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
 def can_auto_login():
     return bool(API_URL and ZING_EMAIL and ZING_PASSWORD)
 
@@ -114,7 +153,9 @@ def zing_login():
             return {"ok": False, "error": d["errors"][0].get("message", "GraphQL error.")}
         res = d.get("data", {}).get("authenticateUserWithPassword") or {}
         if res.get("sessionToken"):
+            global _CACHED_EXP
             _CACHED_TOKEN = res["sessionToken"]
+            _CACHED_EXP = 0
             return {"ok": True, "token": _CACHED_TOKEN}
         return {"ok": False, "error": res.get("message", "Login failed (no token).")}
     except Exception as exc:  # noqa: BLE001
@@ -171,27 +212,31 @@ def introspect_auth_mutations():
 
 
 def current_token(force_login=False):
-    if not force_login:
-        if _CACHED_TOKEN:
-            return _CACHED_TOKEN
-        if USER_TOKEN:
-            return USER_TOKEN
+    now = int(time.time())
+    if not force_login and _CACHED_TOKEN and (_CACHED_EXP == 0 or now < _CACHED_EXP - 60):
+        return _CACHED_TOKEN
+    if can_firebase():
+        res = firebase_refresh()
+        if res["ok"]:
+            return res["token"]
     if can_auto_login():
         res = zing_login()
         if res["ok"]:
             return res["token"]
+    if not force_login and _CACHED_TOKEN:
+        return _CACHED_TOKEN
     return USER_TOKEN or ""
 
 
 def fetch_audio(track_id, extra_headers=None, stream=True):
-    """GET the audio, retrying once with a fresh login on a 403."""
+    """GET the audio, retrying once with a fresh token on a 403."""
     def build(tok):
         return f"{AUDIO_API_BASE}?trackId={track_id}&token={tok}"
 
     token = current_token(False)
     r = requests.get(build(token), verify=False, stream=stream, timeout=60,
                      headers=extra_headers or {})
-    if r.status_code == 403 and can_auto_login():
+    if r.status_code == 403 and (can_firebase() or can_auto_login()):
         token = current_token(True)
         r = requests.get(build(token), verify=False, stream=stream, timeout=60,
                          headers=extra_headers or {})
@@ -338,14 +383,14 @@ def index():
 @app.route("/api/status")
 def api_status():
     """Report ONLY whether each secret is configured — never the values."""
-    has_auth = bool(USER_TOKEN or (ZING_EMAIL and ZING_PASSWORD))
     return jsonify(
         {
             "apiUrl": bool(API_URL),
             "audioBase": bool(AUDIO_API_BASE),
-            "token": has_auth,
-            "autoLogin": bool(ZING_EMAIL and ZING_PASSWORD),
-            "configured": bool(API_URL and AUDIO_API_BASE and has_auth),
+            "token": has_auth(),
+            "autoLogin": bool(can_firebase() or can_auto_login()),
+            "firebase": bool(can_firebase()),
+            "configured": bool(API_URL and AUDIO_API_BASE and has_auth()),
         }
     )
 
@@ -389,7 +434,10 @@ def api_check():
     if USER_TOKEN:
         out["tokenInfo"] = _decode_jwt_claims(USER_TOKEN)
 
-    if ZING_EMAIL and ZING_PASSWORD:
+    if can_firebase():
+        res = firebase_refresh()
+        out["login"] = {"ok": True, "method": "firebase"} if res["ok"] else {"ok": False, "method": "firebase", "error": res["error"]}
+    elif ZING_EMAIL and ZING_PASSWORD:
         res = zing_login()
         out["login"] = {"ok": True} if res["ok"] else {"ok": False, "error": res["error"]}
         if not res["ok"] and API_URL:

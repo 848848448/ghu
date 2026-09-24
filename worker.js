@@ -34,13 +34,13 @@ export default {
         return html(authed ? PAGE : LOGIN);
       }
       if (path === "/api/status") {
-        const hasAuth = !!(env.USER_TOKEN || (env.ZING_EMAIL && env.ZING_PASSWORD));
         return json({
           apiUrl: !!env.API_URL,
           audioBase: !!env.AUDIO_API_BASE,
-          token: hasAuth,
-          autoLogin: !!(env.ZING_EMAIL && env.ZING_PASSWORD),
-          configured: !!(env.API_URL && env.AUDIO_API_BASE && hasAuth),
+          token: hasAuth(env),
+          autoLogin: canFirebase(env) || canAutoLogin(env),
+          firebase: canFirebase(env),
+          configured: !!(env.API_URL && env.AUDIO_API_BASE && hasAuth(env)),
           locked: locked,
           authed: authed,
         });
@@ -138,9 +138,50 @@ function logout() {
 // updated by hand. Falls back to the USER_TOKEN secret when auto-login is off.
 // --------------------------------------------------------------------------- //
 let CACHED_TOKEN = null; // per-isolate cache of the latest session token
+let CACHED_EXP = 0; // epoch seconds when the cached token expires (0 = unknown)
+
+function canFirebase(env) {
+  return !!(env.FIREBASE_API_KEY && env.FIREBASE_REFRESH_TOKEN);
+}
 
 function canAutoLogin(env) {
   return !!(env.API_URL && env.ZING_EMAIL && env.ZING_PASSWORD);
+}
+
+function hasAuth(env) {
+  return !!(env.USER_TOKEN || canFirebase(env) || canAutoLogin(env));
+}
+
+// Exchange the long-lived Firebase refresh token for a fresh ID token.
+// Google's endpoint has a valid certificate, so Cloudflare can reach it.
+async function firebaseRefresh(env) {
+  if (!canFirebase(env)) return { ok: false, error: "FIREBASE_API_KEY / FIREBASE_REFRESH_TOKEN not set." };
+  try {
+    const r = await fetch(
+      "https://securetoken.googleapis.com/v1/token?key=" + encodeURIComponent(env.FIREBASE_API_KEY),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body:
+          "grant_type=refresh_token&refresh_token=" +
+          encodeURIComponent(env.FIREBASE_REFRESH_TOKEN),
+      }
+    );
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) {
+      const msg = d.error && (d.error.message || d.error);
+      return { ok: false, error: msg || "Refresh returned " + r.status + "." };
+    }
+    const idt = d.id_token || d.access_token;
+    if (idt) {
+      CACHED_TOKEN = idt;
+      CACHED_EXP = Math.floor(Date.now() / 1000) + (parseInt(d.expires_in, 10) || 3600);
+      return { ok: true, token: idt };
+    }
+    return { ok: false, error: "No id_token in the refresh response." };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
 }
 
 async function zingLogin(env) {
@@ -161,6 +202,7 @@ async function zingLogin(env) {
     const res = (d && d.data && d.data.authenticateUserWithPassword) || {};
     if (res.sessionToken) {
       CACHED_TOKEN = res.sessionToken;
+      CACHED_EXP = 0; // unknown expiry; the 403-retry covers staleness
       return { ok: true, token: res.sessionToken };
     }
     return { ok: false, error: res.message || "Login failed (no session token returned)." };
@@ -196,18 +238,25 @@ async function introspectAuthMutations(env) {
 }
 
 async function currentToken(env, forceLogin) {
-  if (!forceLogin) {
-    if (CACHED_TOKEN) return CACHED_TOKEN;
-    if (env.USER_TOKEN) return env.USER_TOKEN;
+  const now = Math.floor(Date.now() / 1000);
+  if (!forceLogin && CACHED_TOKEN && (CACHED_EXP === 0 || now < CACHED_EXP - 60)) {
+    return CACHED_TOKEN;
   }
+  // Preferred: Firebase refresh token (works forever, no re-login).
+  if (canFirebase(env)) {
+    const res = await firebaseRefresh(env);
+    if (res.ok) return res.token;
+  }
+  // Alternative: email/password login (if the API supports it).
   if (canAutoLogin(env)) {
     const res = await zingLogin(env);
     if (res.ok) return res.token;
   }
+  if (!forceLogin && CACHED_TOKEN) return CACHED_TOKEN;
   return env.USER_TOKEN || "";
 }
 
-// Fetch from the audio server, retrying once with a fresh login on a 403.
+// Fetch from the audio server, retrying once with a fresh token on a 403.
 async function fetchAudio(env, trackId, extraHeaders) {
   let token = await currentToken(env, false);
   const build = (t) =>
@@ -215,8 +264,8 @@ async function fetchAudio(env, trackId, extraHeaders) {
     "?trackId=" + encodeURIComponent(trackId) +
     "&token=" + encodeURIComponent(t || "");
   let r = await fetch(build(token), { headers: extraHeaders || {} });
-  if (r.status === 403 && canAutoLogin(env)) {
-    token = await currentToken(env, true); // force a fresh login
+  if (r.status === 403 && (canFirebase(env) || canAutoLogin(env))) {
+    token = await currentToken(env, true); // force a fresh token
     r = await fetch(build(token), { headers: extraHeaders || {} });
   }
   return r;
@@ -325,11 +374,13 @@ async function handleCheck(env) {
   // Identify the token's provider/expiry (public claims only, no secrets).
   if (env.USER_TOKEN) out.tokenInfo = decodeJwtClaims(env.USER_TOKEN);
 
-  // Test auto-login when it's configured.
-  if (env.ZING_EMAIL && env.ZING_PASSWORD) {
+  // Test whichever auto-token method is configured.
+  if (canFirebase(env)) {
+    const res = await firebaseRefresh(env);
+    out.login = res.ok ? { ok: true, method: "firebase" } : { ok: false, method: "firebase", error: res.error };
+  } else if (env.ZING_EMAIL && env.ZING_PASSWORD) {
     const res = await zingLogin(env);
-    out.login = res.ok ? { ok: true } : { ok: false, error: res.error };
-    // If login failed, ask the schema what the real login mutation is called.
+    out.login = res.ok ? { ok: true, method: "password" } : { ok: false, method: "password", error: res.error };
     if (!res.ok && env.API_URL) {
       out.authMutations = await introspectAuthMutations(env);
     }
