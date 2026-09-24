@@ -362,6 +362,9 @@ def fetch_artist_details(artist_id):
         enName
         heName
         image
+        bio
+        heDesc
+        enDesc
         albums {{
           id
           enName
