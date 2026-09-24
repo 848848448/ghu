@@ -43,6 +43,7 @@ export default {
           configured: !!(env.API_URL && env.AUDIO_API_BASE && hasAuth(env)),
           locked: locked,
           authed: authed,
+          kv: !!env.ZING_KV,
         });
       }
 
@@ -51,6 +52,15 @@ export default {
         return json({ error: "Please log in.", needLogin: true }, 401);
       }
 
+      if (path === "/api/admin/list" && request.method === "POST") {
+        return await handleAdminList(request, env);
+      }
+      if (path === "/api/admin/add" && request.method === "POST") {
+        return await handleAdminAdd(request, env);
+      }
+      if (path === "/api/admin/remove" && request.method === "POST") {
+        return await handleAdminRemove(request, env);
+      }
       if (path === "/api/artists" && request.method === "POST") {
         return await handleArtists(env);
       }
@@ -116,7 +126,7 @@ async function handleLogin(request, env) {
   if (!env.SITE_PASSWORD) return json({ ok: true });
   const body = await request.json().catch(() => ({}));
   const pw = (body.password || "").toString();
-  if (pw && pw === env.SITE_PASSWORD) {
+  if (pw && (pw === env.SITE_PASSWORD || (await codeMatches(env, pw)))) {
     const token = await authToken(env);
     const cookie =
       "auth=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000";
@@ -136,6 +146,82 @@ function logout() {
       Location: "/",
     },
   });
+}
+
+// --------------------------------------------------------------------------- //
+// Access codes (optional): when a KV namespace named ZING_KV is bound, the
+// owner can give named access codes to other people from the in-app admin
+// screen. Any stored code — or the master SITE_PASSWORD — can sign in.
+// Managing codes requires the master password on every admin request.
+// --------------------------------------------------------------------------- //
+const CODES_KEY = "access_codes";
+
+async function getCodes(env) {
+  if (!env.ZING_KV) return null; // KV not bound → feature unavailable
+  try {
+    const raw = await env.ZING_KV.get(CODES_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function saveCodes(env, list) {
+  if (!env.ZING_KV) return;
+  await env.ZING_KV.put(CODES_KEY, JSON.stringify(list));
+}
+
+async function codeMatches(env, pw) {
+  const codes = await getCodes(env);
+  if (!codes) return false;
+  return codes.some((c) => c && typeof c.code === "string" && c.code === pw);
+}
+
+function isAdmin(env, body) {
+  return !!env.SITE_PASSWORD && (body.admin || "").toString() === env.SITE_PASSWORD;
+}
+
+// GET the list of access codes (admin only). Reports whether KV is available.
+async function handleAdminList(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!env.ZING_KV) return json({ kv: false, codes: [] });
+  const codes = await getCodes(env);
+  return json({ kv: true, codes: codes || [] });
+}
+
+// Add (or update) a named access code (admin only).
+async function handleAdminAdd(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!env.ZING_KV) return json({ error: "Access-code storage is not set up yet." }, 400);
+  const name = (body.name || "").toString().trim().slice(0, 60);
+  const code = (body.code || "").toString().trim();
+  if (!code) return json({ error: "Enter a code." }, 400);
+  if (code.length < 3) return json({ error: "Use at least 3 characters." }, 400);
+  if (code === env.SITE_PASSWORD) return json({ error: "That is the main password. Pick a different code." }, 400);
+  const codes = (await getCodes(env)) || [];
+  const existing = codes.find((c) => c && c.code === code);
+  if (existing) {
+    existing.name = name || existing.name;
+  } else {
+    codes.push({ name: name || "Someone", code: code, added: Date.now() });
+  }
+  await saveCodes(env, codes);
+  return json({ ok: true, codes });
+}
+
+// Remove an access code by its value (admin only).
+async function handleAdminRemove(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!env.ZING_KV) return json({ error: "Access-code storage is not set up yet." }, 400);
+  const code = (body.code || "").toString();
+  const codes = (await getCodes(env)) || [];
+  const next = codes.filter((c) => !(c && c.code === code));
+  await saveCodes(env, next);
+  return json({ ok: true, codes: next });
 }
 
 // --------------------------------------------------------------------------- //
@@ -621,8 +707,8 @@ const LOGIN = `<!DOCTYPE html>
   <div class="box">
     <div class="logo">♪</div>
     <h1>Zing Music</h1>
-    <p>Enter the password to continue.</p>
-    <input id="pw" type="password" placeholder="Password" autocomplete="current-password" />
+    <p>Enter your password or access code.</p>
+    <input id="pw" type="password" placeholder="Password or code" autocomplete="current-password" />
     <button id="go">Sign in</button>
     <div class="msg" id="msg"></div>
   </div>
@@ -664,6 +750,13 @@ const PAGE = `<!DOCTYPE html>
       --grad:linear-gradient(135deg,var(--accent),var(--accent-2));
       --font:"Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       --tabs-h:64px; --player-h:66px;
+      --bar:rgba(10,10,18,.82); --bar-player:rgba(20,20,34,.94); --bar-tabs:rgba(14,14,24,.96); --ovl-bg:rgba(10,10,18,.97);
+    }
+    :root[data-theme="light"]{
+      color-scheme: light;
+      --bg:#f4f4fb; --bg-2:#ececf4; --surface:#ffffff; --surface-2:#f1f1f8; --surface-3:#e7e7f1;
+      --text:#191933; --muted:#6a6a86; --line:rgba(0,0,0,.10);
+      --bar:rgba(255,255,255,.85); --bar-player:rgba(255,255,255,.95); --bar-tabs:rgba(255,255,255,.96); --ovl-bg:rgba(247,247,251,.98);
     }
     *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     html,body{ height:100%; margin:0; }
@@ -680,7 +773,7 @@ const PAGE = `<!DOCTYPE html>
     /* Top bar */
     .top{ position:sticky; top:env(safe-area-inset-top,0px); z-index:30;
       display:flex; align-items:center; gap:12px; padding:13px 18px;
-      background:rgba(10,10,18,.82); backdrop-filter:blur(14px); border-bottom:1px solid var(--line); }
+      background:var(--bar); backdrop-filter:blur(14px); border-bottom:1px solid var(--line); }
     .brand{ display:flex; align-items:center; gap:10px; }
     .logo{ width:36px; height:36px; border-radius:11px; display:grid; place-items:center; background:var(--grad);
       box-shadow:0 6px 16px rgba(124,92,255,.45); }
@@ -773,7 +866,7 @@ const PAGE = `<!DOCTYPE html>
     /* Now-playing bar */
     .player{ position:fixed; left:0; right:0; bottom:calc(var(--tabs-h) + env(safe-area-inset-bottom,0px)); z-index:35;
       display:flex; align-items:center; gap:12px; padding:9px 14px;
-      background:rgba(20,20,34,.94); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
+      background:var(--bar-player); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
     .player[hidden]{ display:none; }
     .np-cover{ width:46px; height:46px; border-radius:10px; flex:none; display:grid; place-items:center; overflow:hidden; box-shadow:inset 0 0 20px rgba(0,0,0,.3); }
     .np-cover .disc{ width:34%; height:34%; border-radius:999px; background:radial-gradient(circle at 50% 50%,#fff 0 14%,rgba(255,255,255,.22) 15% 33%,rgba(0,0,0,.14) 34% 100%); }
@@ -792,14 +885,14 @@ const PAGE = `<!DOCTYPE html>
 
     /* Bottom tabs */
     .tabs{ position:fixed; left:0; right:0; bottom:0; z-index:36; height:calc(var(--tabs-h) + env(safe-area-inset-bottom,0px));
-      padding-bottom:env(safe-area-inset-bottom,0px); display:flex; background:rgba(14,14,24,.96); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
+      padding-bottom:env(safe-area-inset-bottom,0px); display:flex; background:var(--bar-tabs); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
     .tab{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; background:none; border:none; color:var(--muted); cursor:pointer; font-family:inherit; }
     .tab .ms{ font-size:25px; } .tab span.lbl{ font-size:.66rem; font-weight:600; }
     .tab.active{ color:var(--text); }
     .tab.active .ms{ background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
 
     /* Overlay (lyrics / settings) */
-    .ovl{ position:fixed; inset:0; z-index:60; background:rgba(10,10,18,.97); backdrop-filter:blur(8px); overflow:auto;
+    .ovl{ position:fixed; inset:0; z-index:60; background:var(--ovl-bg); backdrop-filter:blur(8px); overflow:auto;
       padding:18px 18px calc(28px + env(safe-area-inset-bottom,0px)); }
     .ovl .obar{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:16px; position:sticky; top:0; }
     .ovl h2{ margin:0; font-size:1.2rem; }
@@ -812,6 +905,31 @@ const PAGE = `<!DOCTYPE html>
     .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
     .chips{ display:flex; gap:8px; padding:0 18px; flex-wrap:wrap; }
     .chip{ background:var(--surface); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:8px 14px; font-weight:600; font-size:.85rem; cursor:pointer; }
+
+    /* Settings */
+    .set-sec{ margin-top:22px; }
+    .set-sec:first-child{ margin-top:4px; }
+    .set-sec h3{ margin:0 0 10px; font-size:.74rem; letter-spacing:1.6px; text-transform:uppercase; color:var(--muted); }
+    .card{ background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+    .row{ display:flex; align-items:center; gap:12px; padding:13px 15px; border-bottom:1px solid var(--line); }
+    .row:last-child{ border-bottom:none; }
+    .row .rlabel{ flex:1; min-width:0; }
+    .row .rlabel .rt{ font-weight:600; font-size:.98rem; }
+    .row .rlabel .rd{ color:var(--muted); font-size:.8rem; margin-top:2px; }
+    .row .ms{ color:var(--muted); font-size:22px; flex:none; }
+    .seg{ display:inline-flex; background:var(--surface-3); border-radius:11px; padding:3px; flex:none; }
+    .seg button{ border:none; background:transparent; color:var(--muted); font-family:inherit; font-weight:600; font-size:.86rem; padding:7px 13px; border-radius:9px; cursor:pointer; }
+    .seg button.on{ background:var(--grad); color:#fff; box-shadow:0 4px 10px rgba(124,92,255,.35); }
+    .field{ width:100%; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:var(--bg-2); color:var(--text); font-size:1rem; font-family:inherit; outline:none; }
+    .field:focus{ border-color:var(--accent); }
+    .code-item{ display:flex; align-items:center; gap:12px; padding:12px 15px; border-bottom:1px solid var(--line); }
+    .code-item:last-child{ border-bottom:none; }
+    .code-item .ci-name{ font-weight:600; font-size:.96rem; }
+    .code-item .ci-code{ color:var(--muted); font-size:.82rem; margin-top:1px; }
+    .trash{ margin-left:auto; width:38px; height:38px; border-radius:999px; border:none; background:transparent; color:var(--muted); cursor:pointer; display:grid; place-items:center; flex:none; }
+    .trash:hover{ background:rgba(251,113,133,.14); color:var(--err); } .trash .ms{ font-size:20px; }
+    .set-sec code, .card code{ background:var(--surface-3); padding:1px 6px; border-radius:6px; font-size:.86em; color:var(--text); }
+    .steps{ margin:0; padding-left:20px; line-height:1.85; } .steps li{ margin-bottom:6px; }
     @media (prefers-reduced-motion: reduce){ *{ transition:none !important; animation-duration:.01ms !important; } }
   </style>
 </head>
@@ -858,6 +976,17 @@ const PAGE = `<!DOCTYPE html>
     var artists=[], artistsLoaded=false;
     var CACHE_KEY="zing_artists_cache_v2", CACHE_TTL=86400000;
     var queue=[], qi=-1;
+    var curTab="home", _dirtyView=false, _admPw="";
+
+    // ---------- App settings (saved on this device) ----------
+    var SET_KEY="zing_settings";
+    function loadSettings(){ var d={lang:"en",theme:"dark",autoplay:true};
+      try{ var o=JSON.parse(localStorage.getItem(SET_KEY)||"null"); if(o){ if(o.lang==="he")d.lang="he"; if(o.theme==="light")d.theme="light"; if(o.autoplay===false)d.autoplay=false; } }catch(e){}
+      return d; }
+    var SET=loadSettings();
+    function saveSettings(){ try{ localStorage.setItem(SET_KEY, JSON.stringify(SET)); }catch(e){} }
+    function applyTheme(){ document.documentElement.setAttribute("data-theme", SET.theme); }
+    applyTheme();
 
     function $(id){ return document.getElementById(id); }
     function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
@@ -876,7 +1005,11 @@ const PAGE = `<!DOCTYPE html>
       skip_next:"M16 6h2v12h-2zM6 18l8.5-6L6 6z",
       download:"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
       arrow_back_ios_new:"M17.77 3.77 16 2 6 12l10 10 1.77-1.77L9.54 12z",
-      close:"M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+      close:"M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+      delete:"M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+      person_add:"M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-1V8H4v3H1v2h3v3h2v-3h3v-2H6zm9 3c-2.67 0-8 1.34-8 4v3h16v-3c0-2.66-5.33-4-8-4z",
+      logout:"M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4z",
+      lock:"M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"
     };
     function ic(n){ return '<svg class="ms" viewBox="0 0 24 24" aria-hidden="true"><path d="'+(ICONS[n]||ICONS.play_arrow)+'"></path></svg>'; }
     function hydrateIcons(root){ (root||document).querySelectorAll("span.ms").forEach(function(el){ el.outerHTML = ic(el.textContent.trim()); }); }
@@ -884,9 +1017,12 @@ const PAGE = `<!DOCTYPE html>
     function grad(name){ var h=hash(name); var a=h%360; var b=(a+45+(h>>3)%70)%360; return "linear-gradient(135deg, hsl("+a+",72%,56%), hsl("+b+",70%,44%))"; }
     function ini(name){ var p=(name||"?").trim().split(/\\s+/).filter(Boolean); if(!p.length) return "?"; return (p.length===1?p[0].slice(0,2):(p[0][0]+p[1][0])).toUpperCase(); }
     function fmt(sec){ if(!isFinite(sec)||sec<0) sec=0; var m=Math.floor(sec/60), s=Math.floor(sec%60); return m+":"+(s<10?"0":"")+s; }
-    function trackName(t){ return (t.enName||t.heName||(t.file||"").split("/").pop()||("Track "+t.id)); }
-    function albName(al){ return (al.enName||al.heName||"Unknown Album"); }
-    function artNames(list){ return (list||[]).map(function(a){return a.enName||a.heName||"Unknown";}).join(", "); }
+    function pick(en,he){ if(SET.lang==="he"){ return he||en||""; } return en||he||""; }
+    function trackName(t){ return (pick(t.enName,t.heName)||(t.file||"").split("/").pop()||("Track "+t.id)); }
+    function albName(al){ return (pick(al.enName,al.heName)||"Unknown Album"); }
+    function artNames(list){ return (list||[]).map(function(a){return pick(a.enName,a.heName)||"Unknown";}).join(", "); }
+    function plName(p){ return pick(p.enName||p.name, p.heName)||"Playlist"; }
+    function genName(g){ return pick(g.enName,g.heName)||"Genre"; }
     function albImg(al){ var im=al&&al.images; return (im && (im.cdnMedium||im.medium||im.cdnSmall||im.small))||null; }
     function imgUrl(v){ return (typeof v==="string" && /^https?:\\/\\//.test(v)) ? v : null; }
 
@@ -929,6 +1065,7 @@ const PAGE = `<!DOCTYPE html>
     // ---------- Tabs ----------
     function setTab(id){ ["tabHome","tabSearch","tabGenres","tabPlaylists","tabArtists"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
     function go(where){
+      curTab=where;
       if(where==="home"){ setTab("tabHome"); home(); }
       else if(where==="search"){ setTab("tabSearch"); searchView(); }
       else if(where==="genres"){ setTab("tabGenres"); browseGenres(); }
@@ -939,12 +1076,13 @@ const PAGE = `<!DOCTYPE html>
     // ---------- Cards ----------
     function albumHCard(al, sub){ return '<div class="hcard album" onclick="openAlbum('+al.id+')">'+coverHtml(albName(al),{img:albImg(al),fab:true})+
       '<div class="c-name">'+esc(albName(al))+'</div><div class="c-sub">'+esc(sub||"")+'</div></div>'; }
-    function artistHCard(a){ return '<div class="hcard artist" onclick="openArtist('+a.id+')">'+coverHtml(a.enName||a.heName,{round:true,img:a.image})+
-      '<div class="c-name">'+esc(a.enName||a.heName||"Artist")+'</div></div>'; }
+    function artistHCard(a){ var nm=pick(a.enName,a.heName)||"Artist"; return '<div class="hcard artist" onclick="openArtist('+a.id+')">'+coverHtml(nm,{round:true,img:a.image})+
+      '<div class="c-name">'+esc(nm)+'</div></div>'; }
     function albumTile(al, sub){ return '<div class="tile album" onclick="openAlbum('+al.id+')">'+coverHtml(albName(al),{img:albImg(al),fab:true})+
       '<div class="c-name">'+esc(albName(al))+'</div><div class="c-sub">'+esc(sub||"")+'</div></div>'; }
-    function artistTile(a){ return '<div class="tile artist" onclick="openArtist('+a.id+')">'+coverHtml(a.enName||a.heName,{round:true,img:a.image})+
-      '<div class="c-name">'+esc(a.enName||"Unknown")+'</div><div class="c-sub">'+esc(a.heName||"")+'</div></div>'; }
+    function artistTile(a){ var nm=pick(a.enName,a.heName)||"Unknown"; var alt=(SET.lang==="he")?(a.enName||""):(a.heName||"");
+      return '<div class="tile artist" onclick="openArtist('+a.id+')">'+coverHtml(nm,{round:true,img:a.image})+
+      '<div class="c-name">'+esc(nm)+'</div><div class="c-sub">'+esc(alt)+'</div></div>'; }
 
     function secHead(title, seeTab){ return '<div class="sec-head"><h2>'+esc(title)+'</h2>'+(seeTab?'<button class="see" onclick="go(\\''+seeTab+'\\')">See all '+ic("chevron_right")+'</button>':'')+'</div>'; }
 
@@ -965,10 +1103,10 @@ const PAGE = `<!DOCTYPE html>
         }
         if(genres.length){
           html+='<div class="sec">'+secHead("Genres","genres")+'<div class="chips">'+genres.map(function(g){
-            return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(g.enName||g.heName||"Genre")+'</button>'; }).join("")+'</div></div>';
+            return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div></div>';
         }
         if(playlists.length){
-          html+='<div class="sec">'+secHead("Playlists","playlists")+'<div class="hrow">'+playlists.map(function(p){ var nm=p.enName||p.name||p.heName||"Playlist";
+          html+='<div class="sec">'+secHead("Playlists","playlists")+'<div class="hrow">'+playlists.map(function(p){ var nm=plName(p);
             return '<div class="hcard" onclick="openPlaylist('+p.id+')">'+coverHtml(nm,{img:p.cdnImage||p.image,fab:true})+'<div class="c-name">'+esc(nm)+'</div><div class="c-sub">Playlist</div></div>'; }).join("")+'</div></div>';
         }
         if(!html) html='<div class="empty">Nothing to show yet. Check Settings.</div>';
@@ -997,13 +1135,13 @@ const PAGE = `<!DOCTYPE html>
     function browseGenres(){ loading("Loading genres…");
       gql("query { genres(take: 300) { id enName heName } }").then(function(d){ var gs=d.genres||[]; setStatus("");
         if(!gs.length){ setView('<div class="empty">No genres.</div>'); return; }
-        setView(secHead("Genres")+'<div class="chips">'+gs.map(function(g){ return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(g.enName||g.heName||"Genre")+'</button>'; }).join("")+'</div>');
+        setView(secHead("Genres")+'<div class="chips">'+gs.map(function(g){ return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
     function openGenre(id){ loading("Loading…");
       gql("query { genre(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
         var g=d.genre; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=browseGenres;
-        var head='<div class="back" onclick="browseGenres()">'+ic("arrow_back_ios_new")+'Genres</div>'+secHead(g?(g.enName||g.heName):"Genre");
+        var head='<div class="back" onclick="browseGenres()">'+ic("arrow_back_ios_new")+'Genres</div>'+secHead(g?genName(g):"Genre");
         if(!albums.length){ setView(head+'<div class="empty">No albums in this genre.</div>'); return; }
         window._albums=window._albums||{}; setView(head+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al, artNames(al.artists)); }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
@@ -1013,7 +1151,7 @@ const PAGE = `<!DOCTYPE html>
     function browsePlaylists(){ loading("Loading playlists…");
       gql("query { playlists(take: 300) { id name enName heName image cdnImage } }").then(function(d){ var ps=d.playlists||[]; setStatus("");
         if(!ps.length){ setView('<div class="empty">No playlists.</div>'); return; }
-        setView(secHead("Playlists")+'<div class="grid albums">'+ps.map(function(p){ var nm=p.enName||p.name||p.heName||"Playlist";
+        setView(secHead("Playlists")+'<div class="grid albums">'+ps.map(function(p){ var nm=plName(p);
           return '<div class="tile album" onclick="openPlaylist('+p.id+')">'+coverHtml(nm,{img:p.cdnImage||p.image,fab:true})+'<div class="c-name">'+esc(nm)+'</div><div class="c-sub">Playlist</div></div>'; }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
@@ -1021,7 +1159,7 @@ const PAGE = `<!DOCTYPE html>
       gql("query { playlist(where:{id:"+Number(id)+"}) { id name enName heName image cdnImage playlistTracks { track { id enName heName file duration trackNumber artists { enName heName } } } } }").then(function(d){
         var p=d.playlist; setStatus("");
         var tracks=((p&&p.playlistTracks)||[]).map(function(x){return x.track;}).filter(Boolean);
-        var nm=p?(p.enName||p.name||p.heName):"Playlist";
+        var nm=p?plName(p):"Playlist";
         renderTrackList(nm, tracks.length+" tracks", tracks, browsePlaylists, (p&&(p.cdnImage||p.image)), "Playlist");
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
@@ -1033,9 +1171,9 @@ const PAGE = `<!DOCTYPE html>
     }); }
 
     function openArtist(id){ loading("Loading…");
-      post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; setStatus(""); window._curArtist=(a&&a.enName)||"";
-        var head='<div class="back" onclick="history.length?go(\\'home\\'):null;go(\\'home\\')">'+ic("arrow_back_ios_new")+'Back</div>'+
-          '<div class="hero">'+coverHtml(a?(a.enName||a.heName):"",{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(a?a.enName:"Artist")+'</h2>'+(a&&a.heName?'<div class="sub">'+esc(a.heName)+'</div>':'')+'</div></div>';
+      post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; setStatus(""); var anm=a?(pick(a.enName,a.heName)||"Artist"):"Artist"; var aalt=a?((SET.lang==="he")?(a.enName||""):(a.heName||"")):""; window._curArtist=anm;
+        var head='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Back</div>'+
+          '<div class="hero">'+coverHtml(anm,{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(anm)+'</h2>'+(aalt?'<div class="sub">'+esc(aalt)+'</div>':'')+'</div></div>';
         window._albumBack=function(){ openArtist(id); };
         if(!albums.length){ setView(head+'<div class="empty">No albums available.</div>'); return; }
         window._albums=window._albums||{}; setView(head+secHead("Albums")+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al,(al.tracks||[]).length+" tracks"); }).join("")+'</div>');
@@ -1098,7 +1236,7 @@ const PAGE = `<!DOCTYPE html>
     function prevTrack(){ if(audio.currentTime>3){ audio.currentTime=0; return; } if(qi>0) playIndex(qi-1); }
     audio.addEventListener("play", function(){ setPlayIcon(true); });
     audio.addEventListener("pause", function(){ setPlayIcon(false); });
-    audio.addEventListener("ended", function(){ nextTrack(); });
+    audio.addEventListener("ended", function(){ if(SET.autoplay) nextTrack(); });
     audio.addEventListener("timeupdate", function(){ if(audio.duration){ $("seek").value=String(Math.round(audio.currentTime/audio.duration*1000)); } });
     audio.addEventListener("error", function(){ toast("Could not play this track."); });
     $("seek").addEventListener("input", function(){ if(audio.duration){ audio.currentTime=this.value/1000*audio.duration; } });
@@ -1111,9 +1249,10 @@ const PAGE = `<!DOCTYPE html>
         overlay((tr.enName||tr.heName||t.title), '<pre dir="auto">'+esc(lyr)+'</pre>');
       }).catch(function(e){ if(e.message==="login")return; toast("Could not load lyrics."); });
     }
-    function overlay(title, bodyHtml){ var o=document.createElement("div"); o.className="ovl"; o.id="ovl";
-      o.innerHTML='<div class="obar"><h2>'+esc(title)+'</h2><button class="iconbtn" onclick="closeOverlay()">'+ic("close")+'</button></div>'+bodyHtml; document.body.appendChild(o); }
-    function closeOverlay(){ var d=$("ovl"); if(d) d.remove(); }
+    function overlay(title, bodyHtml){ closeOverlay(true); var o=document.createElement("div"); o.className="ovl"; o.id="ovl";
+      o.innerHTML='<div class="obar"><h2 id="ovlTitle">'+esc(title)+'</h2><button class="iconbtn" onclick="closeOverlay()">'+ic("close")+'</button></div><div id="ovlBody">'+bodyHtml+'</div>'; document.body.appendChild(o); }
+    function ovlSet(title, bodyHtml){ var t=$("ovlTitle"), b=$("ovlBody"); if(t) t.textContent=title; if(b){ b.innerHTML=bodyHtml; b.scrollIntoView&&window.scrollTo(0,0); } }
+    function closeOverlay(quiet){ var d=$("ovl"); if(d) d.remove(); if(quiet!==true && _dirtyView){ _dirtyView=false; go(curTab); } }
 
     // ---------- Downloads ----------
     function dlUrl(id,file){ var p=new URLSearchParams({trackId:id, file:file||""}); return "/api/download?"+p.toString(); }
@@ -1121,14 +1260,85 @@ const PAGE = `<!DOCTYPE html>
     function downloadAlbum(albumId){ var al=(window._albums||{})[albumId]; if(!al) return; var tr=al.tracks||[]; var i=0;
       (function nx(){ if(i>=tr.length){ toast("Started all "+tr.length+" downloads."); return; } downloadTrack(tr[i].id, tr[i].file||""); i++; setTimeout(nx,900); })(); }
 
-    // ---------- Settings / diagnostics ----------
-    function openSettings(){
-      overlay("Settings",
-        '<div class="chips" style="padding:0"><button class="chip" onclick="runCheck()">Check connection</button>'+
-        '<button class="chip" onclick="showSchema()">API structure</button>'+
-        '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
-        '<div id="diag" style="margin-top:16px"></div>');
+    // ---------- Settings ----------
+    function openSettings(){ overlay("Settings", settingsHtml()); }
+    function row(title, desc, right, click){ return '<div class="row"'+(click?' style="cursor:pointer" onclick="'+click+'"':'')+'><div class="rlabel"><div class="rt">'+esc(title)+'</div>'+(desc?'<div class="rd">'+esc(desc)+'</div>':'')+'</div>'+right+'</div>'; }
+    function segEl(id, opts, cur, fn){ return '<div class="seg" id="'+id+'">'+opts.map(function(o){ return '<button data-v="'+esc(o[0])+'" class="'+(o[0]===cur?"on":"")+'" onclick="'+fn+'(\\''+o[0]+'\\')">'+esc(o[1])+'</button>'; }).join("")+'</div>'; }
+    function segMark(id,val){ var s=$(id); if(!s) return; [].forEach.call(s.children,function(b){ b.classList.toggle("on", b.getAttribute("data-v")===val); }); }
+    function setLang(v){ SET.lang=(v==="he"?"he":"en"); saveSettings(); segMark("segLang",SET.lang); _dirtyView=true; }
+    function setTheme(v){ SET.theme=(v==="light"?"light":"dark"); saveSettings(); applyTheme(); segMark("segTheme",SET.theme); }
+    function setAutoplay(v){ SET.autoplay=(v==="on"); saveSettings(); segMark("segAuto",v); }
+    function signOut(){ location.href="/api/logout"; }
+    function settingsHtml(){
+      var auto=SET.autoplay?"on":"off";
+      return ''+
+        '<div class="set-sec"><h3>App</h3><div class="card">'+
+          row("Language","Show names in English or Hebrew", segEl("segLang",[["en","English"],["he","עברית"]],SET.lang,"setLang"))+
+          row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
+          row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Access</h3><div class="card">'+
+          row("Who can access","Add or remove people\\'s codes", ic("chevron_right"), "openAccess()")+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
+          '<button class="chip" onclick="runCheck()">Check connection</button>'+
+          '<button class="chip" onclick="showSchema()">API structure</button>'+
+          '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
+          '<div id="diag" style="margin-top:14px"></div></div>'+
+        '<div class="set-sec"><h3>Account</h3><div class="card">'+
+          '<div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div>'+
+        '</div></div>';
     }
+
+    // ---------- Access management (who can access) ----------
+    function backToSettings(){ ovlSet("Settings", settingsHtml()); }
+    function accessUnlockHtml(msg){ return '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>'+
+      '<div class="card" style="padding:16px">'+
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+ic("lock")+'<b>Manage who can access</b></div>'+
+      '<p class="muted" style="margin:0 0 12px">Enter the main password (the one set in Cloudflare) to continue.</p>'+
+      '<input id="admpw" class="field" type="password" placeholder="Main password" autocomplete="off" />'+
+      '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="unlockAccess()">Unlock</button>'+
+      '<div id="accmsg" class="err" style="margin-top:10px;min-height:18px">'+esc(msg||"")+'</div></div>'; }
+    function openAccess(){ if(_admPw){ loadAccess(); } else { ovlSet("Who can access", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
+    function unlockAccess(){ var i=$("admpw"); var pw=i?i.value:""; if(!pw){ return; } _admPw=pw; loadAccess(); }
+    function loadAccess(){ ovlSet("Who can access", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
+      post("/api/admin/list",{admin:_admPw}).then(function(d){ renderAccess(d); })
+        .catch(function(e){ _admPw=""; ovlSet("Who can access", accessUnlockHtml(e.message||"Wrong password.")); var i=$("admpw"); if(i) i.focus(); }); }
+    function renderAccess(d){
+      var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
+      if(!d.kv){ ovlSet("Who can access", back+kvSetupHtml()); return; }
+      var codes=d.codes||[];
+      var list = codes.length
+        ? '<div class="card">'+codes.map(function(c){ return '<div class="code-item"><div style="min-width:0"><div class="ci-name">'+esc(c.name||"Someone")+'</div><div class="ci-code">'+esc(c.code)+'</div></div>'+
+            '<button class="trash" title="Remove" data-code="'+esc(c.code)+'" onclick="removeCode(this)">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
+        : '<p class="muted" style="margin:2px 0 0">No access codes yet. Add one below.</p>';
+      ovlSet("Who can access", back+
+        '<p class="muted" style="margin:0 0 14px">Give each person their own code to sign in with. Remove a code to take away that person\\'s access. Your main password always works.</p>'+
+        list+
+        '<div class="set-sec"><h3>Add a person</h3><div class="card" style="padding:15px">'+
+          '<input id="cn" class="field" placeholder="Name (for example: Yossi)" autocomplete="off" />'+
+          '<input id="cc" class="field" style="margin-top:10px" placeholder="Access code / password" autocomplete="off" />'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add person</button>'+
+          '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>');
+    }
+    function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
+      if(!c.trim()){ if(m) m.textContent="Enter a code."; return; }
+      post("/api/admin/add",{admin:_admPw,name:n,code:c}).then(function(){ toast("Added."); loadAccess(); })
+        .catch(function(e){ if(m) m.textContent=e.message||"Could not add."; }); }
+    function removeCode(btn){ var code=btn.getAttribute("data-code")||"";
+      post("/api/admin/remove",{admin:_admPw,code:code}).then(function(){ toast("Removed."); loadAccess(); })
+        .catch(function(e){ toast(e.message||"Could not remove."); }); }
+    function kvSetupHtml(){ return '<div class="card" style="padding:16px;line-height:1.6">'+
+      '<div style="font-weight:700;margin-bottom:8px">One quick setup step</div>'+
+      '<p class="muted" style="margin:0 0 12px">To give each person their own code, the app needs a small storage area (Cloudflare KV — it is free).</p>'+
+      '<ol class="steps muted">'+
+        '<li>In Cloudflare, open <b>Storage &amp; Databases → KV</b> and click <b>Create instance</b>. Give it any name.</li>'+
+        '<li>Open your Worker → <b>Settings → Bindings</b> → <b>Add binding</b> → <b>KV namespace</b>. Set the variable name to <code>ZING_KV</code> and choose the namespace you just made.</li>'+
+        '<li>Deploy again, then come back to this screen.</li>'+
+      '</ol>'+
+      '<p class="muted" style="margin:12px 0 0">Until then, everyone signs in with the one main password — that keeps working.</p></div>'; }
+
+    // ---------- Diagnostics ----------
     function diagBox(html){ var d=$("diag"); if(d) d.innerHTML = html? '<div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px">'+html+'</div>':''; }
     function runCheck(){ diagBox('<span class="spinner"></span>Checking…');
       fetch("/api/check").then(function(r){ if(r.status===401){location.href="/";throw new Error("login");} return r.json(); }).then(function(s){
@@ -1166,6 +1376,8 @@ const PAGE = `<!DOCTYPE html>
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
     window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText;
+    window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
+    window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
 
     hydrateIcons(); checkStatus(); home();
   </script>

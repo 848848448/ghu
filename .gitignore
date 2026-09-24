@@ -12,6 +12,7 @@ node_modules/
 __pycache__/
 *.pyc
 .cache/
+access_codes.json
 *.mp3
 *.wav
 *.m4a
