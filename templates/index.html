@@ -397,6 +397,16 @@
           hint='<div style="margin-top:10px">🔎 The server cannot be reached. This usually means the music server uses a self-signed certificate that Cloudflare cannot accept. The fix is to host this on a Python server instead — tell me and I will set it up.</div>';
         } else if(login.ok===false && login.configured!==false){
           hint='<div style="margin-top:10px">🔑 Auto-login failed — check the ZING_EMAIL and ZING_PASSWORD secrets, then redeploy. Send me the error above and I will adjust it.</div>';
+          var am=s.authMutations;
+          if(am){
+            if(am.candidates && am.candidates.length){
+              hint+='<div style="margin-top:10px">🔎 Found these login methods in the API — <b>send me this screenshot</b>:<br>'+am.candidates.map(function(x){ return '<code>'+esc(x)+'</code>'; }).join("<br>")+'</div>';
+            } else if(am.candidates){
+              hint+='<div style="margin-top:10px">🔎 No login mutation found in the schema (total mutations: '+(am.total||0)+'). Tell me and we will capture the real login request.</div>';
+            } else if(am.error){
+              hint+='<div style="margin-top:10px">🔎 Could not read the API schema ('+esc(am.error)+'). We will capture the real login request instead — tell me.</div>';
+            }
+          }
         } else if(audio.status===403 && login.configured===false){
           hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, or set up ZING_EMAIL + ZING_PASSWORD for automatic login.</div>';
         }
