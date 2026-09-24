@@ -58,6 +58,9 @@ export default {
       if (path === "/api/new" && request.method === "POST") {
         return await handleNew(env);
       }
+      if (path === "/api/check") {
+        return await handleCheck(env);
+      }
       if (path === "/api/play") {
         return await handlePlay(url, request, env);
       }
@@ -197,6 +200,48 @@ async function handleNew(env) {
     .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
     .slice(0, 10);
   return json({ albums });
+}
+
+async function handleCheck(env) {
+  // Diagnose connectivity: can the Worker actually reach your servers?
+  const out = { api: {}, audio: {} };
+
+  // Test the GraphQL API.
+  if (!env.API_URL) {
+    out.api = { configured: false };
+  } else {
+    try {
+      const r = await fetch(env.API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "query { artists(skip: 0, take: 1) { id } }" }),
+      });
+      out.api = { reachable: true, status: r.status };
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}));
+        out.api.hasData = !!(d && d.data && d.data.artists && d.data.artists.length);
+        if (d && d.errors) out.api.graphqlError = true;
+      }
+    } catch (e) {
+      out.api = { reachable: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  // Test the audio server (does it respond at all?).
+  if (!env.AUDIO_API_BASE) {
+    out.audio = { configured: false };
+  } else {
+    try {
+      const testUrl =
+        env.AUDIO_API_BASE + "?trackId=1&token=" + encodeURIComponent(env.USER_TOKEN || "");
+      const r = await fetch(testUrl, { headers: { Range: "bytes=0-0" } });
+      out.audio = { reachable: true, status: r.status };
+    } catch (e) {
+      out.audio = { reachable: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  return json(out);
 }
 
 async function handlePlay(url, request, env) {
@@ -523,7 +568,9 @@ const PAGE = `<!DOCTYPE html>
     <div class="nav">
       <button id="navNew" class="active" onclick="doNew()">🔥 New Releases</button>
       <button id="navArtists" onclick="browseArtists()">🎤 All Artists</button>
+      <button id="navCheck" onclick="runCheck(false)">🔧 Check connection</button>
     </div>
+    <div id="diag"></div>
     <div id="status"></div>
     <div id="view"></div>
   </div>
@@ -555,7 +602,7 @@ const PAGE = `<!DOCTYPE html>
     function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g, function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
     function hash(s){ var h=0; s=s||"?"; for(var i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; } return h; }
     function grad(name){ var h=hash(name); var a=h%360; var b=(a+45+(h>>3)%70)%360; return "linear-gradient(135deg, hsl("+a+",72%,56%), hsl("+b+",70%,44%))"; }
-    function ini(name){ var p=(name||"?").trim().split(/\s+/).filter(Boolean); if(!p.length) return "?"; return (p.length===1?p[0].slice(0,2):(p[0][0]+p[1][0])).toUpperCase(); }
+    function ini(name){ var p=(name||"?").trim().split(/\\s+/).filter(Boolean); if(!p.length) return "?"; return (p.length===1?p[0].slice(0,2):(p[0][0]+p[1][0])).toUpperCase(); }
     function fmt(sec){ if(!isFinite(sec)||sec<0) sec=0; var m=Math.floor(sec/60), s=Math.floor(sec%60); return m+":"+(s<10?"0":"")+s; }
 
     function setStatus(h,c){ $("status").innerHTML=h; $("status").className=c||""; }
@@ -585,7 +632,7 @@ const PAGE = `<!DOCTYPE html>
       var c=loadCache(); if(c){ artists=c; artistsLoaded=true; return Promise.resolve(true); }
       loading("Loading artist catalog…");
       return post("/api/artists",{}).then(function(d){ artists=d.artists||[]; artistsLoaded=true; saveCache(artists); setStatus("",""); return true; })
-        .catch(function(e){ setStatus("❌ "+e.message,"err"); return false; });
+        .catch(function(e){ setStatus("❌ "+e.message,"err"); runCheck(true); return false; });
     }
 
     function setNav(id){ ["navNew","navArtists"].forEach(function(n){ $(n).classList.toggle("active", n===id); }); }
@@ -605,13 +652,13 @@ const PAGE = `<!DOCTYPE html>
       setNav("navNew"); loading("Loading new releases…");
       post("/api/new",{}).then(function(d){
         var albums=d.albums||[]; setStatus("","");
-        if(!albums.length){ setView('<div class="empty">No new releases found.</div>'); return; }
+        if(!albums.length){ setView('<div class="empty">No new releases found.</div>'); runCheck(true); return; }
         window._albums={}; window._albumBack=doNew;
         var cards=albums.map(function(al){ window._albums[al.id]=al;
           var names=(al.artists||[]).map(function(a){return a.enName||"Unknown";}).join(", ")||"Various";
           return albumCard(al, names); }).join("");
         setView('<div class="sec"><div class="sec-head"><h2>🔥 New Releases</h2></div><div class="grid albums">'+cards+'</div></div>');
-      }).catch(function(e){ setStatus("❌ "+e.message,"err"); });
+      }).catch(function(e){ setStatus("❌ "+e.message,"err"); runCheck(true); });
     }
 
     function browseArtists(){
@@ -648,7 +695,7 @@ const PAGE = `<!DOCTYPE html>
     function openArtist(id){
       loading("Loading albums…");
       post("/api/artist",{id:id}).then(function(d){
-        var a=d.artist, albums=(a&&a.albums)||[]; setStatus("",""); window._backView=null;
+        var a=d.artist, albums=(a&&a.albums)||[]; setStatus("",""); window._curArtist=(a&&a.enName)||"";
         var head='<div class="back" onclick="doNew()">‹ Back</div><div class="sec-head"><h2>'+esc(a?a.enName:"Artist")+'</h2>'+
           (a&&a.heName?'<span class="count">'+esc(a.heName)+'</span>':'')+'</div>';
         if(!albums.length){ setView(head+'<div class="empty">No albums available for this artist.</div>'); return; }
@@ -711,7 +758,7 @@ const PAGE = `<!DOCTYPE html>
       $("curTime").textContent=fmt(audio.currentTime);
       if(audio.duration){ $("seek").value=String(Math.round(audio.currentTime/audio.duration*1000)); } });
     audio.addEventListener("loadedmetadata", function(){ $("durTime").textContent=fmt(audio.duration); });
-    audio.addEventListener("error", function(){ toast("Could not play this track."); });
+    audio.addEventListener("error", function(){ toast("Could not play this track — running a check…"); runCheck(true); });
     $("seek").addEventListener("input", function(){ if(audio.duration){ audio.currentTime=this.value/1000*audio.duration; } });
     $("playBtn").onclick=togglePlay; $("nextBtn").onclick=nextTrack; $("prevBtn").onclick=prevTrack;
     $("npDl").onclick=function(){ var t=queue[qi]; if(t) downloadTrack(t.id, t.file); };
@@ -722,10 +769,37 @@ const PAGE = `<!DOCTYPE html>
     function downloadAlbum(albumId){ var al=(window._albums||{})[albumId]; if(!al) return; var tr=al.tracks||[]; var i=0;
       (function nx(){ if(i>=tr.length){ toast("✨ Started all "+tr.length+" downloads."); return; } downloadTrack(tr[i].id, tr[i].file||""); i++; setTimeout(nx,900); })(); }
 
+    // ---------- Diagnostics ----------
+    function diagBox(html){ var d=$("diag"); if(d) d.innerHTML = html ? '<div class="banner" style="border-color:rgba(124,92,255,.4);background:rgba(124,92,255,.08);color:var(--text)">'+html+'</div>' : ''; }
+    function runCheck(auto){
+      diagBox('<span class="spinner"></span>Checking connection…');
+      fetch("/api/check").then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); }).then(function(s){
+        var api=s.api||{}, audio=s.audio||{}, lines=[], hint="";
+        // API line
+        if(api.configured===false) lines.push("❌ API_URL is not set.");
+        else if(api.reachable===false) lines.push("❌ Can't reach your music API. Error: "+esc(api.error||"connection failed"));
+        else if(api.status!==200) lines.push("⚠️ Music API answered with code "+api.status+".");
+        else if(!api.hasData) lines.push("⚠️ Music API is reachable but returned no artists — check API_URL.");
+        else lines.push("✅ Music API is connected.");
+        // Audio line
+        if(audio.configured===false) lines.push("❌ AUDIO_API_BASE is not set.");
+        else if(audio.reachable===false) lines.push("❌ Can't reach your audio server. Error: "+esc(audio.error||"connection failed"));
+        else if(audio.status===403) lines.push("❌ Audio server said 403 — your USER_TOKEN is expired or wrong.");
+        else lines.push("✅ Audio server is reachable (code "+audio.status+").");
+        // Hint
+        if(api.reachable===false || audio.reachable===false){
+          hint='<div style="margin-top:10px">🔎 The server cannot be reached. This usually means the music server uses a self-signed certificate that Cloudflare cannot accept. The fix is to host this on a Python server instead — tell me and I will set it up.</div>';
+        } else if(audio.status===403){
+          hint='<div style="margin-top:10px">🔑 Update the USER_TOKEN secret with a fresh token, then redeploy.</div>';
+        }
+        diagBox('<b>Connection check</b><div style="margin-top:8px;line-height:1.9">'+lines.join("<br>")+'</div>'+hint);
+      }).catch(function(e){ if(e&&e.message==="login") return; diagBox("❌ Could not run the check: "+esc(e.message||e)); });
+    }
+
     // expose
     window.openArtist=openArtist; window.openAlbum=openAlbum; window.playAlbum=playAlbum;
     window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum; window.doNew=doNew;
-    window.browseArtists=browseArtists; window.filterGrid=filterGrid;
+    window.browseArtists=browseArtists; window.filterGrid=filterGrid; window.runCheck=runCheck;
 
     $("q").addEventListener("keydown", function(e){ if(e.key==="Enter") doSearch(); });
     $("q").addEventListener("input", function(){ if(!this.value.trim()){} });

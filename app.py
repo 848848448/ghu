@@ -257,6 +257,50 @@ def api_new():
     return jsonify({"albums": fetch_new_releases()})
 
 
+@app.route("/api/check")
+def api_check():
+    """Diagnose whether the server can actually reach your API and audio host."""
+    out = {"api": {}, "audio": {}}
+
+    if not API_URL:
+        out["api"] = {"configured": False}
+    else:
+        try:
+            r = requests.post(
+                API_URL,
+                json={"query": "query { artists(skip: 0, take: 1) { id } }"},
+                verify=False,
+                headers={"Content-Type": "application/json"},
+                timeout=20,
+            )
+            out["api"] = {"reachable": True, "status": r.status_code}
+            if r.ok:
+                d = r.json()
+                out["api"]["hasData"] = bool(d.get("data", {}).get("artists"))
+                if d.get("errors"):
+                    out["api"]["graphqlError"] = True
+        except Exception as exc:  # noqa: BLE001
+            out["api"] = {"reachable": False, "error": str(exc)}
+
+    if not AUDIO_API_BASE:
+        out["audio"] = {"configured": False}
+    else:
+        try:
+            r = requests.get(
+                f"{AUDIO_API_BASE}?trackId=1&token={USER_TOKEN}",
+                verify=False,
+                headers={"Range": "bytes=0-0"},
+                stream=True,
+                timeout=20,
+            )
+            out["audio"] = {"reachable": True, "status": r.status_code}
+            r.close()
+        except Exception as exc:  # noqa: BLE001
+            out["audio"] = {"reachable": False, "error": str(exc)}
+
+    return jsonify(out)
+
+
 @app.route("/api/play")
 def api_play():
     """Stream a track for in-browser playback (inline), forwarding Range
