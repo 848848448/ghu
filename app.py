@@ -295,6 +295,7 @@ def fetch_artists(force=False):
             id
             enName
             heName
+            image
           }}
         }}
         """
