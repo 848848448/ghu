@@ -14,18 +14,28 @@ name = "jewish-music-downloader"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
-# --- Optional: per-person access codes (the "Who can access" admin screen) ---
-# To let the owner give each person their own sign-in code from inside the app,
-# bind a KV namespace named ZING_KV. It is free.
+# --- Optional: storage for accounts + app settings (the Admin panel) ---
+# The Admin panel (accounts, app name, announcement, feature toggles) needs a
+# small storage area. Use EITHER a D1 SQL database OR a KV namespace — both free.
 #
-#   1. Create a namespace:  npx wrangler kv namespace create ZING_KV
-#      (or in the dashboard: Storage & Databases -> KV -> Create instance)
-#   2. Put the id it prints below and uncomment these two lines:
+# Option A — D1 (SQL database). Tables are created automatically on first use.
+#   1. Create it:  npx wrangler d1 create zing-db
+#      (or dashboard: Storage & Databases -> D1 -> Create)
+#   2. Put the database_id it prints below and uncomment these lines:
+#
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "zing-db"
+# database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
+#
+# Option B — KV namespace.
+#   1. npx wrangler kv namespace create ZING_KV  (or dashboard -> KV -> Create)
+#   2. Put the id below and uncomment these lines:
 #
 # [[kv_namespaces]]
 # binding = "ZING_KV"
 # id = "PASTE_YOUR_KV_NAMESPACE_ID_HERE"
 #
-# The master password is the SITE_PASSWORD secret; it always works and is what
-# unlocks the admin screen. Without ZING_KV the app still works — everyone just
+# The master password is the SITE_PASSWORD secret; it always works and unlocks
+# the admin screen. With neither store bound the app still works — everyone just
 # uses the one SITE_PASSWORD.

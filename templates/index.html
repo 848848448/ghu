@@ -822,11 +822,18 @@
         .catch(function(e){ toast(e.message||"Could not remove."); }); }
     function kvSetupHtml(){ return '<div class="card" style="padding:16px;line-height:1.6">'+
       '<div style="font-weight:700;margin-bottom:8px">One quick setup step</div>'+
-      '<p class="muted" style="margin:0 0 12px">To give each person their own code, the app needs a small storage area (Cloudflare KV — it is free).</p>'+
+      '<p class="muted" style="margin:0 0 12px">To manage accounts and app settings, the app needs a small storage area (free). You can use a <b>D1 SQL database</b> or a <b>KV namespace</b> — either one.</p>'+
+      '<div style="font-weight:600;margin:2px 0 4px">Option A — D1 (SQL database)</div>'+
       '<ol class="steps muted">'+
-        '<li>In Cloudflare, open <b>Storage &amp; Databases → KV</b> and click <b>Create instance</b>. Give it any name.</li>'+
-        '<li>Open your Worker → <b>Settings → Bindings</b> → <b>Add binding</b> → <b>KV namespace</b>. Set the variable name to <code>ZING_KV</code> and choose the namespace you just made.</li>'+
-        '<li>Deploy again, then come back to this screen.</li>'+
+        '<li>In Cloudflare, open <b>Storage &amp; Databases → D1</b> → <b>Create</b>. Give it any name.</li>'+
+        '<li>Open your Worker → <b>Settings → Bindings</b> → <b>Add binding</b> → <b>D1 database</b>. Set the variable name to <code>DB</code> and choose the database you just made.</li>'+
+        '<li>Deploy again, then come back. (The tables are created automatically.)</li>'+
+      '</ol>'+
+      '<div style="font-weight:600;margin:10px 0 4px">Option B — KV</div>'+
+      '<ol class="steps muted">'+
+        '<li><b>Storage &amp; Databases → KV</b> → <b>Create instance</b>.</li>'+
+        '<li>Worker → <b>Settings → Bindings</b> → <b>KV namespace</b>, variable name <code>ZING_KV</code>.</li>'+
+        '<li>Deploy again.</li>'+
       '</ol>'+
       '<p class="muted" style="margin:12px 0 0">Until then, everyone signs in with the one main password — that keeps working.</p></div>'; }
 
