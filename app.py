@@ -118,6 +118,34 @@ def is_admin(body):
     return bool(SITE_PASSWORD) and str((body or {}).get("admin", "")) == SITE_PASSWORD
 
 
+CONFIG_FEATURES = ["albums", "search", "genres", "playlists", "artists", "stories", "downloads", "favorites"]
+
+
+def _config_path():
+    return os.path.join(CACHE_DIR, "site_config.json")
+
+
+def load_config():
+    out = {"appName": "", "announcement": "", "features": {}}
+    try:
+        with open(_config_path(), "r", encoding="utf-8") as f:
+            c = json.load(f)
+        if isinstance(c, dict):
+            out["appName"] = c.get("appName") if isinstance(c.get("appName"), str) else ""
+            out["announcement"] = c.get("announcement") if isinstance(c.get("announcement"), str) else ""
+            if isinstance(c.get("features"), dict):
+                out["features"] = c["features"]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def save_config(cfg):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(_config_path(), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False)
+
+
 def can_firebase():
     return bool(FIREBASE_API_KEY and FIREBASE_REFRESH_TOKEN)
 
@@ -429,6 +457,27 @@ def api_status():
             "kv": True,
         }
     )
+
+
+@app.route("/api/config")
+def api_config():
+    return jsonify(load_config())
+
+
+@app.route("/api/admin/config", methods=["POST"])
+def api_admin_config():
+    body = request.get_json(silent=True) or {}
+    if not is_admin(body):
+        return jsonify({"error": "Wrong password."}), 403
+    in_c = body.get("config") if isinstance(body.get("config"), dict) else {}
+    in_f = in_c.get("features") if isinstance(in_c.get("features"), dict) else {}
+    clean = {
+        "appName": str(in_c.get("appName", "")).strip()[:60],
+        "announcement": str(in_c.get("announcement", "")).strip()[:500],
+        "features": {k: (in_f.get(k) is not False) for k in CONFIG_FEATURES},
+    }
+    save_config(clean)
+    return jsonify({"ok": True, "config": clean})
 
 
 @app.route("/api/admin/list", methods=["POST"])
