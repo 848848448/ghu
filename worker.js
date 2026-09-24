@@ -392,7 +392,7 @@ async function handleArtist(request, env) {
   }
   const query =
     "query { artist(where: { id: " + Number(id) + " }) { id enName heName image " +
-    "albums { id enName heName tracks { id enName heName file duration trackNumber } } } }";
+    "albums { id enName heName images { cdnSmall cdnMedium medium small } tracks { id } } } }";
   const data = await graphql(env, query);
   const artist = data && data.data ? data.data.artist : null;
   if (!artist) return json({ error: "No details found for this artist." }, 502);
@@ -402,7 +402,7 @@ async function handleArtist(request, env) {
 async function handleNew(env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
   const query =
-    "query { albums(take: 50) { id enName heName artists { enName heName } tracks { id enName heName file duration trackNumber } } }";
+    "query { albums(take: 50) { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id } } }";
   const data = await graphql(env, query);
   if (!data || data.errors) return json({ albums: [] });
   let albums = ((data.data || {}).albums) || [];
@@ -850,7 +850,7 @@ const PAGE = `<!DOCTYPE html>
 
   <script>
     var artists = [], artistsLoaded = false;
-    var CACHE_KEY = "zing_artists_cache", CACHE_TTL = 86400000;
+    var CACHE_KEY = "zing_artists_cache_v2", CACHE_TTL = 86400000;
     var queue = [], qi = -1;
 
     function $(id){ return document.getElementById(id); }
@@ -862,6 +862,7 @@ const PAGE = `<!DOCTYPE html>
     function trackName(t){ return (t.enName||t.heName||(t.file||"").split("/").pop()||("Track "+t.id)); }
     function albName(al){ return (al.enName||al.heName||"Unknown Album"); }
     function artNames(list){ return (list||[]).map(function(a){return a.enName||a.heName||"Unknown";}).join(", "); }
+    function albImg(al){ var im=al&&al.images; return (im && (im.cdnMedium||im.medium||im.cdnSmall||im.small))||null; }
 
     function setStatus(h,c){ $("status").innerHTML=h; $("status").className=c||""; }
     function loading(m){ setStatus('<span class="spinner"></span>'+m,"muted"); }
@@ -912,7 +913,7 @@ const PAGE = `<!DOCTYPE html>
 
     function artistCard(a){ return '<div class="tile artist" onclick="openArtist('+a.id+')">'+coverHtml(a.enName||a.heName,{round:true,img:a.image})+
       '<div class="t-name">'+esc(a.enName||"Unknown")+'</div><div class="t-sub">'+esc(a.heName||"Artist")+'</div></div>'; }
-    function albumCard(al,sub){ return '<div class="tile album" onclick="openAlbum('+al.id+')">'+coverHtml(albName(al))+
+    function albumCard(al,sub){ return '<div class="tile album" onclick="openAlbum('+al.id+')">'+coverHtml(albName(al),{img:albImg(al)})+
       '<div class="fab"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>'+
       '<div class="t-name">'+esc(albName(al))+'</div><div class="t-sub">'+esc(sub)+'</div></div>'; }
 
@@ -964,7 +965,7 @@ const PAGE = `<!DOCTYPE html>
     }
     function openGenre(id){
       loading("Loading genre…");
-      gql("query { genre(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName tracks { id enName heName file duration trackNumber } } } }").then(function(d){
+      gql("query { genre(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } tracks { id } } } }").then(function(d){
         var g=d.genre; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=browseGenres;
         var head='<div class="back" onclick="browseGenres()">‹ Back to genres</div><div class="sec-head"><h2>'+esc(g?(g.enName||g.heName):"Genre")+'</h2><span class="count">'+albums.length+' albums</span></div>';
         if(!albums.length){ setView(head+'<div class="empty">No albums in this genre.</div>'); return; }
@@ -1040,7 +1041,7 @@ const PAGE = `<!DOCTYPE html>
       // Fetch the album fresh via /api/query (same reliable path as playlists),
       // so real track names, durations and lyrics work everywhere.
       loading("Loading album…");
-      gql("query { album(where:{id:"+Number(id)+"}) { id enName heName artists { enName heName } tracks { id enName heName file duration trackNumber } } }").then(function(d){
+      gql("query { album(where:{id:"+Number(id)+"}) { id enName heName images { cdnMedium cdnLarge medium large } artists { enName heName image } tracks { id enName heName file duration trackNumber } } }").then(function(d){
         var al=d.album; setStatus("","");
         if(!al){ setView('<div class="empty">Album not found.</div>'); return; }
         window._albums=window._albums||{}; window._albums[id]=al;
@@ -1057,7 +1058,7 @@ const PAGE = `<!DOCTYPE html>
           (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
           '<button class="dl" title="Download" onclick="event.stopPropagation();downloadTrack('+t.id+', '+esc(JSON.stringify(t.file||"")).replace(/"/g,"&quot;")+')">'+
           '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg></button></div>'; }).join("");
-      setView(back+'<div class="album-hero">'+coverHtml(albName(al))+
+      setView(back+'<div class="album-hero">'+coverHtml(albName(al),{img:albImg(al)})+
         '<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2>'+
         '<div class="sub">'+tracks.length+' tracks</div><div class="actions">'+
         (tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Play all</button>':'')+
@@ -1072,7 +1073,8 @@ const PAGE = `<!DOCTYPE html>
     function playAlbum(albumId, index){
       var al=(window._albums||{})[albumId]; if(!al) return; var tracks=al.tracks||[];
       var artistName=(al.artists&&al.artists.length)?artNames(al.artists):(window._curArtist||"");
-      queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al)}; });
+      var aimg=albImg(al);
+      queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; });
       playIndex(index);
     }
     function playTracks(tracks, index, contextName){
@@ -1085,7 +1087,9 @@ const PAGE = `<!DOCTYPE html>
       audio.play().catch(function(){});
       $("player").hidden=false;
       $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
-      $("npCover").style.background=grad(t.cover||t.title); $("npCover").innerHTML='<span class="disc"></span>';
+      var cu=imgUrl(t.coverImg);
+      if(cu){ $("npCover").style.background=""; $("npCover").style.backgroundImage="url('"+cu+"')"; $("npCover").style.backgroundSize="cover"; $("npCover").style.backgroundPosition="center"; $("npCover").innerHTML=""; }
+      else { $("npCover").style.backgroundImage=""; $("npCover").style.background=grad(t.cover||t.title); $("npCover").innerHTML='<span class="disc"></span>'; }
       setPlayIcon(true); highlightPlaying();
     }
     function setPlayIcon(playing){ $("playBtn").innerHTML = playing
