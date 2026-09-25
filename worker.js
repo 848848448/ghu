@@ -1067,14 +1067,28 @@ async function handleNew(env) {
     const data = await graphql(env, attempts[i]);
     if (data && !data.errors && ((data.data || {}).albums || []).length) {
       albums = data.data.albums;
-      if (i === attempts.length - 1) {
-        // Unordered fallback: sort newest-first ourselves.
-        albums = albums.slice().sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
-      }
       break;
     }
   }
+  // Always sort newest-first ourselves. Some API servers accept an orderBy
+  // field but silently ignore it, returning the default (often oldest-first)
+  // order — which would hide brand-new music. Sorting here guarantees the
+  // newest releases are on top no matter what the server did.
+  albums = sortNewest(albums);
   return json({ albums: albums.slice(0, 12) });
+}
+
+// Newest-first: by release date, then by id (higher id = added later).
+function sortNewest(list) {
+  const t = (a) => {
+    const d = a && a.releasedAt ? Date.parse(a.releasedAt) : NaN;
+    return isNaN(d) ? -Infinity : d;
+  };
+  return (list || []).slice().sort((a, b) => {
+    const d = t(b) - t(a);
+    if (d) return d;
+    return Number((b && b.id) || 0) - Number((a && a.id) || 0);
+  });
 }
 
 // A page of ALL albums, newest first (old + new together), for the Albums
@@ -1095,10 +1109,7 @@ async function handleAlbumsPage(request, env) {
   for (let i = 0; i < attempts.length; i++) {
     const data = await graphql(env, attempts[i]);
     if (data && !data.errors) {
-      let albums = ((data.data || {}).albums) || [];
-      if (i === attempts.length - 1) {
-        albums = albums.slice().sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
-      }
+      const albums = sortNewest(((data.data || {}).albums) || []);
       return json({ albums });
     }
   }
@@ -1268,7 +1279,12 @@ async function handleDownload(url, env) {
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      // Never let the phone or a CDN serve stale data — always fetch fresh, so
+      // newly added music shows up immediately.
+      "Cache-Control": "no-store, must-revalidate",
+    },
   });
 }
 
