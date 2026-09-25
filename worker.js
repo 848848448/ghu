@@ -74,6 +74,12 @@ export default {
       if (path === "/api/me") {
         return await handleMe(request, env);
       }
+      if (path === "/api/presence" && request.method === "POST") {
+        return await handlePresence(request, env);
+      }
+      if (path === "/api/admin/presence" && request.method === "POST") {
+        return await handleAdminPresence(request, env);
+      }
       if (path === "/api/admin/users" && request.method === "POST") {
         return await handleAdminUsers(request, env);
       }
@@ -462,6 +468,43 @@ async function handleAdminUser(request, env) {
     return json({ ok: true });
   }
   return json({ error: "Unknown action." }, 400);
+}
+
+// --------------------------------------------------------------------------- //
+// Live presence: each open app sends a heartbeat with what it is doing; the
+// owner can see who is on the site right now and their current activity.
+// --------------------------------------------------------------------------- //
+async function presenceName(env, request) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (id === "admin") return "Owner";
+  if (id) { const u = await getUserById(env, id); return u ? u.email : "User"; }
+  return "Guest";
+}
+
+async function handlePresence(request, env) {
+  if (!env.DB) return json({ ok: false });
+  await ensureD1(env);
+  const b = await request.json().catch(() => ({}));
+  const cid = (b.cid || "").toString().slice(0, 64);
+  if (!cid) return json({ ok: false });
+  const view = (b.view || "").toString().slice(0, 80);
+  const name = await presenceName(env, request);
+  try {
+    await env.DB.prepare("INSERT OR REPLACE INTO presence (uid, name, view, seen) VALUES (?, ?, ?, ?)")
+      .bind(cid, name, view, Date.now()).run();
+  } catch (e) { /* ignore */ }
+  return json({ ok: true });
+}
+
+async function handleAdminPresence(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!isAdmin(env, b)) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ online: [], now: Date.now() });
+  await ensureD1(env);
+  const now = Date.now();
+  try { await env.DB.prepare("DELETE FROM presence WHERE seen < ?").bind(now - 3600000).run(); } catch (e) { /* ignore */ }
+  const r = await env.DB.prepare("SELECT name, view, seen FROM presence WHERE seen >= ? ORDER BY seen DESC").bind(now - 90000).all();
+  return json({ online: r.results || [], now });
 }
 
 // --------------------------------------------------------------------------- //
@@ -1544,6 +1587,11 @@ const PAGE = `<!DOCTYPE html>
     function loadMe(){ fetch("/api/me").then(function(r){return r.json();}).then(function(d){
       if(d&&d.user&&d.user.photo&&/^data:image/.test(d.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=d.user.photo; if(a) a.hidden=false; }
     }).catch(function(){}); }
+    // Live presence: tell the server what this device is doing, so the owner can see who is on.
+    var _cid=""; try{ _cid=localStorage.getItem("zing_cid")||""; if(!_cid){ _cid=Date.now().toString(36)+Math.random().toString(36).slice(2,8); localStorage.setItem("zing_cid",_cid); } }catch(e){ _cid="c"+Math.random().toString(36).slice(2,10); }
+    var _activity="Home";
+    function setActivity(a){ _activity=a||""; sendPresence(); }
+    function sendPresence(){ fetch("/api/presence",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cid:_cid,view:_activity})}).catch(function(){}); }
 
     function $(id){ return document.getElementById(id); }
     function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
@@ -1650,8 +1698,9 @@ const PAGE = `<!DOCTYPE html>
 
     // ---------- Tabs ----------
     function setTab(id){ ["tabHome","tabAlbums","tabSearch","tabGenres","tabPlaylists","tabArtists"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
+    var GO_LABEL={home:"Home",albums:"Albums",search:"Searching",genres:"Genres",playlists:"Playlists",artists:"Artists"};
     function go(where){
-      curTab=where;
+      curTab=where; setActivity(GO_LABEL[where]||"Home");
       if(where==="home"){ setTab("tabHome"); home(); }
       else if(where==="albums"){ setTab("tabAlbums"); browseAlbums(); }
       else if(where==="search"){ setTab("tabSearch"); searchView(); }
@@ -1909,6 +1958,7 @@ const PAGE = `<!DOCTYPE html>
       queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; }); playIndex(index); }
     function playTracks(tracks, index, ctx){ queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:(t.artists&&t.artists.length?artNames(t.artists):(ctx||"")), cover:ctx||trackName(t), coverImg:null}; }); playIndex(index); }
     function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i];
+      setActivity("Playing: "+(t.title||""));
       audio.src="/api/play?trackId="+encodeURIComponent(t.id)+"&file="+encodeURIComponent(t.file); audio.play().catch(function(){});
       $("player").hidden=false; $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
       var cu=imgUrl(t.coverImg);
@@ -1983,7 +2033,7 @@ const PAGE = `<!DOCTYPE html>
     function overlay(title, bodyHtml){ closeOverlay(true); var o=document.createElement("div"); o.className="ovl"; o.id="ovl";
       o.innerHTML='<div class="obar"><h2 id="ovlTitle">'+esc(title)+'</h2><button class="iconbtn" onclick="closeOverlay()">'+ic("close")+'</button></div><div id="ovlBody">'+bodyHtml+'</div>'; document.body.appendChild(o); }
     function ovlSet(title, bodyHtml){ var t=$("ovlTitle"), b=$("ovlBody"); if(t) t.textContent=title; if(b){ b.innerHTML=bodyHtml; b.scrollIntoView&&window.scrollTo(0,0); } }
-    function closeOverlay(quiet){ var d=$("ovl"); if(d) d.remove(); if(quiet!==true && _dirtyView){ _dirtyView=false; go(curTab); } }
+    function closeOverlay(quiet){ if(typeof stopPresPoll==="function") stopPresPoll(); var d=$("ovl"); if(d) d.remove(); if(quiet!==true && _dirtyView){ _dirtyView=false; go(curTab); } }
 
     // ---------- Downloads ----------
     function dlBtn(id,file){ if(!feat("downloads")) return ""; return '<button class="dl" onclick="event.stopPropagation();downloadTrack('+id+', '+esc(JSON.stringify(file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button>'; }
@@ -2026,7 +2076,7 @@ const PAGE = `<!DOCTYPE html>
     }
 
     // ---------- Access management (who can access) ----------
-    function backToSettings(){ ovlSet("Settings", settingsHtml()); }
+    function backToSettings(){ stopPresPoll(); ovlSet("Settings", settingsHtml()); }
     function accessUnlockHtml(msg){ return '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>'+
       '<div class="card" style="padding:16px">'+
       '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+ic("lock")+'<b>Admin panel</b></div>'+
@@ -2039,9 +2089,20 @@ const PAGE = `<!DOCTYPE html>
     function loadAccess(){ ovlSet("Admin", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
       Promise.all([ post("/api/admin/list",{admin:_admPw}),
         fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}),
-        post("/api/admin/users",{admin:_admPw}).catch(function(){return {users:null};}) ])
-        .then(function(res){ renderAdmin(res[0], res[1]||{}, res[2]||{}); })
+        post("/api/admin/users",{admin:_admPw}).catch(function(){return {users:null};}),
+        post("/api/admin/presence",{admin:_admPw}).catch(function(){return {online:[]};}) ])
+        .then(function(res){ renderAdmin(res[0], res[1]||{}, res[2]||{}, res[3]||{}); })
         .catch(function(e){ _admPw=""; ovlSet("Admin", accessUnlockHtml(e.message||"Wrong password.")); var i=$("admpw"); if(i) i.focus(); }); }
+    var _presTimer=null;
+    function presenceRow(o, now){ var ago=Math.max(0,Math.round((now-(o.seen||0))/1000)); var when=ago<10?"now":(ago<60?ago+"s ago":Math.round(ago/60)+"m ago");
+      return '<div class="code-item"><div style="width:40px;height:40px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((o.name||"?").slice(0,1).toUpperCase())+'</div>'+
+        '<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(o.name||"Guest")+'</div><div class="ci-code">'+esc(o.view||"—")+' · '+when+'</div></div>'+
+        '<span style="width:10px;height:10px;border-radius:999px;background:'+(ago<40?"#34d399":"#fbbf24")+';flex:none"></span></div>'; }
+    function presenceListHtml(pres){ var now=(pres&&pres.now)||Date.now(); var on=(pres&&pres.online)||[];
+      return on.length ? on.map(function(o){ return presenceRow(o, now); }).join("") : '<p class="muted" style="margin:0;padding:12px 15px">Nobody is on right now.</p>'; }
+    function stopPresPoll(){ if(_presTimer){ clearInterval(_presTimer); _presTimer=null; } }
+    function refreshPres(){ post("/api/admin/presence",{admin:_admPw}).then(function(p){ var el=$("presList"); if(!el){ stopPresPoll(); return; }
+      el.innerHTML=presenceListHtml(p); var c=$("presCount"); if(c) c.textContent=((p.online||[]).length); }).catch(function(){}); }
     function userAvatar(u){ return (u.photo && /^data:image/.test(u.photo))
       ? '<img src="'+esc(u.photo)+'" alt="" style="width:46px;height:46px;border-radius:999px;object-fit:cover;flex:none" />'
       : '<div style="width:46px;height:46px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((u.email||"?").slice(0,1).toUpperCase())+'</div>'; }
@@ -2067,9 +2128,10 @@ const PAGE = `<!DOCTYPE html>
       _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:"";
       post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; applyConfig(d.config||_cfgEdit); toast("Saved."); })
         .catch(function(e){ if(m) m.textContent=e.message||"Could not save."; }); }
-    function renderAdmin(d, cfg, usersData){
+    function renderAdmin(d, cfg, usersData, presData){
       var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
       if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
+      var presCard='<div class="set-sec"><h3>Who\\'s online (<span id="presCount">'+(((presData&&presData.online)||[]).length)+'</span>)</h3><div class="card"><div id="presList">'+presenceListHtml(presData)+'</div></div></div>';
       _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",features:{}};
       CFG_FEATURES.forEach(function(k){ _cfgEdit.features[k]=(cfg.features&&cfg.features[k])!==false; });
       var appCard='<div class="set-sec"><h3>Appearance</h3><div class="card" style="padding:15px">'+
@@ -2128,7 +2190,8 @@ const PAGE = `<!DOCTYPE html>
             '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
             '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
       }
-      ovlSet("Admin", back+appCard+featCard+usersCards+accCard);
+      ovlSet("Admin", back+presCard+usersCards+appCard+featCard+accCard);
+      stopPresPoll(); _presTimer=setInterval(refreshPres, 10000);
     }
     function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
       if(!c.trim()){ if(m) m.textContent="Enter a code."; return; }
@@ -2256,7 +2319,7 @@ const PAGE = `<!DOCTYPE html>
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
     window.userAction=userAction; window.userCreate=userCreate;
 
-    hydrateIcons(); checkStatus(); loadMe(); loadConfig().then(function(){ home(); });
+    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); loadConfig().then(function(){ home(); });
   </script>
 </body>
 </html>`;
