@@ -122,6 +122,9 @@ export default {
       if (path === "/api/schema/full") {
         return await handleFullSchema(env);
       }
+      if (path === "/api/probe/new" && request.method === "POST") {
+        return await handleProbeNew(request, env);
+      }
       if (path === "/api/query" && request.method === "POST") {
         return await handleRawQuery(request, env);
       }
@@ -1076,6 +1079,41 @@ async function handleNew(env) {
   // newest releases are on top no matter what the server did.
   albums = sortNewest(albums);
   return json({ albums: albums.slice(0, 12) });
+}
+
+// Owner-only diagnostic: run several "newest albums" query shapes against the
+// API and report, for each, whether it errored and the first few albums it
+// returned (name, id, releasedAt, createdAt). This shows exactly which query
+// actually returns the newest music, so the New Releases logic can be tuned.
+async function handleProbeNew(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const f = "id enName heName releasedAt";
+  const variants = [
+    { label: "orderBy createdAt desc", q: "query { albums(take: 6, orderBy: [{ createdAt: desc }]) { " + f + " createdAt } }" },
+    { label: "orderBy releasedAt desc", q: "query { albums(take: 6, orderBy: [{ releasedAt: desc }]) { " + f + " } }" },
+    { label: "orderBy id desc", q: "query { albums(take: 6, orderBy: [{ id: desc }]) { " + f + " } }" },
+    { label: "orderBy {createdAt:desc} (object)", q: "query { albums(take: 6, orderBy: { createdAt: desc }) { " + f + " createdAt } }" },
+    { label: "no orderBy (default)", q: "query { albums(take: 6) { " + f + " } }" },
+    { label: "latestAlbums", q: "query { latestAlbums(take: 6) { " + f + " } }" },
+    { label: "newReleases", q: "query { newReleases(take: 6) { " + f + " } }" },
+  ];
+  const out = [];
+  for (const v of variants) {
+    try {
+      const d = await graphql(env, v.q);
+      if (!d) { out.push({ label: v.label, error: "no response" }); continue; }
+      if (d.errors && d.errors.length) { out.push({ label: v.label, error: (d.errors[0] && d.errors[0].message) || "error" }); continue; }
+      const data = d.data || {};
+      const key = Object.keys(data)[0];
+      const rows = (data[key] || []).map((a) => ({ id: a.id, name: a.enName || a.heName || "", releasedAt: a.releasedAt || null, createdAt: a.createdAt || null }));
+      out.push({ label: v.label, count: rows.length, rows });
+    } catch (e) {
+      out.push({ label: v.label, error: String((e && e.message) || e) });
+    }
+  }
+  return json({ probe: out });
 }
 
 // Newest-first: by release date, then by id (higher id = added later).
@@ -2261,6 +2299,7 @@ const PAGE = `<!DOCTYPE html>
           '<button class="chip" onclick="showZingActions()">Zing actions</button>'+
           '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
+          '<button class="chip" onclick="probeNew()">New releases (debug)</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
           '<div id="diag" style="margin-top:14px"></div></div>') : '')+
         '<div class="set-sec"><h3>Account</h3><div class="card">'+
@@ -2550,6 +2589,15 @@ const PAGE = `<!DOCTYPE html>
         });
       }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
     }
+    function probeNew(){ diagBox('<span class="spinner"></span>Checking what the server returns for new music…');
+      post("/api/probe/new",{admin:_admPw}).then(function(d){ var p=(d&&d.probe)||[]; if(!p.length){ diagBox("No result."); return; }
+        var txt=p.map(function(v){ if(v.error) return "• "+v.label+" → ERROR: "+v.error;
+          var lines=(v.rows||[]).map(function(r){ return "    #"+r.id+"  "+(r.name||"")+"   released:"+(r.releasedAt||"-")+(r.createdAt?("   created:"+r.createdAt):""); });
+          return "• "+v.label+" ("+v.count+")\\n"+lines.join("\\n"); }).join("\\n\\n");
+        window._copy=txt;
+        diagBox('<b>New releases (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this (or a screenshot) so I can fix which list the newest music comes from.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
     function copyText(btn){ var t=window._copy||""; try{ navigator.clipboard.writeText(t).then(function(){btn.textContent="Copied!";},function(){fb();}); }catch(e){ fb(); }
       function fb(){ var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand("copy");}catch(e){} ta.remove(); btn.textContent="Copied!"; } }
 
@@ -2560,7 +2608,7 @@ const PAGE = `<!DOCTYPE html>
     window.playAlbum=playAlbum; window.playList=playList; window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum;
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
-    window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText;
+    window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText; window.probeNew=probeNew;
     window.showFullSchema=showFullSchema; window.downloadText=downloadText; window.showZingConfig=showZingConfig; window.showZingActions=showZingActions;
     window.openNowPlaying=openNowPlaying; window.npLyrics=npLyrics; window.npSimilar=npSimilar; window.playSimilar=playSimilar;
     window.browseLibrary=browseLibrary; window.saveArtist=saveArtist; window.saveAlbum=saveAlbum;
