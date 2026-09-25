@@ -51,7 +51,10 @@ export default {
         });
       }
       if (path === "/api/config") {
-        return json(await getConfig(env));
+        // Public: never expose the owner email here.
+        const c = await getConfig(env);
+        delete c.ownerEmail;
+        return json(c);
       }
 
       // Everything below requires a login when the site is locked.
@@ -76,6 +79,12 @@ export default {
       }
       if (path === "/api/me/password" && request.method === "POST") {
         return await handleMePassword(request, env);
+      }
+      if (path === "/api/me/photo" && request.method === "POST") {
+        return await handleMePhoto(request, env);
+      }
+      if (path === "/api/claim-device" && request.method === "POST") {
+        return await handleClaimDevice(request, env);
       }
       if (path === "/api/pending") {
         return await handlePending(request, env);
@@ -127,7 +136,7 @@ export default {
       }
       return new Response("Not found", { status: 404 });
     } catch (err) {
-      return json({ error: "Server error: " + (err && err.message) }, 500);
+      return json({ error: "Server error." }, 500);
     }
   },
 };
@@ -171,14 +180,19 @@ async function handleLogin(request, env) {
   // Email + password login (a user account).
   if (email) {
     const u = await getUserByEmail(env, email);
-    if (!u || u.pass !== (await passHash(email, pw))) {
+    if (!u || u.pass !== (await passHash(env, email, pw))) {
       return json({ error: "Wrong email or password." }, 401);
     }
     if (u.status === "suspended") return json({ error: "This account has been suspended." }, 403);
     if (u.status !== "approved") {
       return json({ error: u.status === "rejected" ? "This account was not approved." : "Your account is waiting for approval." }, 403);
     }
-    return await loginResponse(env, String(u.id));
+    // Admins may be on many devices; everyone else is limited to one device,
+    // enforced by a session token that a new login replaces.
+    if (await isUserAdmin(env, u)) return await loginResponse(env, String(u.id), "");
+    const session = randToken();
+    try { await env.DB.prepare("UPDATE users SET session = ? WHERE id = ?").bind(session, u.id).run(); } catch (e) { /* ignore */ }
+    return await loginResponse(env, String(u.id), session);
   }
 
   // Master password or an access code.
@@ -222,7 +236,8 @@ async function ensureD1(env) {
       env.DB.prepare("CREATE TABLE IF NOT EXISTS presence (uid TEXT PRIMARY KEY, name TEXT, view TEXT, seen INTEGER)"),
     ]);
     // Best-effort migrations for columns added later (ignored if they exist).
-    for (const a of ["ALTER TABLE users ADD COLUMN name TEXT", "ALTER TABLE users ADD COLUMN nodl INTEGER"]) {
+    for (const a of ["ALTER TABLE users ADD COLUMN name TEXT", "ALTER TABLE users ADD COLUMN nodl INTEGER",
+                     "ALTER TABLE users ADD COLUMN role TEXT", "ALTER TABLE users ADD COLUMN session TEXT"]) {
       try { await env.DB.prepare(a).run(); } catch (e) { /* column already exists */ }
     }
     D1_READY = true;
@@ -280,7 +295,7 @@ function isAdmin(env, body) {
 // password.
 // --------------------------------------------------------------------------- //
 async function getConfig(env) {
-  const out = { appName: "", announcement: "", theme: "", lang: "", accent: "", features: {} };
+  const out = { appName: "", announcement: "", theme: "", lang: "", accent: "", ownerEmail: "", features: {} };
   let raw = null;
   if (env.DB) {
     await ensureD1(env);
@@ -299,6 +314,7 @@ async function getConfig(env) {
       out.theme = (c.theme === "dark" || c.theme === "light") ? c.theme : "";
       out.lang = (c.lang === "en" || c.lang === "he") ? c.lang : "";
       out.accent = CONFIG_ACCENTS.indexOf(c.accent) > 0 ? c.accent : "";
+      out.ownerEmail = typeof c.ownerEmail === "string" ? c.ownerEmail : "";
       if (c.features && typeof c.features === "object") out.features = c.features;
     }
   } catch (e) { /* ignore */ }
@@ -317,15 +333,19 @@ async function saveConfig(env, cfg) {
 
 async function handleAdminConfig(request, env) {
   const body = await request.json().catch(() => ({}));
-  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
+  // No config in the body → read the full config (owner email included).
+  if (!body.config) return json({ config: await getConfig(env) });
   if (!hasStore(env)) return json({ error: "Settings storage is not set up yet." }, 400);
   const inC = (body.config && typeof body.config === "object") ? body.config : {};
+  const oe = (inC.ownerEmail || "").toString().trim().toLowerCase();
   const clean = {
     appName: (inC.appName || "").toString().trim().slice(0, 60),
     announcement: (inC.announcement || "").toString().trim().slice(0, 500),
     theme: (inC.theme === "dark" || inC.theme === "light") ? inC.theme : "",
     lang: (inC.lang === "en" || inC.lang === "he") ? inC.lang : "",
     accent: CONFIG_ACCENTS.indexOf(inC.accent) > 0 ? inC.accent : "",
+    ownerEmail: validEmail(oe) ? oe : "",
     features: {},
   };
   const inF = (inC.features && typeof inC.features === "object") ? inC.features : {};
@@ -337,7 +357,7 @@ async function handleAdminConfig(request, env) {
 // GET the list of access codes (admin only). Reports whether a store is set up.
 async function handleAdminList(request, env) {
   const body = await request.json().catch(() => ({}));
-  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
   if (!hasStore(env)) return json({ kv: false, codes: [] });
   const codes = await getCodes(env);
   return json({ kv: true, codes: codes || [] });
@@ -346,7 +366,7 @@ async function handleAdminList(request, env) {
 // Add (or update) a named access code (admin only).
 async function handleAdminAdd(request, env) {
   const body = await request.json().catch(() => ({}));
-  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
   if (!hasStore(env)) return json({ error: "Account storage is not set up yet." }, 400);
   const name = (body.name || "").toString().trim().slice(0, 60);
   const code = (body.code || "").toString().trim();
@@ -367,7 +387,7 @@ async function handleAdminAdd(request, env) {
 // Remove an access code by its value (admin only).
 async function handleAdminRemove(request, env) {
   const body = await request.json().catch(() => ({}));
-  if (!isAdmin(env, body)) return json({ error: "Wrong password." }, 403);
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
   if (!hasStore(env)) return json({ error: "Account storage is not set up yet." }, 400);
   const code = (body.code || "").toString();
   const codes = (await getCodes(env)) || [];
@@ -382,25 +402,55 @@ async function handleAdminRemove(request, env) {
 // panel. Approved users sign in with email + password. The owner can also
 // create approved accounts directly (no photo). Passwords are stored hashed.
 // --------------------------------------------------------------------------- //
-async function passHash(email, password) {
-  return await sha256hex("u1:" + email + ":" + password);
+// Password hash, peppered with the master secret so stolen hashes can't be
+// cracked without SITE_PASSWORD.
+async function passHash(env, email, password) {
+  return await sha256hex("u2:" + email + ":" + password + ":" + (env.SITE_PASSWORD || ""));
 }
-async function uidToken(env, id) {
-  return id + "." + (await sha256hex("uid:" + id + ":" + (env.SITE_PASSWORD || "")));
+function randToken() {
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-async function verifyUid(env, val) {
+// The uid cookie is a signed value: "<id>.<session>.<sig>" (session empty for
+// admins). The signature uses SITE_PASSWORD, so it cannot be forged.
+async function uidSig(env, id, session) {
+  return await sha256hex("uid2:" + id + ":" + (session || "") + ":" + (env.SITE_PASSWORD || ""));
+}
+async function verifyUidFull(env, val) {
   if (!val) return null;
-  const i = val.lastIndexOf(".");
-  if (i < 0) return null;
-  const id = val.slice(0, i);
-  if (val.slice(i + 1) === (await sha256hex("uid:" + id + ":" + (env.SITE_PASSWORD || "")))) return id;
+  const p = val.split(".");
+  if (p.length === 2) { if (p[1] === (await uidSig(env, p[0], ""))) return { id: p[0], session: "" }; return null; }
+  if (p.length === 3) { if (p[2] === (await uidSig(env, p[0], p[1]))) return { id: p[0], session: p[1] }; return null; }
   return null;
 }
-async function loginResponse(env, uid) {
+async function verifyUid(env, val) { const v = await verifyUidFull(env, val); return v ? v.id : null; }
+async function loginResponse(env, uid, session) {
+  const val = uid ? (uid + (session ? ("." + session) : "") + "." + (await uidSig(env, uid, session || ""))) : "";
   const h = new Headers({ "Content-Type": "application/json; charset=utf-8" });
   h.append("Set-Cookie", "auth=" + (await authToken(env)) + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000");
-  h.append("Set-Cookie", "uid=" + (uid ? await uidToken(env, uid) : "") + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000");
+  h.append("Set-Cookie", "uid=" + val + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000");
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers: h });
+}
+// Owner email (from admin settings, or the OWNER_EMAIL secret). That account
+// — and any account you mark as admin — can see the admin settings.
+async function ownerEmail(env) {
+  const c = await getConfig(env);
+  return ((c.ownerEmail || env.OWNER_EMAIL || "").toString().trim().toLowerCase());
+}
+async function isUserAdmin(env, u) {
+  if (!u) return false;
+  if (u.role === "admin") return true;
+  const oe = await ownerEmail(env);
+  return !!(oe && (u.email || "").toLowerCase() === oe);
+}
+// True for the master password, the owner-email account, or a role=admin user.
+async function isAdminReq(env, request, body) {
+  if (env.SITE_PASSWORD && ((body && body.admin) || "").toString() === env.SITE_PASSWORD) return true;
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (id === "admin") return true;
+  if (id) { const u = await getUserById(env, id); if (await isUserAdmin(env, u)) return true; }
+  return false;
 }
 async function getUserByEmail(env, email) {
   if (!env.DB) return null;
@@ -432,18 +482,37 @@ async function handleSignup(request, env) {
   if (await getUserByEmail(env, email)) return json({ error: "An account with this email already exists." }, 400);
   try {
     await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, email, phone, await passHash(email, password), photo, "pending", Date.now()).run();
+      .bind(name, email, phone, await passHash(env, email, password), photo, "pending", Date.now()).run();
   } catch (e) { return json({ error: "Could not send the request." }, 500); }
   return json({ ok: true });
 }
 
 async function handleMe(request, env) {
-  const id = await verifyUid(env, parseCookies(request).uid);
-  if (id === "admin") return json({ admin: true, name: "Owner" });
-  if (!id) return json({ user: null });
-  const u = await getUserById(env, id);
+  const v = await verifyUidFull(env, parseCookies(request).uid);
+  if (!v) return json({ user: null });
+  if (v.id === "admin") return json({ admin: true, name: "Owner" });
+  const u = await getUserById(env, v.id);
   if (!u) return json({ user: null });
-  return json({ user: { id: u.id, email: u.email, phone: u.phone, photo: u.photo, name: u.name || (u.email || "").split("@")[0], nodl: !!u.nodl } });
+  const admin = await isUserAdmin(env, u);
+  // Single device: a non-admin whose stored session no longer matches this
+  // device's cookie has been signed in elsewhere.
+  if (!admin && u.session && v.session && u.session !== v.session) {
+    return json({ user: null, otherDevice: true });
+  }
+  return json({ admin: admin, user: { id: u.id, email: u.email, phone: u.phone, photo: u.photo, name: u.name || (u.email || "").split("@")[0], nodl: !!u.nodl, role: u.role || "" } });
+}
+
+// Re-claim this account on THIS device (kicks the other device), using the
+// existing signed cookie — no password needed.
+async function handleClaimDevice(request, env) {
+  if (!env.DB) return json({ ok: false });
+  const v = await verifyUidFull(env, parseCookies(request).uid);
+  if (!v || v.id === "admin" || !v.id) return json({ ok: false }, 400);
+  const u = await getUserById(env, v.id);
+  if (!u) return json({ ok: false }, 400);
+  const session = randToken();
+  await env.DB.prepare("UPDATE users SET session = ? WHERE id = ?").bind(session, u.id).run();
+  return await loginResponse(env, String(u.id), session);
 }
 
 // Change your own password (must be signed in as a user account).
@@ -453,17 +522,32 @@ async function handleMePassword(request, env) {
   const b = await request.json().catch(() => ({}));
   const u = await getUserById(env, id);
   if (!u) return json({ error: "Account not found." }, 404);
-  if (u.pass !== (await passHash(u.email, (b.old || "").toString()))) return json({ error: "Current password is wrong." }, 403);
+  if (u.pass !== (await passHash(env, u.email, (b.old || "").toString()))) return json({ error: "Current password is wrong." }, 403);
   const np = (b.new || "").toString();
   if (np.length < 4) return json({ error: "New password must be at least 4 characters." }, 400);
-  await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHash(u.email, np), Number(id)).run();
+  await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHash(env, u.email, np), Number(id)).run();
+  return json({ ok: true });
+}
+
+// Change your own profile photo (a new selfie).
+async function handleMePhoto(request, env) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (!id || id === "admin" || !env.DB) return json({ error: "Not available for this login." }, 400);
+  const b = await request.json().catch(() => ({}));
+  const photo = (b.photo || "").toString();
+  if (!/^data:image\/(png|jpe?g|webp);base64,/.test(photo)) return json({ error: "A photo is required." }, 400);
+  if (photo.length > 400000) return json({ error: "Photo is too large — please try again." }, 400);
+  await env.DB.prepare("UPDATE users SET photo = ? WHERE id = ?").bind(photo, Number(id)).run();
   return json({ ok: true });
 }
 
 // Pending-request count, for the owner's badge.
 async function handlePending(request, env) {
   const id = await verifyUid(env, parseCookies(request).uid);
-  if (id !== "admin" || !env.DB) return json({ pending: 0, admin: id === "admin" });
+  if (!id || !env.DB) return json({ pending: 0, admin: false });
+  let admin = (id === "admin");
+  if (!admin) { const u = await getUserById(env, id); admin = u ? await isUserAdmin(env, u) : false; }
+  if (!admin) return json({ pending: 0, admin: false });
   await ensureD1(env);
   try {
     const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE status = 'pending'").first();
@@ -473,32 +557,41 @@ async function handlePending(request, env) {
 
 async function handleAdminUsers(request, env) {
   const b = await request.json().catch(() => ({}));
-  if (!isAdmin(env, b)) return json({ error: "Wrong password." }, 403);
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
   if (!env.DB) return json({ error: "Accounts need a D1 database.", d1: false }, 400);
   await ensureD1(env);
-  const r = await env.DB.prepare("SELECT id, name, email, phone, photo, status, nodl, created FROM users ORDER BY created DESC").all();
-  return json({ users: r.results || [] });
+  const r = await env.DB.prepare("SELECT id, name, email, phone, photo, status, nodl, role, created FROM users ORDER BY created DESC").all();
+  return json({ users: r.results || [], ownerEmail: await ownerEmail(env) });
 }
 
 async function handleAdminUser(request, env) {
   const b = await request.json().catch(() => ({}));
-  if (!isAdmin(env, b)) return json({ error: "Wrong password." }, 403);
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
   if (!env.DB) return json({ error: "Accounts need a D1 database." }, 400);
   await ensureD1(env);
   const action = (b.action || "").toString();
   const id = Number(b.id);
+  // The owner account can never be suspended, removed, demoted, or reset by
+  // anyone — it is protected so nobody can lock the owner out.
+  const target = await getUserById(env, id);
+  const oe = await ownerEmail(env);
+  const targetIsOwner = !!(target && oe && (target.email || "").toLowerCase() === oe);
+  if (targetIsOwner && ["reject", "suspend", "remove", "nodl", "setrole", "resetpw"].indexOf(action) !== -1) {
+    return json({ error: "The owner account is protected." }, 403);
+  }
   if (action === "approve") { await env.DB.prepare("UPDATE users SET status='approved' WHERE id=?").bind(id).run(); return json({ ok: true }); }
   if (action === "reject") { await env.DB.prepare("UPDATE users SET status='rejected' WHERE id=?").bind(id).run(); return json({ ok: true }); }
   if (action === "suspend") { await env.DB.prepare("UPDATE users SET status='suspended' WHERE id=?").bind(id).run(); return json({ ok: true }); }
   if (action === "unsuspend") { await env.DB.prepare("UPDATE users SET status='approved' WHERE id=?").bind(id).run(); return json({ ok: true }); }
   if (action === "remove") { await env.DB.prepare("DELETE FROM users WHERE id=?").bind(id).run(); return json({ ok: true }); }
   if (action === "nodl") { await env.DB.prepare("UPDATE users SET nodl=? WHERE id=?").bind(b.value ? 1 : 0, id).run(); return json({ ok: true }); }
+  if (action === "setrole") { await env.DB.prepare("UPDATE users SET role=? WHERE id=?").bind(b.value ? "admin" : "", id).run(); return json({ ok: true }); }
   if (action === "resetpw") {
     const np = (b.password || "").toString();
     if (np.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
     const u = await getUserById(env, id);
     if (!u) return json({ error: "Account not found." }, 404);
-    await env.DB.prepare("UPDATE users SET pass=? WHERE id=?").bind(await passHash(u.email, np), id).run();
+    await env.DB.prepare("UPDATE users SET pass=? WHERE id=?").bind(await passHash(env, u.email, np), id).run();
     return json({ ok: true });
   }
   if (action === "create") {
@@ -510,7 +603,7 @@ async function handleAdminUser(request, env) {
     if (password.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
     if (await getUserByEmail(env, email)) return json({ error: "That email already exists." }, 400);
     await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, email, phone, await passHash(email, password), "", "approved", Date.now()).run();
+      .bind(name, email, phone, await passHash(env, email, password), "", "approved", Date.now()).run();
     return json({ ok: true });
   }
   return json({ error: "Unknown action." }, 400);
@@ -544,7 +637,7 @@ async function handlePresence(request, env) {
 
 async function handleAdminPresence(request, env) {
   const b = await request.json().catch(() => ({}));
-  if (!isAdmin(env, b)) return json({ error: "Wrong password." }, 403);
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
   if (!env.DB) return json({ online: [], now: Date.now() });
   await ensureD1(env);
   const now = Date.now();
@@ -1635,6 +1728,8 @@ const PAGE = `<!DOCTYPE html>
     var ME={admin:false,user:null};
     function dlAllowed(){ return feat("downloads") && !(ME.user && ME.user.nodl); }
     function loadMe(){ return fetch("/api/me").then(function(r){return r.json();}).then(function(d){
+      if(d&&d.otherDevice){ showTakeover(); return; }
+      hideTakeover();
       ME.admin=!!(d&&d.admin); ME.user=(d&&d.user)||null;
       if(ME.user&&ME.user.photo&&/^data:image/.test(ME.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=ME.user.photo; if(a) a.hidden=false; }
       updateCfgBanner(); if(ME.admin) loadPending();
@@ -2120,9 +2215,9 @@ const PAGE = `<!DOCTYPE html>
         (ME.user ? ('<div class="set-sec"><h3>Your account</h3><div class="card">'+
           row(esc(ME.user.name||ME.user.email), esc(ME.user.email), ic("chevron_right"), "openProfile()")+
         '</div></div>') : '')+
-        '<div class="set-sec"><h3>Admin</h3><div class="card">'+
+        (ME.admin ? ('<div class="set-sec"><h3>Admin</h3><div class="card">'+
           row("Admin panel","Accounts, appearance, features, who's online", ic("chevron_right"), "openAccess()")+
-        '</div></div>'+
+        '</div></div>') : '')+
         (ME.admin ? ('<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
           '<button class="chip" onclick="showZingConfig()">Zing settings</button>'+
@@ -2139,6 +2234,12 @@ const PAGE = `<!DOCTYPE html>
       overlay("Profile", '<div style="text-align:center;margin-bottom:8px">'+
         (u.photo&&/^data:image/.test(u.photo)?'<img src="'+esc(u.photo)+'" alt="" style="width:120px;height:120px;border-radius:999px;object-fit:cover" />':'<div style="width:120px;height:120px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;color:#fff;font-weight:800;font-size:2rem">'+esc((u.name||u.email||"?").slice(0,1).toUpperCase())+'</div>')+
         '<div style="font-weight:800;font-size:1.2rem;margin-top:12px">'+esc(u.name||"")+'</div><div class="muted">'+esc(u.email||"")+'</div>'+(u.phone?'<div class="muted">'+esc(u.phone)+'</div>':'')+'</div>'+
+        '<div class="set-sec"><h3>Profile picture</h3><div class="card" style="padding:15px">'+
+          '<div id="pf_cam" style="display:none"><video id="pf_video" autoplay playsinline muted style="width:100%;max-width:280px;border-radius:14px;background:#000;display:block;margin:0 auto"></video>'+
+            '<div style="display:flex;gap:10px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="pfSnap()">Take photo</button><button class="chip" onclick="pfStop()">Cancel</button></div></div>'+
+          '<div id="pf_start"><button class="btn" style="width:100%;justify-content:center" onclick="pfCam()">Change photo</button></div>'+
+          '<canvas id="pf_canvas" style="display:none"></canvas>'+
+          '<div id="pf_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'+
         '<div class="set-sec"><h3>Change password</h3><div class="card" style="padding:15px">'+
           '<input id="pw_old" class="field" type="password" placeholder="Current password" autocomplete="current-password" />'+
           '<input id="pw_new" class="field" style="margin-top:10px" type="password" placeholder="New password" autocomplete="new-password" />'+
@@ -2148,6 +2249,29 @@ const PAGE = `<!DOCTYPE html>
     }
     function changePw(){ var o=$("pw_old"),n=$("pw_new"),m=$("pw_msg"); if(m) m.textContent="";
       post("/api/me/password",{old:(o||{}).value||"",new:(n||{}).value||""}).then(function(){ toast("Password changed ✓"); if(o)o.value=""; if(n)n.value=""; }).catch(function(e){ if(m) m.textContent=e.message||"Could not change."; }); }
+    var _pfStream=null;
+    function pfCam(){ var m=$("pf_msg"); if(m) m.textContent=""; if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ if(m) m.textContent="Camera not available."; return; }
+      navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}}).then(function(s){ _pfStream=s; var v=$("pf_video"); if(v){ v.srcObject=s; } var c=$("pf_cam"),st=$("pf_start"); if(c)c.style.display="block"; if(st)st.style.display="none"; }).catch(function(){ if(m) m.textContent="Could not open the camera."; }); }
+    function pfStop(){ if(_pfStream){ try{ _pfStream.getTracks().forEach(function(t){t.stop();}); }catch(e){} _pfStream=null; } var c=$("pf_cam"),st=$("pf_start"); if(c)c.style.display="none"; if(st)st.style.display=""; }
+    function pfSnap(){ var v=$("pf_video"),cv=$("pf_canvas"),m=$("pf_msg"); if(!v||!cv){ return; } var w=v.videoWidth||360,h=v.videoHeight||360; var mx=360,sc=Math.min(1,mx/Math.max(w,h)); cv.width=Math.round(w*sc); cv.height=Math.round(h*sc);
+      var ctx=cv.getContext("2d"); ctx.drawImage(v,0,0,cv.width,cv.height); var data=cv.toDataURL("image/jpeg",0.6); pfStop();
+      if(m) m.textContent="Saving…"; post("/api/me/photo",{photo:data}).then(function(){ ME.user.photo=data; var im=$("meImg"),a=$("meAvatar"); if(im)im.src=data; if(a)a.hidden=false; toast("Photo updated ✓"); openProfile(); }).catch(function(e){ if(m){ m.className="err"; m.textContent=e.message||"Could not save."; } }); }
+
+    // ---------- Single device: one account = one device ----------
+    var _tkPoll=null;
+    function showTakeover(){ var el=$("takeover"); if(el){ el.hidden=false; return; }
+      el=document.createElement("div"); el.id="takeover"; el.style.cssText="position:fixed;inset:0;z-index:9999;background:var(--bg);display:grid;place-items:center;padding:24px;text-align:center";
+      el.innerHTML='<div style="max-width:380px"><div style="width:64px;height:64px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;margin-bottom:16px">'+ic("lock")+'</div>'+
+        '<h2 style="margin:0 0 8px">You are signed in on another device</h2>'+
+        '<p class="muted" style="margin:0 0 18px">Your account can only be signed in on one device at a time. To use it here, sign out the other device.</p>'+
+        '<button class="btn" id="tkBtn" style="width:100%;justify-content:center" onclick="claimDevice()">Use this device</button>'+
+        '<div id="tkMsg" class="err" style="margin-top:10px;min-height:16px"></div>'+
+        '<div class="row" style="cursor:pointer;justify-content:center;margin-top:14px" onclick="signOut()"><div class="rt" style="color:var(--err)">Sign out</div></div></div>';
+      document.body.appendChild(el);
+    }
+    function hideTakeover(){ var el=$("takeover"); if(el){ el.hidden=true; } }
+    function claimDevice(){ var m=$("tkMsg"); if(m) m.textContent="";
+      post("/api/claim-device",{}).then(function(){ hideTakeover(); loadMe().then(function(){ go(curTab||"home"); }); }).catch(function(e){ if(m) m.textContent=(e&&e.message)||"Could not switch."; }); }
 
     // ---------- Access management (who can access) ----------
     function backToSettings(){ stopPresPoll(); ovlSet("Settings", settingsHtml()); }
@@ -2158,11 +2282,11 @@ const PAGE = `<!DOCTYPE html>
       '<input id="admpw" class="field" type="password" placeholder="Main password" autocomplete="off" />'+
       '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="unlockAccess()">Unlock</button>'+
       '<div id="accmsg" class="err" style="margin-top:10px;min-height:18px">'+esc(msg||"")+'</div></div>'; }
-    function openAccess(){ if(_admPw){ loadAccess(); } else { ovlSet("Admin", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
+    function openAccess(){ if(_admPw||ME.admin){ loadAccess(); } else { ovlSet("Admin", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
     function unlockAccess(){ var i=$("admpw"); var pw=i?i.value:""; if(!pw){ return; } _admPw=pw; loadAccess(); }
     function loadAccess(){ ovlSet("Admin", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
       Promise.all([ post("/api/admin/list",{admin:_admPw}),
-        fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}),
+        post("/api/admin/config",{admin:_admPw}).then(function(d){return d.config||{};}).catch(function(){return {};}),
         post("/api/admin/users",{admin:_admPw}).catch(function(){return {users:null};}),
         post("/api/admin/presence",{admin:_admPw}).catch(function(){return {online:[]};}) ])
         .then(function(res){ renderAdmin(res[0], res[1]||{}, res[2]||{}, res[3]||{}); })
@@ -2202,15 +2326,16 @@ const PAGE = `<!DOCTYPE html>
           return '<button data-v="'+esc(k)+'" onclick="cfgAccent(\\''+k+'\\')" title="'+esc(k||"Default")+'" style="width:34px;height:34px;border-radius:999px;border:2px solid '+(sel?"#fff":"transparent")+';background:'+bg+';cursor:pointer;flex:none"></button>'; }).join("")+'</div>'; }
     var FEAT_LABELS={banners:"Featured banners",albums:"Albums",popular:"Popular",search:"Search",genres:"Genres",categories:"Categories",playlists:"Playlists",artists:"Artists",stories:"Stories",downloads:"Downloads",favorites:"Favorites (♥)"};
     function saveAdminConfig(){ var an=$("cfgApp"), am=$("cfgAnn"), m=$("cfgMsg"); if(m) m.textContent="";
-      _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:"";
+      _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:""; _cfgEdit.ownerEmail=($("cfgOwner")||{}).value||"";
       post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; applyConfig(d.config||_cfgEdit); toast("Saved."); })
         .catch(function(e){ if(m) m.textContent=e.message||"Could not save."; }); }
     function renderAdmin(d, cfg, usersData, presData){
       var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
       if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
       var presCard='<div class="set-sec"><h3>Who\\'s online (<span id="presCount">'+(((presData&&presData.online)||[]).length)+'</span>)</h3><div class="card"><div id="presList">'+presenceListHtml(presData)+'</div></div></div>';
-      _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",features:{}};
+      _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",ownerEmail:cfg.ownerEmail||"",features:{}};
       CFG_FEATURES.forEach(function(k){ _cfgEdit.features[k]=(cfg.features&&cfg.features[k])!==false; });
+      var oemail=((usersData&&usersData.ownerEmail)||"").toLowerCase();
       var appCard='<div class="set-sec"><h3>Appearance</h3><div class="card" style="padding:15px">'+
         '<label class="muted" style="font-size:.8rem">App name</label>'+
         '<input id="cfgApp" class="field" style="margin:5px 0 14px" placeholder="Zing" value="'+esc(_cfgEdit.appName)+'" />'+
@@ -2221,7 +2346,9 @@ const PAGE = `<!DOCTYPE html>
         '<div class="card" style="margin-top:10px">'+
           '<div class="row"><div class="rlabel"><div class="rt">Default theme</div><div class="rd">For people who haven\\'t chosen</div></div><div class="seg" id="cfp_theme">'+optBtn("theme","","Off")+optBtn("theme","dark","Dark")+optBtn("theme","light","Light")+'</div></div>'+
           '<div class="row"><div class="rlabel"><div class="rt">Default language</div><div class="rd">Names in English or Hebrew</div></div><div class="seg" id="cfp_lang">'+optBtn("lang","","Off")+optBtn("lang","en","EN")+optBtn("lang","he","עברית")+'</div></div>'+
-        '</div></div>';
+        '</div>'+
+        '<div class="card" style="margin-top:10px;padding:15px"><label class="muted" style="font-size:.8rem">Owner email — this account (and anyone you make an admin) sees the admin settings</label>'+
+        '<input id="cfgOwner" class="field" style="margin:5px 0 0" type="email" placeholder="you@example.com" value="'+esc(_cfgEdit.ownerEmail)+'" autocomplete="off" /></div></div>';
       var featCard='<div class="set-sec"><h3>Features &amp; sections — show / hide for everyone</h3><div class="card">'+
         CFG_FEATURES.map(function(k){ return toggleRow(k, FEAT_LABELS[k]||k); }).join("")+
         '</div></div>'+
@@ -2255,11 +2382,12 @@ const PAGE = `<!DOCTYPE html>
               '<button class="trash" title="Reject" onclick="userAction('+u.id+',\\'reject\\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
         }
         var alist = others.length
-          ? others.map(function(u){ var susp=(u.status==="suspended");
+          ? others.map(function(u){ var susp=(u.status==="suspended"); var isOwner=(oemail&&(u.email||"").toLowerCase()===oemail); var isA=(u.role==="admin"||isOwner);
               return '<div class="card" style="padding:12px;margin-bottom:8px">'+
-                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div></div>'+
+                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div></div>'+
                 '<div class="chips" style="padding:0;margin-top:10px">'+
                   (susp?'<button class="chip" onclick="userAction('+u.id+',\\'unsuspend\\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\\'suspend\\')">Suspend</button>')+
+                  (isOwner?'':'<button class="chip" onclick="userAction('+u.id+',\\'setrole\\',{value:'+(u.role==="admin"?0:1)+'})">'+(u.role==="admin"?"Remove admin":"Make admin")+'</button>')+
                   '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
                   '<button class="chip" onclick="userAction('+u.id+',\\'nodl\\',{value:'+(u.nodl?0:1)+'})">'+(u.nodl?'Enable downloads':'Disable downloads')+'</button>'+
                   '<button class="chip" onclick="userAction('+u.id+',\\'remove\\')">Remove</button>'+
@@ -2403,8 +2531,9 @@ const PAGE = `<!DOCTYPE html>
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
     window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw;
+    window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
-    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); loadConfig().then(function(){ home(); });
+    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); loadConfig().then(function(){ home(); });
   </script>
 </body>
 </html>`;

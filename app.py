@@ -75,6 +75,10 @@ if USER_TOKEN in ("PASTE_YOUR_JWT_TOKEN_HERE", "PASTE YOUR JWT TOKEN HERE"):
 # Optional master password for the in-app admin (managing access codes).
 SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "").strip()
 
+
+def _ph(email, password):
+    return hashlib.sha256(("u2:" + email + ":" + password + ":" + SITE_PASSWORD).encode()).hexdigest()
+
 # Optional auto-login: when set, the app logs in itself to refresh the token.
 ZING_EMAIL = os.environ.get("ZING_EMAIL", "").strip()
 ZING_PASSWORD = os.environ.get("ZING_PASSWORD", "").strip()
@@ -127,7 +131,7 @@ def _config_path():
 
 
 def load_config():
-    out = {"appName": "", "announcement": "", "theme": "", "lang": "", "accent": "", "features": {}}
+    out = {"appName": "", "announcement": "", "theme": "", "lang": "", "accent": "", "ownerEmail": "", "features": {}}
     try:
         with open(_config_path(), "r", encoding="utf-8") as f:
             c = json.load(f)
@@ -137,6 +141,7 @@ def load_config():
             out["theme"] = c.get("theme") if c.get("theme") in ("dark", "light") else ""
             out["lang"] = c.get("lang") if c.get("lang") in ("en", "he") else ""
             out["accent"] = c.get("accent") if c.get("accent") in CONFIG_ACCENTS[1:] else ""
+            out["ownerEmail"] = c.get("ownerEmail") if isinstance(c.get("ownerEmail"), str) else ""
             if isinstance(c.get("features"), dict):
                 out["features"] = c["features"]
     except Exception:  # noqa: BLE001
@@ -507,7 +512,7 @@ def api_signup():
         return jsonify({"error": "An account with this email already exists."}), 400
     nid = (max([u.get("id", 0) for u in users]) + 1) if users else 1
     users.append({"id": nid, "name": name, "email": email, "phone": phone,
-                  "pass": hashlib.sha256(("u1:" + email + ":" + password).encode()).hexdigest(),
+                  "pass": _ph(email, password),
                   "photo": photo, "status": "pending", "nodl": 0, "created": int(time.time() * 1000)})
     save_users(users)
     return jsonify({"ok": True})
@@ -520,6 +525,11 @@ def api_me():
 
 @app.route("/api/me/password", methods=["POST"])
 def api_me_password():
+    return jsonify({"error": "Not available for this login."}), 400
+
+
+@app.route("/api/me/photo", methods=["POST"])
+def api_me_photo():
     return jsonify({"error": "Not available for this login."}), 400
 
 
@@ -571,9 +581,9 @@ def api_admin_users():
     body = request.get_json(silent=True) or {}
     if not is_admin(body):
         return jsonify({"error": "Wrong password."}), 403
-    users = [{k: u.get(k) for k in ("id", "name", "email", "phone", "photo", "status", "nodl", "created")} for u in load_users()]
+    users = [{k: u.get(k) for k in ("id", "name", "email", "phone", "photo", "status", "nodl", "role", "created")} for u in load_users()]
     users.sort(key=lambda u: u.get("created", 0), reverse=True)
-    return jsonify({"users": users})
+    return jsonify({"users": users, "ownerEmail": load_config().get("ownerEmail", "")})
 
 
 @app.route("/api/admin/user", methods=["POST"])
@@ -584,6 +594,12 @@ def api_admin_user():
     action = str(body.get("action", ""))
     users = load_users()
     uid = body.get("id")
+    # The owner account is protected: nobody can suspend, remove, demote, or reset it.
+    oe = (load_config().get("ownerEmail") or "").strip().lower()
+    target = next((u for u in users if u.get("id") == uid), None)
+    target_is_owner = bool(target and oe and (target.get("email") or "").lower() == oe)
+    if target_is_owner and action in ("reject", "suspend", "remove", "nodl", "setrole", "resetpw"):
+        return jsonify({"error": "The owner account is protected."}), 403
     status_map = {"approve": "approved", "reject": "rejected", "suspend": "suspended", "unsuspend": "approved"}
     if action in status_map:
         for u in users:
@@ -597,13 +613,19 @@ def api_admin_user():
                 u["nodl"] = 1 if body.get("value") else 0
         save_users(users)
         return jsonify({"ok": True})
+    if action == "setrole":
+        for u in users:
+            if u.get("id") == uid:
+                u["role"] = "admin" if body.get("value") else ""
+        save_users(users)
+        return jsonify({"ok": True})
     if action == "resetpw":
         np = str(body.get("password", ""))
         if len(np) < 4:
             return jsonify({"error": "Password must be at least 4 characters."}), 400
         for u in users:
             if u.get("id") == uid:
-                u["pass"] = hashlib.sha256(("u1:" + u.get("email", "") + ":" + np).encode()).hexdigest()
+                u["pass"] = _ph(u.get('email',''), np)
         save_users(users)
         return jsonify({"ok": True})
     if action == "remove":
@@ -624,7 +646,7 @@ def api_admin_user():
             return jsonify({"error": "That email already exists."}), 400
         nid = (max([u.get("id", 0) for u in users]) + 1) if users else 1
         users.append({"id": nid, "name": name, "email": email, "phone": phone,
-                      "pass": hashlib.sha256(("u1:" + email + ":" + password).encode()).hexdigest(),
+                      "pass": _ph(email, password),
                       "photo": "", "status": "approved", "nodl": 0, "created": int(time.time() * 1000)})
         save_users(users)
         return jsonify({"ok": True})
@@ -633,7 +655,14 @@ def api_admin_user():
 
 @app.route("/api/config")
 def api_config():
-    return jsonify(load_config())
+    c = load_config()
+    c.pop("ownerEmail", None)
+    return jsonify(c)
+
+
+@app.route("/api/claim-device", methods=["POST"])
+def api_claim_device():
+    return jsonify({"ok": False})
 
 
 @app.route("/api/admin/config", methods=["POST"])
@@ -641,14 +670,19 @@ def api_admin_config():
     body = request.get_json(silent=True) or {}
     if not is_admin(body):
         return jsonify({"error": "Wrong password."}), 403
+    if not body.get("config"):
+        return jsonify({"config": load_config()})
     in_c = body.get("config") if isinstance(body.get("config"), dict) else {}
     in_f = in_c.get("features") if isinstance(in_c.get("features"), dict) else {}
+    import re as _re
+    oe = str(in_c.get("ownerEmail", "")).strip().lower()
     clean = {
         "appName": str(in_c.get("appName", "")).strip()[:60],
         "announcement": str(in_c.get("announcement", "")).strip()[:500],
         "theme": in_c.get("theme") if in_c.get("theme") in ("dark", "light") else "",
         "lang": in_c.get("lang") if in_c.get("lang") in ("en", "he") else "",
         "accent": in_c.get("accent") if in_c.get("accent") in CONFIG_ACCENTS[1:] else "",
+        "ownerEmail": oe if _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", oe) else "",
         "features": {k: (in_f.get(k) is not False) for k in CONFIG_FEATURES},
     }
     save_config(clean)
