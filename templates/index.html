@@ -670,13 +670,15 @@
 
     // ---------- Player ----------
     var audio=$("audio");
+    var _retry=0, _fails=0;
     function playAlbum(albumId, index){ var al=(window._albums||{})[albumId]; if(!al) return; var tracks=al.tracks||[];
       var artistName=(al.artists&&al.artists.length)?artNames(al.artists):(window._curArtist||""); var aimg=albImg(al);
-      queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; }); playIndex(index); }
-    function playTracks(tracks, index, ctx){ queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:(t.artists&&t.artists.length?artNames(t.artists):(ctx||"")), cover:ctx||trackName(t), coverImg:null}; }); playIndex(index); }
-    function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i];
+      _fails=0; queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; }); playIndex(index); }
+    function playTracks(tracks, index, ctx){ _fails=0; queue=tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:(t.artists&&t.artists.length?artNames(t.artists):(ctx||"")), cover:ctx||trackName(t), coverImg:null}; }); playIndex(index); }
+    function trackSrc(t,bust){ return "/api/play?trackId="+encodeURIComponent(t.id)+"&file="+encodeURIComponent(t.file)+(bust?("&r="+Date.now()):""); }
+    function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i]; _retry=0;
       setActivity("Playing: "+(t.title||""));
-      audio.src="/api/play?trackId="+encodeURIComponent(t.id)+"&file="+encodeURIComponent(t.file); audio.play().catch(function(){});
+      audio.src=trackSrc(t,false); audio.play().catch(function(){});
       $("player").hidden=false; $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
       var cu=imgUrl(t.coverImg);
       if(cu){ $("npCover").style.background=""; $("npCover").style.backgroundImage="url('"+cu+"')"; $("npCover").style.backgroundSize="cover"; $("npCover").style.backgroundPosition="center"; $("npCover").innerHTML=""; }
@@ -691,9 +693,17 @@
     function prevTrack(){ if(audio.currentTime>3){ audio.currentTime=0; return; } if(qi>0) playIndex(qi-1); }
     audio.addEventListener("play", function(){ setPlayIcon(true); });
     audio.addEventListener("pause", function(){ setPlayIcon(false); });
+    audio.addEventListener("playing", function(){ _fails=0; }); // a track played fine — clear the failure streak
     audio.addEventListener("ended", function(){ if(SET.autoplay) nextTrack(); });
     audio.addEventListener("timeupdate", function(){ if(audio.duration){ $("seek").value=String(Math.round(audio.currentTime/audio.duration*1000)); } });
-    audio.addEventListener("error", function(){ toast("Could not play this track."); });
+    // If a track won't load: retry once (fresh request), then skip past it so the
+    // rest of the album keeps playing instead of stopping on one bad track.
+    audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
+      if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
+      _fails++;
+      if(_fails<queue.length && qi+1<queue.length){ toast("Skipping a track that won’t play…"); playIndex(qi+1); }
+      else { toast("Could not play this track."); }
+    });
     $("seek").addEventListener("input", function(){ if(audio.duration){ audio.currentTime=this.value/1000*audio.duration; } });
     function dlCurrent(){ var t=queue[qi]; if(t) downloadTrack(t.id, t.file); }
 
