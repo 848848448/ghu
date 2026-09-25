@@ -464,6 +464,104 @@ def api_status():
     )
 
 
+def _users_path():
+    return os.path.join(CACHE_DIR, "users.json")
+
+
+def load_users():
+    try:
+        with open(_users_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def save_users(users):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(_users_path(), "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False)
+
+
+@app.route("/api/signup", methods=["POST"])
+def api_signup():
+    b = request.get_json(silent=True) or {}
+    email = str(b.get("email", "")).strip().lower()
+    phone = str(b.get("phone", "")).strip()
+    password = str(b.get("password", ""))
+    photo = str(b.get("photo", ""))
+    import re as _re
+    if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return jsonify({"error": "Enter a valid email address."}), 400
+    if len(_re.sub(r"[^0-9]", "", phone)) < 6:
+        return jsonify({"error": "Enter a valid phone number."}), 400
+    if len(password) < 4:
+        return jsonify({"error": "Password must be at least 4 characters."}), 400
+    if not _re.match(r"^data:image/(png|jpe?g|webp);base64,", photo):
+        return jsonify({"error": "A selfie photo is required."}), 400
+    users = load_users()
+    if any(u.get("email") == email for u in users):
+        return jsonify({"error": "An account with this email already exists."}), 400
+    nid = (max([u.get("id", 0) for u in users]) + 1) if users else 1
+    users.append({"id": nid, "email": email, "phone": phone,
+                  "pass": hashlib.sha256(("u1:" + email + ":" + password).encode()).hexdigest(),
+                  "photo": photo, "status": "pending", "created": int(time.time() * 1000)})
+    save_users(users)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/me")
+def api_me():
+    return jsonify({"user": None})
+
+
+@app.route("/api/admin/users", methods=["POST"])
+def api_admin_users():
+    body = request.get_json(silent=True) or {}
+    if not is_admin(body):
+        return jsonify({"error": "Wrong password."}), 403
+    users = [{k: u.get(k) for k in ("id", "email", "phone", "photo", "status", "created")} for u in load_users()]
+    users.sort(key=lambda u: u.get("created", 0), reverse=True)
+    return jsonify({"users": users})
+
+
+@app.route("/api/admin/user", methods=["POST"])
+def api_admin_user():
+    body = request.get_json(silent=True) or {}
+    if not is_admin(body):
+        return jsonify({"error": "Wrong password."}), 403
+    action = str(body.get("action", ""))
+    users = load_users()
+    if action in ("approve", "reject"):
+        for u in users:
+            if u.get("id") == body.get("id"):
+                u["status"] = "approved" if action == "approve" else "rejected"
+        save_users(users)
+        return jsonify({"ok": True})
+    if action == "remove":
+        users = [u for u in users if u.get("id") != body.get("id")]
+        save_users(users)
+        return jsonify({"ok": True})
+    if action == "create":
+        import re as _re
+        email = str(body.get("email", "")).strip().lower()
+        phone = str(body.get("phone", "")).strip()
+        password = str(body.get("password", ""))
+        if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            return jsonify({"error": "Enter a valid email."}), 400
+        if len(password) < 4:
+            return jsonify({"error": "Password must be at least 4 characters."}), 400
+        if any(u.get("email") == email for u in users):
+            return jsonify({"error": "That email already exists."}), 400
+        nid = (max([u.get("id", 0) for u in users]) + 1) if users else 1
+        users.append({"id": nid, "email": email, "phone": phone,
+                      "pass": hashlib.sha256(("u1:" + email + ":" + password).encode()).hexdigest(),
+                      "photo": "", "status": "approved", "created": int(time.time() * 1000)})
+        save_users(users)
+        return jsonify({"ok": True})
+    return jsonify({"error": "Unknown action."}), 400
+
+
 @app.route("/api/config")
 def api_config():
     return jsonify(load_config())

@@ -27,6 +27,9 @@ export default {
       if (path === "/api/logout") {
         return logout();
       }
+      if (path === "/api/signup" && request.method === "POST") {
+        return await handleSignup(request, env);
+      }
 
       const authed = !locked || (await isAuthed(request, env));
 
@@ -67,6 +70,15 @@ export default {
       }
       if (path === "/api/admin/config" && request.method === "POST") {
         return await handleAdminConfig(request, env);
+      }
+      if (path === "/api/me") {
+        return await handleMe(request, env);
+      }
+      if (path === "/api/admin/users" && request.method === "POST") {
+        return await handleAdminUsers(request, env);
+      }
+      if (path === "/api/admin/user" && request.method === "POST") {
+        return await handleAdminUser(request, env);
       }
       if (path === "/api/artists" && request.method === "POST") {
         return await handleArtists(env);
@@ -141,27 +153,33 @@ async function isAuthed(request, env) {
 async function handleLogin(request, env) {
   if (!env.SITE_PASSWORD) return json({ ok: true });
   const body = await request.json().catch(() => ({}));
+  const email = (body.email || "").toString().trim().toLowerCase();
   const pw = (body.password || "").toString();
+
+  // Email + password login (a user account).
+  if (email) {
+    const u = await getUserByEmail(env, email);
+    if (!u || u.pass !== (await passHash(email, pw))) {
+      return json({ error: "Wrong email or password." }, 401);
+    }
+    if (u.status !== "approved") {
+      return json({ error: u.status === "rejected" ? "This account was not approved." : "Your account is waiting for approval." }, 403);
+    }
+    return await loginResponse(env, String(u.id));
+  }
+
+  // Master password or an access code.
   if (pw && (pw === env.SITE_PASSWORD || (await codeMatches(env, pw)))) {
-    const token = await authToken(env);
-    const cookie =
-      "auth=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000";
-    return new Response(JSON.stringify({ ok: true }), {
-      status: 200,
-      headers: { "Content-Type": "application/json; charset=utf-8", "Set-Cookie": cookie },
-    });
+    return await loginResponse(env, pw === env.SITE_PASSWORD ? "admin" : "");
   }
   return json({ error: "Wrong password." }, 401);
 }
 
 function logout() {
-  return new Response(null, {
-    status: 302,
-    headers: {
-      "Set-Cookie": "auth=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
-      Location: "/",
-    },
-  });
+  const h = new Headers({ Location: "/" });
+  h.append("Set-Cookie", "auth=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+  h.append("Set-Cookie", "uid=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+  return new Response(null, { status: 302, headers: h });
 }
 
 // --------------------------------------------------------------------------- //
@@ -187,6 +205,8 @@ async function ensureD1(env) {
     await env.DB.batch([
       env.DB.prepare("CREATE TABLE IF NOT EXISTS accounts (code TEXT PRIMARY KEY, name TEXT, added INTEGER)"),
       env.DB.prepare("CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, phone TEXT, pass TEXT, photo TEXT, status TEXT, created INTEGER)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS presence (uid TEXT PRIMARY KEY, name TEXT, view TEXT, seen INTEGER)"),
     ]);
     D1_READY = true;
   } catch (e) { /* ignore; calls below will surface errors */ }
@@ -337,6 +357,111 @@ async function handleAdminRemove(request, env) {
   const next = codes.filter((c) => !(c && c.code === code));
   await saveCodes(env, next);
   return json({ ok: true, codes: next });
+}
+
+// --------------------------------------------------------------------------- //
+// User accounts (D1 only): people request access by signing up with an email,
+// phone, password and a selfie photo; the owner approves them from the Admin
+// panel. Approved users sign in with email + password. The owner can also
+// create approved accounts directly (no photo). Passwords are stored hashed.
+// --------------------------------------------------------------------------- //
+async function passHash(email, password) {
+  return await sha256hex("u1:" + email + ":" + password);
+}
+async function uidToken(env, id) {
+  return id + "." + (await sha256hex("uid:" + id + ":" + (env.SITE_PASSWORD || "")));
+}
+async function verifyUid(env, val) {
+  if (!val) return null;
+  const i = val.lastIndexOf(".");
+  if (i < 0) return null;
+  const id = val.slice(0, i);
+  if (val.slice(i + 1) === (await sha256hex("uid:" + id + ":" + (env.SITE_PASSWORD || "")))) return id;
+  return null;
+}
+async function loginResponse(env, uid) {
+  const h = new Headers({ "Content-Type": "application/json; charset=utf-8" });
+  h.append("Set-Cookie", "auth=" + (await authToken(env)) + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000");
+  h.append("Set-Cookie", "uid=" + (uid ? await uidToken(env, uid) : "") + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000");
+  return new Response(JSON.stringify({ ok: true }), { status: 200, headers: h });
+}
+async function getUserByEmail(env, email) {
+  if (!env.DB) return null;
+  await ensureD1(env);
+  try { return await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(email).first(); } catch (e) { return null; }
+}
+async function getUserById(env, id) {
+  if (!env.DB) return null;
+  await ensureD1(env);
+  try { return await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(Number(id)).first(); } catch (e) { return null; }
+}
+function validEmail(e) { return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e); }
+
+async function handleSignup(request, env) {
+  if (!env.DB) return json({ error: "Sign-up is not set up yet (needs a D1 database)." }, 400);
+  await ensureD1(env);
+  const b = await request.json().catch(() => ({}));
+  const email = (b.email || "").toString().trim().toLowerCase();
+  const phone = (b.phone || "").toString().trim();
+  const password = (b.password || "").toString();
+  const photo = (b.photo || "").toString();
+  if (!validEmail(email)) return json({ error: "Enter a valid email address." }, 400);
+  if (phone.replace(/\D/g, "").length < 6) return json({ error: "Enter a valid phone number." }, 400);
+  if (password.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
+  if (!/^data:image\/(png|jpe?g|webp);base64,/.test(photo)) return json({ error: "A selfie photo is required." }, 400);
+  if (photo.length > 400000) return json({ error: "Photo is too large — please try again." }, 400);
+  if (await getUserByEmail(env, email)) return json({ error: "An account with this email already exists." }, 400);
+  try {
+    await env.DB.prepare("INSERT INTO users (email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(email, phone, await passHash(email, password), photo, "pending", Date.now()).run();
+  } catch (e) { return json({ error: "Could not send the request." }, 500); }
+  return json({ ok: true });
+}
+
+async function handleMe(request, env) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (id === "admin") return json({ admin: true, name: "Admin" });
+  if (!id) return json({ user: null });
+  const u = await getUserById(env, id);
+  if (!u) return json({ user: null });
+  return json({ user: { id: u.id, email: u.email, phone: u.phone, photo: u.photo, name: (u.email || "").split("@")[0] } });
+}
+
+async function handleAdminUsers(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!isAdmin(env, b)) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Accounts need a D1 database.", d1: false }, 400);
+  await ensureD1(env);
+  const r = await env.DB.prepare("SELECT id, email, phone, photo, status, created FROM users ORDER BY created DESC").all();
+  return json({ users: r.results || [] });
+}
+
+async function handleAdminUser(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!isAdmin(env, b)) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Accounts need a D1 database." }, 400);
+  await ensureD1(env);
+  const action = (b.action || "").toString();
+  if (action === "approve" || action === "reject") {
+    await env.DB.prepare("UPDATE users SET status = ? WHERE id = ?").bind(action === "approve" ? "approved" : "rejected", Number(b.id)).run();
+    return json({ ok: true });
+  }
+  if (action === "remove") {
+    await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(Number(b.id)).run();
+    return json({ ok: true });
+  }
+  if (action === "create") {
+    const email = (b.email || "").toString().trim().toLowerCase();
+    const phone = (b.phone || "").toString().trim();
+    const password = (b.password || "").toString();
+    if (!validEmail(email)) return json({ error: "Enter a valid email." }, 400);
+    if (password.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
+    if (await getUserByEmail(env, email)) return json({ error: "That email already exists." }, 400);
+    await env.DB.prepare("INSERT INTO users (email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(email, phone, await passHash(email, password), "", "approved", Date.now()).run();
+    return json({ ok: true });
+  }
+  return json({ error: "Unknown action." }, 400);
 }
 
 // --------------------------------------------------------------------------- //
@@ -1005,31 +1130,119 @@ const LOGIN = `<!DOCTYPE html>
   button{width:100%; margin-top:12px; padding:14px; border:none; border-radius:13px; cursor:pointer;
     font-family:inherit; font-weight:800; font-size:1rem; color:#fff;
     background:linear-gradient(135deg,#7c5cff,#ff4d8d); box-shadow:0 10px 24px rgba(124,92,255,.4);}
+  button:disabled{opacity:.6;}
   .msg{min-height:20px; margin-top:14px; font-size:.92rem; color:#fb7185;}
+  .tabs2{display:flex; gap:6px; background:#161627; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:4px; margin:0 0 18px;}
+  .tab2{flex:1; margin:0; padding:10px; border-radius:9px; font-weight:700; font-size:.95rem; background:transparent; color:#a3a3c2; box-shadow:none;}
+  .tab2.on{background:linear-gradient(135deg,#7c5cff,#ff4d8d); color:#fff;}
+  button.ghost{background:#1e1e34; color:#f4f4fb; box-shadow:none; border:1px solid rgba(255,255,255,.1); font-weight:600; font-size:.9rem;}
+  .selfie{margin-top:12px;}
+  .shot{width:150px; height:150px; margin:0 auto 8px; border-radius:999px; overflow:hidden; background:#161627; border:1px solid rgba(255,255,255,.1);
+    display:grid; place-items:center; position:relative;}
+  .shot video, .shot img{width:100%; height:100%; object-fit:cover; display:block;}
+  .shot #shotHint{position:absolute; padding:0 14px; color:#a3a3c2; font-size:.82rem; text-align:center;}
+  .shot video[hidden], .shot img[hidden]{display:none;}
 </style>
 </head>
 <body>
   <div class="box">
     <div class="logo">♪</div>
     <h1>Zing Music</h1>
-    <p>Enter your password or access code.</p>
-    <input id="pw" type="password" placeholder="Password or code" autocomplete="current-password" />
-    <button id="go">Sign in</button>
-    <div class="msg" id="msg"></div>
+    <div class="tabs2">
+      <button id="tSignin" class="tab2 on" type="button">Sign in</button>
+      <button id="tSignup" class="tab2" type="button">Request access</button>
+    </div>
+
+    <div id="signin">
+      <p>Sign in with your email and password.</p>
+      <input id="si_email" type="email" placeholder="Email (owner: leave blank)" autocomplete="username" />
+      <input id="si_pw" type="password" placeholder="Password" autocomplete="current-password" style="margin-top:10px" />
+      <button id="si_go" type="button">Sign in</button>
+      <div class="msg" id="si_msg"></div>
+    </div>
+
+    <div id="signup" hidden>
+      <p>Create an account. The owner approves new accounts.</p>
+      <input id="su_email" type="email" placeholder="Email address" autocomplete="email" />
+      <input id="su_phone" type="tel" placeholder="Phone number" autocomplete="tel" style="margin-top:10px" />
+      <input id="su_pw" type="password" placeholder="Choose a password" autocomplete="new-password" style="margin-top:10px" />
+      <div class="selfie">
+        <div id="shot" class="shot"><span id="shotHint">Your selfie photo is required</span><video id="cam" playsinline autoplay muted></video><img id="pic" alt="" /></div>
+        <button id="camBtn" type="button" class="ghost">Open camera</button>
+        <button id="capBtn" type="button" class="ghost" hidden>Take photo</button>
+        <button id="retBtn" type="button" class="ghost" hidden>Retake</button>
+      </div>
+      <button id="su_go" type="button">Request access</button>
+      <div class="msg" id="su_msg"></div>
+    </div>
   </div>
+  <canvas id="cv" hidden></canvas>
   <script>
-    var pw = document.getElementById("pw"), go = document.getElementById("go"), msg = document.getElementById("msg");
-    function submit(){
-      msg.textContent = "";
-      fetch("/api/login", { method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ password: pw.value }) })
-      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
-      .then(function(x){ if(x.ok){ location.href = "/"; } else { msg.textContent = (x.d && x.d.error) || "Wrong password."; pw.value=""; pw.focus(); } })
-      .catch(function(){ msg.textContent = "Something went wrong. Try again."; });
+    function $(id){ return document.getElementById(id); }
+    function show(el,on){ if(el) el.hidden = !on; }
+    // Tabs
+    function tab(which){
+      var inU = which === "up";
+      $("tSignin").className = "tab2" + (inU ? "" : " on");
+      $("tSignup").className = "tab2" + (inU ? " on" : "");
+      show($("signin"), !inU); show($("signup"), inU);
     }
-    go.onclick = submit;
-    pw.addEventListener("keydown", function(e){ if(e.key === "Enter") submit(); });
-    pw.focus();
+    $("tSignin").onclick = function(){ tab("in"); };
+    $("tSignup").onclick = function(){ tab("up"); };
+
+    // Sign in
+    function signin(){
+      var m = $("si_msg"); m.textContent = "";
+      fetch("/api/login", { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ email: $("si_email").value, password: $("si_pw").value }) })
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+      .then(function(x){ if(x.ok){ location.href = "/"; } else { m.textContent = (x.d && x.d.error) || "Wrong email or password."; } })
+      .catch(function(){ m.textContent = "Something went wrong. Try again."; });
+    }
+    $("si_go").onclick = signin;
+    $("si_pw").addEventListener("keydown", function(e){ if(e.key === "Enter") signin(); });
+
+    // Selfie camera
+    var stream = null, photo = "";
+    function stopCam(){ if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; } }
+    $("camBtn").onclick = function(){
+      var m = $("su_msg"); m.textContent = "";
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ m.textContent = "Camera is not available on this device."; return; }
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false }).then(function(s){
+        stream = s; var v = $("cam"); v.srcObject = s; show(v, true); show($("pic"), false); $("shotHint").style.display = "none";
+        show($("camBtn"), false); show($("capBtn"), true); show($("retBtn"), false);
+      }).catch(function(){ m.textContent = "Could not open the camera. Please allow camera access."; });
+    };
+    $("capBtn").onclick = function(){
+      var v = $("cam"), cv = $("cv");
+      var w = v.videoWidth || 360, h = v.videoHeight || 360; var scale = 360 / Math.max(w, h);
+      cv.width = Math.round(w * scale); cv.height = Math.round(h * scale);
+      cv.getContext("2d").drawImage(v, 0, 0, cv.width, cv.height);
+      photo = cv.toDataURL("image/jpeg", 0.6);
+      stopCam(); show(v, false); var p = $("pic"); p.src = photo; show(p, true);
+      show($("capBtn"), false); show($("retBtn"), true);
+    };
+    $("retBtn").onclick = function(){ photo = ""; $("camBtn").click(); };
+
+    // Request access
+    function signup(){
+      var m = $("su_msg"); m.textContent = "";
+      var email = $("su_email").value.trim(), phone = $("su_phone").value.trim(), pw = $("su_pw").value;
+      if(email.indexOf("@") < 1){ m.textContent = "Enter a valid email address."; return; }
+      if(phone.replace(/[^0-9]/g, "").length < 6){ m.textContent = "Enter a valid phone number."; return; }
+      if(pw.length < 4){ m.textContent = "Password must be at least 4 characters."; return; }
+      if(!photo){ m.textContent = "Please take your selfie photo first."; return; }
+      $("su_go").disabled = true;
+      fetch("/api/signup", { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ email: email, phone: phone, password: pw, photo: photo }) })
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+      .then(function(x){ $("su_go").disabled = false;
+        if(x.ok){ $("signup").innerHTML = "<p style=\\"color:#34d399;font-size:1.05rem;line-height:1.6\\">Thank you! Your request was sent.<br>The owner will approve your account soon.</p>"; }
+        else { m.textContent = (x.d && x.d.error) || "Could not send the request."; } })
+      .catch(function(){ $("su_go").disabled = false; m.textContent = "Something went wrong. Try again."; });
+    }
+    $("su_go").onclick = signup;
+    $("si_email").focus();
   </script>
 </body>
 </html>`;
@@ -1247,6 +1460,7 @@ const PAGE = `<!DOCTYPE html>
     <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
     <button class="iconbtn" title="Search" onclick="go('search')"><span class="ms">search</span></button>
     <button class="iconbtn" title="My Music" onclick="browseLibrary()"><span class="ms">favorite</span></button>
+    <button class="iconbtn" id="meAvatar" title="You" onclick="openSettings()" hidden style="padding:0"><img id="meImg" alt="" style="width:30px;height:30px;border-radius:999px;object-fit:cover" /></button>
     <button class="iconbtn" title="Settings" onclick="openSettings()"><span class="ms">settings</span></button>
   </div>
 
@@ -1327,6 +1541,9 @@ const PAGE = `<!DOCTYPE html>
       else if(ann){ ann.hidden=true; }
     }
     function loadConfig(){ return fetch("/api/config").then(function(r){return r.json();}).then(function(c){ applyConfig(c); }).catch(function(){}); }
+    function loadMe(){ fetch("/api/me").then(function(r){return r.json();}).then(function(d){
+      if(d&&d.user&&d.user.photo&&/^data:image/.test(d.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=d.user.photo; if(a) a.hidden=false; }
+    }).catch(function(){}); }
 
     function $(id){ return document.getElementById(id); }
     function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
@@ -1821,9 +2038,16 @@ const PAGE = `<!DOCTYPE html>
     function unlockAccess(){ var i=$("admpw"); var pw=i?i.value:""; if(!pw){ return; } _admPw=pw; loadAccess(); }
     function loadAccess(){ ovlSet("Admin", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
       Promise.all([ post("/api/admin/list",{admin:_admPw}),
-        fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}) ])
-        .then(function(res){ renderAdmin(res[0], res[1]||{}); })
+        fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}),
+        post("/api/admin/users",{admin:_admPw}).catch(function(){return {users:null};}) ])
+        .then(function(res){ renderAdmin(res[0], res[1]||{}, res[2]||{}); })
         .catch(function(e){ _admPw=""; ovlSet("Admin", accessUnlockHtml(e.message||"Wrong password.")); var i=$("admpw"); if(i) i.focus(); }); }
+    function userAvatar(u){ return (u.photo && /^data:image/.test(u.photo))
+      ? '<img src="'+esc(u.photo)+'" alt="" style="width:46px;height:46px;border-radius:999px;object-fit:cover;flex:none" />'
+      : '<div style="width:46px;height:46px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((u.email||"?").slice(0,1).toUpperCase())+'</div>'; }
+    function userAction(id, action){ post("/api/admin/user",{admin:_admPw,action:action,id:id}).then(function(){ toast(action==="approve"?"Approved ✓":"Done."); loadAccess(); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function userCreate(){ var e=$("nu_e"),p=$("nu_p"),w=$("nu_w"),m=$("nu_msg"); if(m) m.textContent="";
+      post("/api/admin/user",{admin:_admPw,action:"create",email:(e||{}).value||"",phone:(p||{}).value||"",password:(w||{}).value||""}).then(function(){ toast("Account created."); loadAccess(); }).catch(function(err){ if(m) m.textContent=err.message||"Could not create."; }); }
     var _cfgEdit={features:{}};
     function toggleRow(k,label){ var on=_cfgEdit.features[k]!==false;
       return '<div class="row"><div class="rlabel"><div class="rt">'+esc(label)+'</div></div><div class="seg" id="cf_'+k+'">'+
@@ -1843,7 +2067,7 @@ const PAGE = `<!DOCTYPE html>
       _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:"";
       post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; applyConfig(d.config||_cfgEdit); toast("Saved."); })
         .catch(function(e){ if(m) m.textContent=e.message||"Could not save."; }); }
-    function renderAdmin(d, cfg){
+    function renderAdmin(d, cfg, usersData){
       var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
       if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
       _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",features:{}};
@@ -1868,15 +2092,43 @@ const PAGE = `<!DOCTYPE html>
         ? '<div class="card">'+codes.map(function(c){ return '<div class="code-item"><div style="min-width:0"><div class="ci-name">'+esc(c.name||"Someone")+'</div><div class="ci-code">'+esc(c.code)+'</div></div>'+
             '<button class="trash" title="Remove" data-code="'+esc(c.code)+'" onclick="removeCode(this)">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
         : '<p class="muted" style="margin:2px 0 0">No accounts yet. Add one below.</p>';
-      var accCard='<div class="set-sec"><h3>Accounts — who can sign in</h3>'+
-        '<p class="muted" style="margin:0 0 10px;font-size:.85rem">Give each person their own code to sign in with. Remove a code to take away access. Your main password always works.</p>'+
+      var accCard='<div class="set-sec"><h3>Quick access codes (optional)</h3>'+
+        '<p class="muted" style="margin:0 0 10px;font-size:.85rem">A simple code to sign in with (no account needed). Your main password always works.</p>'+
         list+
         '<div class="card" style="padding:15px;margin-top:10px">'+
           '<input id="cn" class="field" placeholder="Name (for example: Yossi)" autocomplete="off" />'+
           '<input id="cc" class="field" style="margin-top:10px" placeholder="Access code / password" autocomplete="off" />'+
-          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add account</button>'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add code</button>'+
           '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
-      ovlSet("Admin", back+appCard+featCard+accCard);
+
+      // User accounts (email/phone/password + selfie), needs D1.
+      var usersCards="";
+      var users=(usersData&&usersData.users);
+      if(users===null||users===undefined){
+        usersCards='<div class="set-sec"><h3>Accounts</h3><div class="card" style="padding:14px"><p class="muted" style="margin:0">Sign-up accounts need a <b>D1 database</b> (binding <code>DB</code>). Add it to use email/password accounts with approval.</p></div></div>';
+      } else {
+        var pending=users.filter(function(u){return u.status==="pending";});
+        var approved=users.filter(function(u){return u.status==="approved";});
+        if(pending.length){
+          usersCards+='<div class="set-sec"><h3>Account requests ('+pending.length+')</h3><div class="card">'+pending.map(function(u){
+            return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.email)+'</div><div class="ci-code">'+esc(u.phone||"")+'</div></div>'+
+              '<button class="btn sm" style="margin:0" onclick="userAction('+u.id+',\\'approve\\')">Approve</button>'+
+              '<button class="trash" title="Reject" onclick="userAction('+u.id+',\\'reject\\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
+        }
+        var alist = approved.length
+          ? '<div class="card">'+approved.map(function(u){ return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.email)+'</div><div class="ci-code">'+esc(u.phone||"")+'</div></div>'+
+              '<button class="trash" title="Remove" onclick="userAction('+u.id+',\\'remove\\')">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
+          : '<p class="muted" style="margin:2px 0 0">No accounts yet.</p>';
+        usersCards+='<div class="set-sec"><h3>Accounts ('+approved.length+')</h3>'+alist+
+          '<div class="card" style="padding:15px;margin-top:10px">'+
+            '<div style="font-weight:600;margin-bottom:8px">Create an account</div>'+
+            '<input id="nu_e" class="field" type="email" placeholder="Email address" autocomplete="off" />'+
+            '<input id="nu_p" class="field" style="margin-top:10px" type="tel" placeholder="Phone number" autocomplete="off" />'+
+            '<input id="nu_w" class="field" style="margin-top:10px" type="password" placeholder="Password" autocomplete="new-password" />'+
+            '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
+            '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
+      }
+      ovlSet("Admin", back+appCard+featCard+usersCards+accCard);
     }
     function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
       if(!c.trim()){ if(m) m.textContent="Enter a code."; return; }
@@ -2002,8 +2254,9 @@ const PAGE = `<!DOCTYPE html>
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
+    window.userAction=userAction; window.userCreate=userCreate;
 
-    hydrateIcons(); checkStatus(); loadConfig().then(function(){ home(); });
+    hydrateIcons(); checkStatus(); loadMe(); loadConfig().then(function(){ home(); });
   </script>
 </body>
 </html>`;

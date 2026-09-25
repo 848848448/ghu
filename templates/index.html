@@ -208,6 +208,7 @@
     <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
     <button class="iconbtn" title="Search" onclick="go('search')"><span class="ms">search</span></button>
     <button class="iconbtn" title="My Music" onclick="browseLibrary()"><span class="ms">favorite</span></button>
+    <button class="iconbtn" id="meAvatar" title="You" onclick="openSettings()" hidden style="padding:0"><img id="meImg" alt="" style="width:30px;height:30px;border-radius:999px;object-fit:cover" /></button>
     <button class="iconbtn" title="Settings" onclick="openSettings()"><span class="ms">settings</span></button>
   </div>
 
@@ -288,6 +289,9 @@
       else if(ann){ ann.hidden=true; }
     }
     function loadConfig(){ return fetch("/api/config").then(function(r){return r.json();}).then(function(c){ applyConfig(c); }).catch(function(){}); }
+    function loadMe(){ fetch("/api/me").then(function(r){return r.json();}).then(function(d){
+      if(d&&d.user&&d.user.photo&&/^data:image/.test(d.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=d.user.photo; if(a) a.hidden=false; }
+    }).catch(function(){}); }
 
     function $(id){ return document.getElementById(id); }
     function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
@@ -782,9 +786,16 @@
     function unlockAccess(){ var i=$("admpw"); var pw=i?i.value:""; if(!pw){ return; } _admPw=pw; loadAccess(); }
     function loadAccess(){ ovlSet("Admin", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
       Promise.all([ post("/api/admin/list",{admin:_admPw}),
-        fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}) ])
-        .then(function(res){ renderAdmin(res[0], res[1]||{}); })
+        fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}),
+        post("/api/admin/users",{admin:_admPw}).catch(function(){return {users:null};}) ])
+        .then(function(res){ renderAdmin(res[0], res[1]||{}, res[2]||{}); })
         .catch(function(e){ _admPw=""; ovlSet("Admin", accessUnlockHtml(e.message||"Wrong password.")); var i=$("admpw"); if(i) i.focus(); }); }
+    function userAvatar(u){ return (u.photo && /^data:image/.test(u.photo))
+      ? '<img src="'+esc(u.photo)+'" alt="" style="width:46px;height:46px;border-radius:999px;object-fit:cover;flex:none" />'
+      : '<div style="width:46px;height:46px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((u.email||"?").slice(0,1).toUpperCase())+'</div>'; }
+    function userAction(id, action){ post("/api/admin/user",{admin:_admPw,action:action,id:id}).then(function(){ toast(action==="approve"?"Approved ✓":"Done."); loadAccess(); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function userCreate(){ var e=$("nu_e"),p=$("nu_p"),w=$("nu_w"),m=$("nu_msg"); if(m) m.textContent="";
+      post("/api/admin/user",{admin:_admPw,action:"create",email:(e||{}).value||"",phone:(p||{}).value||"",password:(w||{}).value||""}).then(function(){ toast("Account created."); loadAccess(); }).catch(function(err){ if(m) m.textContent=err.message||"Could not create."; }); }
     var _cfgEdit={features:{}};
     function toggleRow(k,label){ var on=_cfgEdit.features[k]!==false;
       return '<div class="row"><div class="rlabel"><div class="rt">'+esc(label)+'</div></div><div class="seg" id="cf_'+k+'">'+
@@ -804,7 +815,7 @@
       _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:"";
       post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; applyConfig(d.config||_cfgEdit); toast("Saved."); })
         .catch(function(e){ if(m) m.textContent=e.message||"Could not save."; }); }
-    function renderAdmin(d, cfg){
+    function renderAdmin(d, cfg, usersData){
       var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
       if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
       _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",features:{}};
@@ -829,15 +840,43 @@
         ? '<div class="card">'+codes.map(function(c){ return '<div class="code-item"><div style="min-width:0"><div class="ci-name">'+esc(c.name||"Someone")+'</div><div class="ci-code">'+esc(c.code)+'</div></div>'+
             '<button class="trash" title="Remove" data-code="'+esc(c.code)+'" onclick="removeCode(this)">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
         : '<p class="muted" style="margin:2px 0 0">No accounts yet. Add one below.</p>';
-      var accCard='<div class="set-sec"><h3>Accounts — who can sign in</h3>'+
-        '<p class="muted" style="margin:0 0 10px;font-size:.85rem">Give each person their own code to sign in with. Remove a code to take away access. Your main password always works.</p>'+
+      var accCard='<div class="set-sec"><h3>Quick access codes (optional)</h3>'+
+        '<p class="muted" style="margin:0 0 10px;font-size:.85rem">A simple code to sign in with (no account needed). Your main password always works.</p>'+
         list+
         '<div class="card" style="padding:15px;margin-top:10px">'+
           '<input id="cn" class="field" placeholder="Name (for example: Yossi)" autocomplete="off" />'+
           '<input id="cc" class="field" style="margin-top:10px" placeholder="Access code / password" autocomplete="off" />'+
-          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add account</button>'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add code</button>'+
           '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
-      ovlSet("Admin", back+appCard+featCard+accCard);
+
+      // User accounts (email/phone/password + selfie), needs D1.
+      var usersCards="";
+      var users=(usersData&&usersData.users);
+      if(users===null||users===undefined){
+        usersCards='<div class="set-sec"><h3>Accounts</h3><div class="card" style="padding:14px"><p class="muted" style="margin:0">Sign-up accounts need a <b>D1 database</b> (binding <code>DB</code>). Add it to use email/password accounts with approval.</p></div></div>';
+      } else {
+        var pending=users.filter(function(u){return u.status==="pending";});
+        var approved=users.filter(function(u){return u.status==="approved";});
+        if(pending.length){
+          usersCards+='<div class="set-sec"><h3>Account requests ('+pending.length+')</h3><div class="card">'+pending.map(function(u){
+            return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.email)+'</div><div class="ci-code">'+esc(u.phone||"")+'</div></div>'+
+              '<button class="btn sm" style="margin:0" onclick="userAction('+u.id+',\'approve\')">Approve</button>'+
+              '<button class="trash" title="Reject" onclick="userAction('+u.id+',\'reject\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
+        }
+        var alist = approved.length
+          ? '<div class="card">'+approved.map(function(u){ return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.email)+'</div><div class="ci-code">'+esc(u.phone||"")+'</div></div>'+
+              '<button class="trash" title="Remove" onclick="userAction('+u.id+',\'remove\')">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
+          : '<p class="muted" style="margin:2px 0 0">No accounts yet.</p>';
+        usersCards+='<div class="set-sec"><h3>Accounts ('+approved.length+')</h3>'+alist+
+          '<div class="card" style="padding:15px;margin-top:10px">'+
+            '<div style="font-weight:600;margin-bottom:8px">Create an account</div>'+
+            '<input id="nu_e" class="field" type="email" placeholder="Email address" autocomplete="off" />'+
+            '<input id="nu_p" class="field" style="margin-top:10px" type="tel" placeholder="Phone number" autocomplete="off" />'+
+            '<input id="nu_w" class="field" style="margin-top:10px" type="password" placeholder="Password" autocomplete="new-password" />'+
+            '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
+            '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
+      }
+      ovlSet("Admin", back+appCard+featCard+usersCards+accCard);
     }
     function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
       if(!c.trim()){ if(m) m.textContent="Enter a code."; return; }
@@ -963,8 +1002,9 @@
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
+    window.userAction=userAction; window.userCreate=userCreate;
 
-    hydrateIcons(); checkStatus(); loadConfig().then(function(){ home(); });
+    hydrateIcons(); checkStatus(); loadMe(); loadConfig().then(function(){ home(); });
   </script>
 </body>
 </html>
