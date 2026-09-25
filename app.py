@@ -515,6 +515,44 @@ def api_me():
     return jsonify({"user": None})
 
 
+def _presence_path():
+    return os.path.join(CACHE_DIR, "presence.json")
+
+
+@app.route("/api/presence", methods=["POST"])
+def api_presence():
+    b = request.get_json(silent=True) or {}
+    cid = str(b.get("cid", ""))[:64]
+    if not cid:
+        return jsonify({"ok": False})
+    try:
+        with open(_presence_path(), "r", encoding="utf-8") as f:
+            rows = json.load(f)
+    except Exception:  # noqa: BLE001
+        rows = {}
+    rows[cid] = {"name": "Guest", "view": str(b.get("view", ""))[:80], "seen": int(time.time() * 1000)}
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(_presence_path(), "w", encoding="utf-8") as f:
+        json.dump(rows, f)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/presence", methods=["POST"])
+def api_admin_presence():
+    body = request.get_json(silent=True) or {}
+    if not is_admin(body):
+        return jsonify({"error": "Wrong password."}), 403
+    now = int(time.time() * 1000)
+    try:
+        with open(_presence_path(), "r", encoding="utf-8") as f:
+            rows = json.load(f)
+    except Exception:  # noqa: BLE001
+        rows = {}
+    online = [r for r in rows.values() if r.get("seen", 0) >= now - 90000]
+    online.sort(key=lambda r: r.get("seen", 0), reverse=True)
+    return jsonify({"online": online, "now": now})
+
+
 @app.route("/api/admin/users", methods=["POST"])
 def api_admin_users():
     body = request.get_json(silent=True) or {}
