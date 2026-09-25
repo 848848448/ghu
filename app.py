@@ -118,7 +118,8 @@ def is_admin(body):
     return bool(SITE_PASSWORD) and str((body or {}).get("admin", "")) == SITE_PASSWORD
 
 
-CONFIG_FEATURES = ["albums", "search", "genres", "playlists", "artists", "stories", "downloads", "favorites"]
+CONFIG_FEATURES = ["banners", "albums", "popular", "search", "genres", "categories", "playlists", "artists", "stories", "downloads", "favorites"]
+CONFIG_ACCENTS = ["", "purple", "blue", "green", "red", "gold", "teal"]
 
 
 def _config_path():
@@ -126,13 +127,16 @@ def _config_path():
 
 
 def load_config():
-    out = {"appName": "", "announcement": "", "features": {}}
+    out = {"appName": "", "announcement": "", "theme": "", "lang": "", "accent": "", "features": {}}
     try:
         with open(_config_path(), "r", encoding="utf-8") as f:
             c = json.load(f)
         if isinstance(c, dict):
             out["appName"] = c.get("appName") if isinstance(c.get("appName"), str) else ""
             out["announcement"] = c.get("announcement") if isinstance(c.get("announcement"), str) else ""
+            out["theme"] = c.get("theme") if c.get("theme") in ("dark", "light") else ""
+            out["lang"] = c.get("lang") if c.get("lang") in ("en", "he") else ""
+            out["accent"] = c.get("accent") if c.get("accent") in CONFIG_ACCENTS[1:] else ""
             if isinstance(c.get("features"), dict):
                 out["features"] = c["features"]
     except Exception:  # noqa: BLE001
@@ -475,6 +479,9 @@ def api_admin_config():
     clean = {
         "appName": str(in_c.get("appName", "")).strip()[:60],
         "announcement": str(in_c.get("announcement", "")).strip()[:500],
+        "theme": in_c.get("theme") if in_c.get("theme") in ("dark", "light") else "",
+        "lang": in_c.get("lang") if in_c.get("lang") in ("en", "he") else "",
+        "accent": in_c.get("accent") if in_c.get("accent") in CONFIG_ACCENTS[1:] else "",
         "features": {k: (in_f.get(k) is not False) for k in CONFIG_FEATURES},
     }
     save_config(clean)
