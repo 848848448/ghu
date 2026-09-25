@@ -738,10 +738,12 @@ async function handleNew(env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
   const fields =
     "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
-  // Ask the API for the newest albums directly. Album has a releasedAt date;
-  // fall back to id order, then to an unordered page sorted here, so this
+  // Ask the API for the newest albums directly. Prefer createdAt (most
+  // recently ADDED to the catalog — what "new music coming in" means), then
+  // the release date, then id, then an unordered page sorted here — so this
   // keeps working even if the API rejects an orderBy field.
   const attempts = [
+    "query { albums(take: 20, orderBy: [{ createdAt: desc }]) { " + fields + " } }",
     "query { albums(take: 20, orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
     "query { albums(take: 20, orderBy: [{ id: desc }]) { " + fields + " } }",
     "query { albums(take: 50) { " + fields + " } }",
@@ -771,6 +773,7 @@ async function handleAlbumsPage(request, env) {
   const fields =
     "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
   const attempts = [
+    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ createdAt: desc }]) { " + fields + " } }",
     "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
     "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ id: desc }]) { " + fields + " } }",
     "query { albums(take: " + take + ", skip: " + skip + ") { " + fields + " } }",
@@ -1235,6 +1238,7 @@ const PAGE = `<!DOCTYPE html>
     <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span><span style="font-size:.6rem;font-weight:800;letter-spacing:.5px;color:#fff;background:var(--grad);padding:2px 7px;border-radius:7px;align-self:center">v2</span></div>
     <div class="spacer"></div>
     <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
+    <button class="iconbtn" title="Search" onclick="go('search')"><span class="ms">search</span></button>
     <button class="iconbtn" title="My Music" onclick="browseLibrary()"><span class="ms">favorite</span></button>
     <button class="iconbtn" title="Settings" onclick="openSettings()"><span class="ms">settings</span></button>
   </div>
@@ -1300,6 +1304,7 @@ const PAGE = `<!DOCTYPE html>
       var tabMap={tabAlbums:"albums",tabSearch:"search",tabGenres:"genres",tabPlaylists:"playlists",tabArtists:"artists"};
       Object.keys(tabMap).forEach(function(id){ var el=$(id); if(el) el.style.display=feat(tabMap[id])?"":"none"; });
       var favBtn=document.querySelector('.iconbtn[title="My Music"]'); if(favBtn) favBtn.style.display=feat("favorites")?"":"none";
+      var srchBtn=document.querySelector('.iconbtn[title="Search"]'); if(srchBtn) srchBtn.style.display=feat("search")?"":"none";
       var npdl=$("npDl"); if(npdl) npdl.style.display=feat("downloads")?"":"none";
       var ann=$("annBanner");
       if(CFG.announcement){ if(!ann){ ann=document.createElement("div"); ann.id="annBanner"; ann.className="banner"; ann.style.marginTop="10px"; var st=$("status"); if(st&&st.parentNode) st.parentNode.insertBefore(ann, st); } ann.textContent=CFG.announcement; ann.hidden=false; }

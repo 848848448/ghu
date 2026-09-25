@@ -418,6 +418,7 @@ def fetch_new_releases():
     # Ask the API for the newest albums directly (Album has a releasedAt date);
     # fall back to id order, then to an unordered page sorted here.
     attempts = [
+        "query { albums(take: 20, orderBy: [{ createdAt: desc }]) { " + fields + " } }",
         "query { albums(take: 20, orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
         "query { albums(take: 20, orderBy: [{ id: desc }]) { " + fields + " } }",
         "query { albums(take: 50) { " + fields + " } }",
@@ -573,6 +574,7 @@ def api_albums():
         "artists { enName heName image } tracks { id }"
     )
     attempts = [
+        f"query {{ albums(take: {take}, skip: {skip}, orderBy: [{{ createdAt: desc }}]) {{ {fields} }} }}",
         f"query {{ albums(take: {take}, skip: {skip}, orderBy: [{{ releasedAt: desc }}]) {{ {fields} }} }}",
         f"query {{ albums(take: {take}, skip: {skip}, orderBy: [{{ id: desc }}]) {{ {fields} }} }}",
         f"query {{ albums(take: {take}, skip: {skip}) {{ {fields} }} }}",

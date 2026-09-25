@@ -206,6 +206,7 @@
     <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span><span style="font-size:.6rem;font-weight:800;letter-spacing:.5px;color:#fff;background:var(--grad);padding:2px 7px;border-radius:7px;align-self:center">v2</span></div>
     <div class="spacer"></div>
     <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
+    <button class="iconbtn" title="Search" onclick="go('search')"><span class="ms">search</span></button>
     <button class="iconbtn" title="My Music" onclick="browseLibrary()"><span class="ms">favorite</span></button>
     <button class="iconbtn" title="Settings" onclick="openSettings()"><span class="ms">settings</span></button>
   </div>
@@ -271,6 +272,7 @@
       var tabMap={tabAlbums:"albums",tabSearch:"search",tabGenres:"genres",tabPlaylists:"playlists",tabArtists:"artists"};
       Object.keys(tabMap).forEach(function(id){ var el=$(id); if(el) el.style.display=feat(tabMap[id])?"":"none"; });
       var favBtn=document.querySelector('.iconbtn[title="My Music"]'); if(favBtn) favBtn.style.display=feat("favorites")?"":"none";
+      var srchBtn=document.querySelector('.iconbtn[title="Search"]'); if(srchBtn) srchBtn.style.display=feat("search")?"":"none";
       var npdl=$("npDl"); if(npdl) npdl.style.display=feat("downloads")?"":"none";
       var ann=$("annBanner");
       if(CFG.announcement){ if(!ann){ ann=document.createElement("div"); ann.id="annBanner"; ann.className="banner"; ann.style.marginTop="10px"; var st=$("status"); if(st&&st.parentNode) st.parentNode.insertBefore(ann, st); } ann.textContent=CFG.announcement; ann.hidden=false; }
