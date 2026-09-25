@@ -292,6 +292,8 @@
     var ME={admin:false,user:null};
     function dlAllowed(){ return feat("downloads") && !(ME.user && ME.user.nodl); }
     function loadMe(){ return fetch("/api/me").then(function(r){return r.json();}).then(function(d){
+      if(d&&d.otherDevice){ showTakeover(); return; }
+      hideTakeover();
       ME.admin=!!(d&&d.admin); ME.user=(d&&d.user)||null;
       if(ME.user&&ME.user.photo&&/^data:image/.test(ME.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=ME.user.photo; if(a) a.hidden=false; }
       updateCfgBanner(); if(ME.admin) loadPending();
@@ -777,9 +779,9 @@
         (ME.user ? ('<div class="set-sec"><h3>Your account</h3><div class="card">'+
           row(esc(ME.user.name||ME.user.email), esc(ME.user.email), ic("chevron_right"), "openProfile()")+
         '</div></div>') : '')+
-        '<div class="set-sec"><h3>Admin</h3><div class="card">'+
+        (ME.admin ? ('<div class="set-sec"><h3>Admin</h3><div class="card">'+
           row("Admin panel","Accounts, appearance, features, who's online", ic("chevron_right"), "openAccess()")+
-        '</div></div>'+
+        '</div></div>') : '')+
         (ME.admin ? ('<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
           '<button class="chip" onclick="showZingConfig()">Zing settings</button>'+
@@ -796,6 +798,12 @@
       overlay("Profile", '<div style="text-align:center;margin-bottom:8px">'+
         (u.photo&&/^data:image/.test(u.photo)?'<img src="'+esc(u.photo)+'" alt="" style="width:120px;height:120px;border-radius:999px;object-fit:cover" />':'<div style="width:120px;height:120px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;color:#fff;font-weight:800;font-size:2rem">'+esc((u.name||u.email||"?").slice(0,1).toUpperCase())+'</div>')+
         '<div style="font-weight:800;font-size:1.2rem;margin-top:12px">'+esc(u.name||"")+'</div><div class="muted">'+esc(u.email||"")+'</div>'+(u.phone?'<div class="muted">'+esc(u.phone)+'</div>':'')+'</div>'+
+        '<div class="set-sec"><h3>Profile picture</h3><div class="card" style="padding:15px">'+
+          '<div id="pf_cam" style="display:none"><video id="pf_video" autoplay playsinline muted style="width:100%;max-width:280px;border-radius:14px;background:#000;display:block;margin:0 auto"></video>'+
+            '<div style="display:flex;gap:10px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="pfSnap()">Take photo</button><button class="chip" onclick="pfStop()">Cancel</button></div></div>'+
+          '<div id="pf_start"><button class="btn" style="width:100%;justify-content:center" onclick="pfCam()">Change photo</button></div>'+
+          '<canvas id="pf_canvas" style="display:none"></canvas>'+
+          '<div id="pf_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'+
         '<div class="set-sec"><h3>Change password</h3><div class="card" style="padding:15px">'+
           '<input id="pw_old" class="field" type="password" placeholder="Current password" autocomplete="current-password" />'+
           '<input id="pw_new" class="field" style="margin-top:10px" type="password" placeholder="New password" autocomplete="new-password" />'+
@@ -805,6 +813,29 @@
     }
     function changePw(){ var o=$("pw_old"),n=$("pw_new"),m=$("pw_msg"); if(m) m.textContent="";
       post("/api/me/password",{old:(o||{}).value||"",new:(n||{}).value||""}).then(function(){ toast("Password changed ✓"); if(o)o.value=""; if(n)n.value=""; }).catch(function(e){ if(m) m.textContent=e.message||"Could not change."; }); }
+    var _pfStream=null;
+    function pfCam(){ var m=$("pf_msg"); if(m) m.textContent=""; if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ if(m) m.textContent="Camera not available."; return; }
+      navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}}).then(function(s){ _pfStream=s; var v=$("pf_video"); if(v){ v.srcObject=s; } var c=$("pf_cam"),st=$("pf_start"); if(c)c.style.display="block"; if(st)st.style.display="none"; }).catch(function(){ if(m) m.textContent="Could not open the camera."; }); }
+    function pfStop(){ if(_pfStream){ try{ _pfStream.getTracks().forEach(function(t){t.stop();}); }catch(e){} _pfStream=null; } var c=$("pf_cam"),st=$("pf_start"); if(c)c.style.display="none"; if(st)st.style.display=""; }
+    function pfSnap(){ var v=$("pf_video"),cv=$("pf_canvas"),m=$("pf_msg"); if(!v||!cv){ return; } var w=v.videoWidth||360,h=v.videoHeight||360; var mx=360,sc=Math.min(1,mx/Math.max(w,h)); cv.width=Math.round(w*sc); cv.height=Math.round(h*sc);
+      var ctx=cv.getContext("2d"); ctx.drawImage(v,0,0,cv.width,cv.height); var data=cv.toDataURL("image/jpeg",0.6); pfStop();
+      if(m) m.textContent="Saving…"; post("/api/me/photo",{photo:data}).then(function(){ ME.user.photo=data; var im=$("meImg"),a=$("meAvatar"); if(im)im.src=data; if(a)a.hidden=false; toast("Photo updated ✓"); openProfile(); }).catch(function(e){ if(m){ m.className="err"; m.textContent=e.message||"Could not save."; } }); }
+
+    // ---------- Single device: one account = one device ----------
+    var _tkPoll=null;
+    function showTakeover(){ var el=$("takeover"); if(el){ el.hidden=false; return; }
+      el=document.createElement("div"); el.id="takeover"; el.style.cssText="position:fixed;inset:0;z-index:9999;background:var(--bg);display:grid;place-items:center;padding:24px;text-align:center";
+      el.innerHTML='<div style="max-width:380px"><div style="width:64px;height:64px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;margin-bottom:16px">'+ic("lock")+'</div>'+
+        '<h2 style="margin:0 0 8px">You are signed in on another device</h2>'+
+        '<p class="muted" style="margin:0 0 18px">Your account can only be signed in on one device at a time. To use it here, sign out the other device.</p>'+
+        '<button class="btn" id="tkBtn" style="width:100%;justify-content:center" onclick="claimDevice()">Use this device</button>'+
+        '<div id="tkMsg" class="err" style="margin-top:10px;min-height:16px"></div>'+
+        '<div class="row" style="cursor:pointer;justify-content:center;margin-top:14px" onclick="signOut()"><div class="rt" style="color:var(--err)">Sign out</div></div></div>';
+      document.body.appendChild(el);
+    }
+    function hideTakeover(){ var el=$("takeover"); if(el){ el.hidden=true; } }
+    function claimDevice(){ var m=$("tkMsg"); if(m) m.textContent="";
+      post("/api/claim-device",{}).then(function(){ hideTakeover(); loadMe().then(function(){ go(curTab||"home"); }); }).catch(function(e){ if(m) m.textContent=(e&&e.message)||"Could not switch."; }); }
 
     // ---------- Access management (who can access) ----------
     function backToSettings(){ stopPresPoll(); ovlSet("Settings", settingsHtml()); }
@@ -815,11 +846,11 @@
       '<input id="admpw" class="field" type="password" placeholder="Main password" autocomplete="off" />'+
       '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="unlockAccess()">Unlock</button>'+
       '<div id="accmsg" class="err" style="margin-top:10px;min-height:18px">'+esc(msg||"")+'</div></div>'; }
-    function openAccess(){ if(_admPw){ loadAccess(); } else { ovlSet("Admin", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
+    function openAccess(){ if(_admPw||ME.admin){ loadAccess(); } else { ovlSet("Admin", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
     function unlockAccess(){ var i=$("admpw"); var pw=i?i.value:""; if(!pw){ return; } _admPw=pw; loadAccess(); }
     function loadAccess(){ ovlSet("Admin", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
       Promise.all([ post("/api/admin/list",{admin:_admPw}),
-        fetch("/api/config").then(function(r){return r.json();}).catch(function(){return {};}),
+        post("/api/admin/config",{admin:_admPw}).then(function(d){return d.config||{};}).catch(function(){return {};}),
         post("/api/admin/users",{admin:_admPw}).catch(function(){return {users:null};}),
         post("/api/admin/presence",{admin:_admPw}).catch(function(){return {online:[]};}) ])
         .then(function(res){ renderAdmin(res[0], res[1]||{}, res[2]||{}, res[3]||{}); })
@@ -859,15 +890,16 @@
           return '<button data-v="'+esc(k)+'" onclick="cfgAccent(\''+k+'\')" title="'+esc(k||"Default")+'" style="width:34px;height:34px;border-radius:999px;border:2px solid '+(sel?"#fff":"transparent")+';background:'+bg+';cursor:pointer;flex:none"></button>'; }).join("")+'</div>'; }
     var FEAT_LABELS={banners:"Featured banners",albums:"Albums",popular:"Popular",search:"Search",genres:"Genres",categories:"Categories",playlists:"Playlists",artists:"Artists",stories:"Stories",downloads:"Downloads",favorites:"Favorites (♥)"};
     function saveAdminConfig(){ var an=$("cfgApp"), am=$("cfgAnn"), m=$("cfgMsg"); if(m) m.textContent="";
-      _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:"";
+      _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:""; _cfgEdit.ownerEmail=($("cfgOwner")||{}).value||"";
       post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; applyConfig(d.config||_cfgEdit); toast("Saved."); })
         .catch(function(e){ if(m) m.textContent=e.message||"Could not save."; }); }
     function renderAdmin(d, cfg, usersData, presData){
       var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
       if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
       var presCard='<div class="set-sec"><h3>Who\'s online (<span id="presCount">'+(((presData&&presData.online)||[]).length)+'</span>)</h3><div class="card"><div id="presList">'+presenceListHtml(presData)+'</div></div></div>';
-      _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",features:{}};
+      _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",ownerEmail:cfg.ownerEmail||"",features:{}};
       CFG_FEATURES.forEach(function(k){ _cfgEdit.features[k]=(cfg.features&&cfg.features[k])!==false; });
+      var oemail=((usersData&&usersData.ownerEmail)||"").toLowerCase();
       var appCard='<div class="set-sec"><h3>Appearance</h3><div class="card" style="padding:15px">'+
         '<label class="muted" style="font-size:.8rem">App name</label>'+
         '<input id="cfgApp" class="field" style="margin:5px 0 14px" placeholder="Zing" value="'+esc(_cfgEdit.appName)+'" />'+
@@ -878,7 +910,9 @@
         '<div class="card" style="margin-top:10px">'+
           '<div class="row"><div class="rlabel"><div class="rt">Default theme</div><div class="rd">For people who haven\'t chosen</div></div><div class="seg" id="cfp_theme">'+optBtn("theme","","Off")+optBtn("theme","dark","Dark")+optBtn("theme","light","Light")+'</div></div>'+
           '<div class="row"><div class="rlabel"><div class="rt">Default language</div><div class="rd">Names in English or Hebrew</div></div><div class="seg" id="cfp_lang">'+optBtn("lang","","Off")+optBtn("lang","en","EN")+optBtn("lang","he","עברית")+'</div></div>'+
-        '</div></div>';
+        '</div>'+
+        '<div class="card" style="margin-top:10px;padding:15px"><label class="muted" style="font-size:.8rem">Owner email — this account (and anyone you make an admin) sees the admin settings</label>'+
+        '<input id="cfgOwner" class="field" style="margin:5px 0 0" type="email" placeholder="you@example.com" value="'+esc(_cfgEdit.ownerEmail)+'" autocomplete="off" /></div></div>';
       var featCard='<div class="set-sec"><h3>Features &amp; sections — show / hide for everyone</h3><div class="card">'+
         CFG_FEATURES.map(function(k){ return toggleRow(k, FEAT_LABELS[k]||k); }).join("")+
         '</div></div>'+
@@ -912,11 +946,12 @@
               '<button class="trash" title="Reject" onclick="userAction('+u.id+',\'reject\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
         }
         var alist = others.length
-          ? others.map(function(u){ var susp=(u.status==="suspended");
+          ? others.map(function(u){ var susp=(u.status==="suspended"); var isOwner=(oemail&&(u.email||"").toLowerCase()===oemail); var isA=(u.role==="admin"||isOwner);
               return '<div class="card" style="padding:12px;margin-bottom:8px">'+
-                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div></div>'+
+                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div></div>'+
                 '<div class="chips" style="padding:0;margin-top:10px">'+
                   (susp?'<button class="chip" onclick="userAction('+u.id+',\'unsuspend\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\'suspend\')">Suspend</button>')+
+                  (isOwner?'':'<button class="chip" onclick="userAction('+u.id+',\'setrole\',{value:'+(u.role==="admin"?0:1)+'})">'+(u.role==="admin"?"Remove admin":"Make admin")+'</button>')+
                   '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
                   '<button class="chip" onclick="userAction('+u.id+',\'nodl\',{value:'+(u.nodl?0:1)+'})">'+(u.nodl?'Enable downloads':'Disable downloads')+'</button>'+
                   '<button class="chip" onclick="userAction('+u.id+',\'remove\')">Remove</button>'+
@@ -1060,8 +1095,9 @@
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
     window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw;
+    window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
-    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); loadConfig().then(function(){ home(); });
+    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); loadConfig().then(function(){ home(); });
   </script>
 </body>
 </html>
