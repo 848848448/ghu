@@ -470,8 +470,7 @@
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
         }
         if(albums.length && feat("albums")){
-          html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow">'+albums.map(function(al){ window._albums[al.id]=al;
-            return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
+          html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow" id="newRow">'+newRowHtml(albums)+'</div></div>';
         }
         if(popular.length && feat("popular")){
           html+='<div class="sec">'+secHead("Popular this month")+'<div class="hrow">'+popular.map(function(al){ window._albums[al.id]=al;
@@ -497,6 +496,18 @@
         setView(html);
       });
     }
+    // Build the New Releases row and remember the albums shown, so we can tell
+    // when new music has come in.
+    function newRowHtml(albums){ window._albums=window._albums||{}; _newIds=albums.map(function(a){return a.id;}).join(",");
+      return albums.map(function(al){ window._albums[al.id]=al; return albumHCard(al, artNames(al.artists)); }).join(""); }
+    // Auto-refresh: while you're on Home, quietly re-check for new music every
+    // minute and update the New Releases row in place if anything changed.
+    var _newIds="";
+    function refreshNew(){ if(curTab!=="home") return; if(document.hidden) return; var row=$("newRow"); if(!row) return;
+      post("/api/new",{}).then(function(d){ var albums=d.albums||[]; if(!albums.length) return;
+        var ids=albums.map(function(a){return a.id;}).join(",");
+        if(ids!==_newIds){ row.innerHTML=newRowHtml(albums); hydrateIcons(); }
+      }).catch(function(){}); }
     function openCategory(id){ loading("Loading…");
       gql("query { category(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
         var g=d.category; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=function(){ go("home"); };
@@ -1107,7 +1118,8 @@
     window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw;
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
-    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); loadConfig().then(function(){ home(); });
+    document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
+    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000); loadConfig().then(function(){ home(); });
   </script>
 </body>
 </html>
