@@ -50,6 +50,7 @@
       display:grid; place-items:center; cursor:pointer; }
     .iconbtn:hover{ background:var(--surface-2); color:var(--text); }
     .iconbtn .ms{ font-size:24px; }
+    [hidden]{ display:none !important; }
 
     .wrap{ max-width:1000px; margin:0 auto; padding:14px 0 calc(var(--tabs-h) + var(--player-h) + 24px + env(safe-area-inset-bottom,0px)); }
     .pad{ padding-left:18px; padding-right:18px; }
@@ -203,7 +204,7 @@
 </head>
 <body>
   <div class="top">
-    <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span><span style="font-size:.6rem;font-weight:800;letter-spacing:.5px;color:#fff;background:var(--grad);padding:2px 7px;border-radius:7px;align-self:center">v2</span></div>
+    <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span></div>
     <div class="spacer"></div>
     <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
     <button class="iconbtn" title="Search" onclick="go('search')"><span class="ms">search</span></button>
@@ -417,13 +418,24 @@
     function setTab(id){ ["tabHome","tabAlbums","tabSearch","tabGenres","tabPlaylists","tabArtists"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
     var GO_LABEL={home:"Home",albums:"Albums",search:"Searching",genres:"Genres",playlists:"Playlists",artists:"Artists"};
     function go(where){
-      curTab=where; setActivity(GO_LABEL[where]||"Home");
+      curTab=where; setActivity(GO_LABEL[where]||"Home"); saveRoute(where);
       if(where==="home"){ setTab("tabHome"); home(); }
       else if(where==="albums"){ setTab("tabAlbums"); browseAlbums(); }
       else if(where==="search"){ setTab("tabSearch"); searchView(); }
       else if(where==="genres"){ setTab("tabGenres"); browseGenres(); }
       else if(where==="playlists"){ setTab("tabPlaylists"); browsePlaylists(); }
       else if(where==="artists"){ setTab("tabArtists"); browseArtists(); }
+    }
+    // Remember where you are so a refresh brings you right back to the same
+    // place instead of jumping to Home.
+    function saveRoute(k,a){ try{ localStorage.setItem("zing_route", JSON.stringify({k:k,a:(a==null?"":a)})); }catch(e){} }
+    function restoreRoute(){ var r=null; try{ r=JSON.parse(localStorage.getItem("zing_route")||"null"); }catch(e){}
+      if(!r||!r.k){ go("home"); return; }
+      var tabs={home:1,albums:1,search:1,genres:1,playlists:1,artists:1};
+      if(tabs[r.k]){ if(r.k==="search"&&r.a){ curTab="search"; setTab("tabSearch"); saveRoute("search",r.a); searchView(); var q=$("q"); if(q){ q.value=r.a; doSearch(r.a); } } else { go(r.k); } return; }
+      var opens={album:openAlbum,artist:openArtist,playlist:openPlaylist,genre:openGenre,category:openCategory,story:openStory};
+      if(opens[r.k]){ try{ opens[r.k](r.a); }catch(e){ go("home"); } return; }
+      go("home");
     }
 
     // ---------- Cards ----------
@@ -508,7 +520,7 @@
         var ids=albums.map(function(a){return a.id;}).join(",");
         if(ids!==_newIds){ row.innerHTML=newRowHtml(albums); hydrateIcons(); }
       }).catch(function(){}); }
-    function openCategory(id){ loading("Loading…");
+    function openCategory(id){ saveRoute("category",id); loading("Loading…");
       gql("query { category(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
         var g=d.category; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=function(){ go("home"); };
         var head='<div class="back" onclick="go(\'home\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead(g?genName(g):"Category");
@@ -516,7 +528,7 @@
         window._albums=window._albums||{}; setView(head+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al, artNames(al.artists)); }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
-    function openStory(id){ loading("Loading…");
+    function openStory(id){ saveRoute("story",id); loading("Loading…");
       gql("query { story(where:{id:"+Number(id)+"}) { id enName heName imageUrl articles(orderBy:[{ index: asc }]) { id enName heName pdfUrl releaseDate } } }").then(function(d){
         var s=d.story; setStatus(""); if(!s){ setView('<div class="empty">Story not found.</div>'); return; }
         var nm=pick(s.enName,s.heName)||"Story"; var arts=s.articles||[];
@@ -534,7 +546,7 @@
     function searchView(){
       setView('<div class="searchbar">'+ic("search")+'<input id="q" type="text" placeholder="Search songs, albums, artists…" autocomplete="off" /></div><div id="sres"></div>');
       var q=$("q"); q.focus();
-      q.addEventListener("input", function(){ var val=this.value; clearTimeout(_searchT); _searchT=setTimeout(function(){ doSearch(val); }, 280); });
+      q.addEventListener("input", function(){ var val=this.value; saveRoute("search",val); clearTimeout(_searchT); _searchT=setTimeout(function(){ doSearch(val); }, 280); });
       doSearch("");
     }
     function nameFilter(){ return "OR:[{enName:{contains:$t,mode:insensitive}},{heName:{contains:$t,mode:insensitive}}]"; }
@@ -580,7 +592,7 @@
         setView(secHead("Genres")+'<div class="chips">'+gs.map(function(g){ return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
-    function openGenre(id){ loading("Loading…");
+    function openGenre(id){ saveRoute("genre",id); loading("Loading…");
       gql("query { genre(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
         var g=d.genre; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=browseGenres;
         var head='<div class="back" onclick="browseGenres()">'+ic("arrow_back_ios_new")+'Genres</div>'+secHead(g?genName(g):"Genre");
@@ -597,7 +609,7 @@
           return '<div class="tile album" onclick="openPlaylist('+p.id+')">'+coverHtml(nm,{img:p.cdnImage||p.image,fab:true})+'<div class="c-name">'+esc(nm)+'</div><div class="c-sub">Playlist</div></div>'; }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
-    function openPlaylist(id){ loading("Loading…");
+    function openPlaylist(id){ saveRoute("playlist",id); loading("Loading…");
       gql("query { playlist(where:{id:"+Number(id)+"}) { id name enName heName image cdnImage playlistTracks { track { id enName heName file duration trackNumber artists { enName heName } } } } }").then(function(d){
         var p=d.playlist; setStatus("");
         var tracks=((p&&p.playlistTracks)||[]).map(function(x){return x.track;}).filter(Boolean);
@@ -632,7 +644,7 @@
       setView(secHead("Artists")+'<div class="grid artists">'+sorted.map(artistTile).join("")+'</div>'+(artists.length>600?'<div class="empty">Showing 600 of '+artists.length+'. Use Search for a specific artist.</div>':''));
     }); }
 
-    function openArtist(id){ loading("Loading…");
+    function openArtist(id){ saveRoute("artist",id); loading("Loading…");
       post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; setStatus(""); var anm=a?(pick(a.enName,a.heName)||"Artist"):"Artist"; var aalt=a?((SET.lang==="he")?(a.enName||""):(a.heName||"")):""; window._curArtist=anm;
         var abio=a?(a.bio||pick(a.enDesc,a.heDesc)||""):"";
         var head='<div class="back" onclick="go(\'home\')">'+ic("arrow_back_ios_new")+'Back</div>'+
@@ -646,7 +658,7 @@
     }
 
     // ---------- Album ----------
-    function openAlbum(id){ loading("Loading album…");
+    function openAlbum(id){ saveRoute("album",id); loading("Loading album…");
       gql("query { album(where:{id:"+Number(id)+"}) { id enName heName images { cdnMedium cdnLarge medium large } artists { enName heName image } tracks { id enName heName file duration trackNumber } } }").then(function(d){
         var al=d.album; setStatus(""); if(!al){ setView('<div class="empty">Album not found.</div>'); return; }
         window._albums=window._albums||{}; window._albums[id]=al; renderAlbum(id, al);
@@ -1129,7 +1141,7 @@
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
-    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000); loadConfig().then(function(){ home(); });
+    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000); loadConfig().then(function(){ restoreRoute(); });
   </script>
 </body>
 </html>
