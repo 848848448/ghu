@@ -1059,9 +1059,13 @@ async function handleNew(env) {
   // recently ADDED to the catalog — what "new music coming in" means), then
   // the release date, then id, then an unordered page sorted here — so this
   // keeps working even if the API rejects an orderBy field.
+  // "New music" means most recently ADDED to the catalog. On this API that is
+  // createdAt desc; the album id increases with each addition, so id desc gives
+  // the same order and is a reliable fallback. We deliberately do NOT sort by
+  // releasedAt — that surfaces future-dated releases and daily podcasts, not
+  // the newest singles/albums.
   const attempts = [
     "query { albums(take: 20, orderBy: [{ createdAt: desc }]) { " + fields + " } }",
-    "query { albums(take: 20, orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
     "query { albums(take: 20, orderBy: [{ id: desc }]) { " + fields + " } }",
     "query { albums(take: 50) { " + fields + " } }",
   ];
@@ -1073,10 +1077,7 @@ async function handleNew(env) {
       break;
     }
   }
-  // Always sort newest-first ourselves. Some API servers accept an orderBy
-  // field but silently ignore it, returning the default (often oldest-first)
-  // order — which would hide brand-new music. Sorting here guarantees the
-  // newest releases are on top no matter what the server did.
+  // Guarantee newest-added-first regardless of what the server returned.
   albums = sortNewest(albums);
   return json({ albums: albums.slice(0, 12) });
 }
@@ -1116,17 +1117,11 @@ async function handleProbeNew(request, env) {
   return json({ probe: out });
 }
 
-// Newest-first: by release date, then by id (higher id = added later).
+// Newest-added first: by id descending. On this catalog the album id increases
+// with every addition, so the highest ids are the most recently added music.
+// (We avoid releasedAt here — it surfaces future-dated items and podcasts.)
 function sortNewest(list) {
-  const t = (a) => {
-    const d = a && a.releasedAt ? Date.parse(a.releasedAt) : NaN;
-    return isNaN(d) ? -Infinity : d;
-  };
-  return (list || []).slice().sort((a, b) => {
-    const d = t(b) - t(a);
-    if (d) return d;
-    return Number((b && b.id) || 0) - Number((a && a.id) || 0);
-  });
+  return (list || []).slice().sort((a, b) => Number((b && b.id) || 0) - Number((a && a.id) || 0));
 }
 
 // A page of ALL albums, newest first (old + new together), for the Albums
@@ -1140,7 +1135,6 @@ async function handleAlbumsPage(request, env) {
     "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
   const attempts = [
     "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ createdAt: desc }]) { " + fields + " } }",
-    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ releasedAt: desc }]) { " + fields + " } }",
     "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ id: desc }]) { " + fields + " } }",
     "query { albums(take: " + take + ", skip: " + skip + ") { " + fields + " } }",
   ];
