@@ -809,6 +809,7 @@
           '<button class="chip" onclick="showZingActions()">Zing actions</button>'+
           '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
+          '<button class="chip" onclick="probeNew()">New releases (debug)</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
           '<div id="diag" style="margin-top:14px"></div></div>') : '')+
         '<div class="set-sec"><h3>Account</h3><div class="card">'+
@@ -1098,6 +1099,15 @@
         });
       }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
     }
+    function probeNew(){ diagBox('<span class="spinner"></span>Checking what the server returns for new music…');
+      post("/api/probe/new",{admin:_admPw}).then(function(d){ var p=(d&&d.probe)||[]; if(!p.length){ diagBox("No result."); return; }
+        var txt=p.map(function(v){ if(v.error) return "• "+v.label+" → ERROR: "+v.error;
+          var lines=(v.rows||[]).map(function(r){ return "    #"+r.id+"  "+(r.name||"")+"   released:"+(r.releasedAt||"-")+(r.createdAt?("   created:"+r.createdAt):""); });
+          return "• "+v.label+" ("+v.count+")\n"+lines.join("\n"); }).join("\n\n");
+        window._copy=txt;
+        diagBox('<b>New releases (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this (or a screenshot) so I can fix which list the newest music comes from.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
     function copyText(btn){ var t=window._copy||""; try{ navigator.clipboard.writeText(t).then(function(){btn.textContent="Copied!";},function(){fb();}); }catch(e){ fb(); }
       function fb(){ var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand("copy");}catch(e){} ta.remove(); btn.textContent="Copied!"; } }
 
@@ -1108,7 +1118,7 @@
     window.playAlbum=playAlbum; window.playList=playList; window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum;
     window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
     window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
-    window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText;
+    window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText; window.probeNew=probeNew;
     window.showFullSchema=showFullSchema; window.downloadText=downloadText; window.showZingConfig=showZingConfig; window.showZingActions=showZingActions;
     window.openNowPlaying=openNowPlaying; window.npLyrics=npLyrics; window.npSimilar=npSimilar; window.playSimilar=playSimilar;
     window.browseLibrary=browseLibrary; window.saveArtist=saveArtist; window.saveAlbum=saveAlbum;
