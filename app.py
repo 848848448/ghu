@@ -486,11 +486,14 @@ def save_users(users):
 @app.route("/api/signup", methods=["POST"])
 def api_signup():
     b = request.get_json(silent=True) or {}
+    name = str(b.get("name", "")).strip()[:80]
     email = str(b.get("email", "")).strip().lower()
     phone = str(b.get("phone", "")).strip()
     password = str(b.get("password", ""))
     photo = str(b.get("photo", ""))
     import re as _re
+    if len(name) < 2:
+        return jsonify({"error": "Enter your full name."}), 400
     if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         return jsonify({"error": "Enter a valid email address."}), 400
     if len(_re.sub(r"[^0-9]", "", phone)) < 6:
@@ -503,9 +506,9 @@ def api_signup():
     if any(u.get("email") == email for u in users):
         return jsonify({"error": "An account with this email already exists."}), 400
     nid = (max([u.get("id", 0) for u in users]) + 1) if users else 1
-    users.append({"id": nid, "email": email, "phone": phone,
+    users.append({"id": nid, "name": name, "email": email, "phone": phone,
                   "pass": hashlib.sha256(("u1:" + email + ":" + password).encode()).hexdigest(),
-                  "photo": photo, "status": "pending", "created": int(time.time() * 1000)})
+                  "photo": photo, "status": "pending", "nodl": 0, "created": int(time.time() * 1000)})
     save_users(users)
     return jsonify({"ok": True})
 
@@ -513,6 +516,16 @@ def api_signup():
 @app.route("/api/me")
 def api_me():
     return jsonify({"user": None})
+
+
+@app.route("/api/me/password", methods=["POST"])
+def api_me_password():
+    return jsonify({"error": "Not available for this login."}), 400
+
+
+@app.route("/api/pending")
+def api_pending():
+    return jsonify({"pending": 0, "admin": False})
 
 
 def _presence_path():
@@ -558,7 +571,7 @@ def api_admin_users():
     body = request.get_json(silent=True) or {}
     if not is_admin(body):
         return jsonify({"error": "Wrong password."}), 403
-    users = [{k: u.get(k) for k in ("id", "email", "phone", "photo", "status", "created")} for u in load_users()]
+    users = [{k: u.get(k) for k in ("id", "name", "email", "phone", "photo", "status", "nodl", "created")} for u in load_users()]
     users.sort(key=lambda u: u.get("created", 0), reverse=True)
     return jsonify({"users": users})
 
@@ -570,18 +583,36 @@ def api_admin_user():
         return jsonify({"error": "Wrong password."}), 403
     action = str(body.get("action", ""))
     users = load_users()
-    if action in ("approve", "reject"):
+    uid = body.get("id")
+    status_map = {"approve": "approved", "reject": "rejected", "suspend": "suspended", "unsuspend": "approved"}
+    if action in status_map:
         for u in users:
-            if u.get("id") == body.get("id"):
-                u["status"] = "approved" if action == "approve" else "rejected"
+            if u.get("id") == uid:
+                u["status"] = status_map[action]
+        save_users(users)
+        return jsonify({"ok": True})
+    if action == "nodl":
+        for u in users:
+            if u.get("id") == uid:
+                u["nodl"] = 1 if body.get("value") else 0
+        save_users(users)
+        return jsonify({"ok": True})
+    if action == "resetpw":
+        np = str(body.get("password", ""))
+        if len(np) < 4:
+            return jsonify({"error": "Password must be at least 4 characters."}), 400
+        for u in users:
+            if u.get("id") == uid:
+                u["pass"] = hashlib.sha256(("u1:" + u.get("email", "") + ":" + np).encode()).hexdigest()
         save_users(users)
         return jsonify({"ok": True})
     if action == "remove":
-        users = [u for u in users if u.get("id") != body.get("id")]
+        users = [u for u in users if u.get("id") != uid]
         save_users(users)
         return jsonify({"ok": True})
     if action == "create":
         import re as _re
+        name = str(body.get("name", "")).strip()[:80]
         email = str(body.get("email", "")).strip().lower()
         phone = str(body.get("phone", "")).strip()
         password = str(body.get("password", ""))
@@ -592,9 +623,9 @@ def api_admin_user():
         if any(u.get("email") == email for u in users):
             return jsonify({"error": "That email already exists."}), 400
         nid = (max([u.get("id", 0) for u in users]) + 1) if users else 1
-        users.append({"id": nid, "email": email, "phone": phone,
+        users.append({"id": nid, "name": name, "email": email, "phone": phone,
                       "pass": hashlib.sha256(("u1:" + email + ":" + password).encode()).hexdigest(),
-                      "photo": "", "status": "approved", "created": int(time.time() * 1000)})
+                      "photo": "", "status": "approved", "nodl": 0, "created": int(time.time() * 1000)})
         save_users(users)
         return jsonify({"ok": True})
     return jsonify({"error": "Unknown action."}), 400

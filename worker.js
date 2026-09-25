@@ -74,6 +74,12 @@ export default {
       if (path === "/api/me") {
         return await handleMe(request, env);
       }
+      if (path === "/api/me/password" && request.method === "POST") {
+        return await handleMePassword(request, env);
+      }
+      if (path === "/api/pending") {
+        return await handlePending(request, env);
+      }
       if (path === "/api/presence" && request.method === "POST") {
         return await handlePresence(request, env);
       }
@@ -168,6 +174,7 @@ async function handleLogin(request, env) {
     if (!u || u.pass !== (await passHash(email, pw))) {
       return json({ error: "Wrong email or password." }, 401);
     }
+    if (u.status === "suspended") return json({ error: "This account has been suspended." }, 403);
     if (u.status !== "approved") {
       return json({ error: u.status === "rejected" ? "This account was not approved." : "Your account is waiting for approval." }, 403);
     }
@@ -214,6 +221,10 @@ async function ensureD1(env) {
       env.DB.prepare("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, phone TEXT, pass TEXT, photo TEXT, status TEXT, created INTEGER)"),
       env.DB.prepare("CREATE TABLE IF NOT EXISTS presence (uid TEXT PRIMARY KEY, name TEXT, view TEXT, seen INTEGER)"),
     ]);
+    // Best-effort migrations for columns added later (ignored if they exist).
+    for (const a of ["ALTER TABLE users ADD COLUMN name TEXT", "ALTER TABLE users ADD COLUMN nodl INTEGER"]) {
+      try { await env.DB.prepare(a).run(); } catch (e) { /* column already exists */ }
+    }
     D1_READY = true;
   } catch (e) { /* ignore; calls below will surface errors */ }
 }
@@ -407,10 +418,12 @@ async function handleSignup(request, env) {
   if (!env.DB) return json({ error: "Sign-up is not set up yet (needs a D1 database)." }, 400);
   await ensureD1(env);
   const b = await request.json().catch(() => ({}));
+  const name = (b.name || "").toString().trim().slice(0, 80);
   const email = (b.email || "").toString().trim().toLowerCase();
   const phone = (b.phone || "").toString().trim();
   const password = (b.password || "").toString();
   const photo = (b.photo || "").toString();
+  if (name.length < 2) return json({ error: "Enter your full name." }, 400);
   if (!validEmail(email)) return json({ error: "Enter a valid email address." }, 400);
   if (phone.replace(/\D/g, "").length < 6) return json({ error: "Enter a valid phone number." }, 400);
   if (password.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
@@ -418,19 +431,44 @@ async function handleSignup(request, env) {
   if (photo.length > 400000) return json({ error: "Photo is too large — please try again." }, 400);
   if (await getUserByEmail(env, email)) return json({ error: "An account with this email already exists." }, 400);
   try {
-    await env.DB.prepare("INSERT INTO users (email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(email, phone, await passHash(email, password), photo, "pending", Date.now()).run();
+    await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(name, email, phone, await passHash(email, password), photo, "pending", Date.now()).run();
   } catch (e) { return json({ error: "Could not send the request." }, 500); }
   return json({ ok: true });
 }
 
 async function handleMe(request, env) {
   const id = await verifyUid(env, parseCookies(request).uid);
-  if (id === "admin") return json({ admin: true, name: "Admin" });
+  if (id === "admin") return json({ admin: true, name: "Owner" });
   if (!id) return json({ user: null });
   const u = await getUserById(env, id);
   if (!u) return json({ user: null });
-  return json({ user: { id: u.id, email: u.email, phone: u.phone, photo: u.photo, name: (u.email || "").split("@")[0] } });
+  return json({ user: { id: u.id, email: u.email, phone: u.phone, photo: u.photo, name: u.name || (u.email || "").split("@")[0], nodl: !!u.nodl } });
+}
+
+// Change your own password (must be signed in as a user account).
+async function handleMePassword(request, env) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (!id || id === "admin" || !env.DB) return json({ error: "Not available for this login." }, 400);
+  const b = await request.json().catch(() => ({}));
+  const u = await getUserById(env, id);
+  if (!u) return json({ error: "Account not found." }, 404);
+  if (u.pass !== (await passHash(u.email, (b.old || "").toString()))) return json({ error: "Current password is wrong." }, 403);
+  const np = (b.new || "").toString();
+  if (np.length < 4) return json({ error: "New password must be at least 4 characters." }, 400);
+  await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHash(u.email, np), Number(id)).run();
+  return json({ ok: true });
+}
+
+// Pending-request count, for the owner's badge.
+async function handlePending(request, env) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (id !== "admin" || !env.DB) return json({ pending: 0, admin: id === "admin" });
+  await ensureD1(env);
+  try {
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE status = 'pending'").first();
+    return json({ pending: (r && r.n) || 0, admin: true });
+  } catch (e) { return json({ pending: 0, admin: true }); }
 }
 
 async function handleAdminUsers(request, env) {
@@ -438,7 +476,7 @@ async function handleAdminUsers(request, env) {
   if (!isAdmin(env, b)) return json({ error: "Wrong password." }, 403);
   if (!env.DB) return json({ error: "Accounts need a D1 database.", d1: false }, 400);
   await ensureD1(env);
-  const r = await env.DB.prepare("SELECT id, email, phone, photo, status, created FROM users ORDER BY created DESC").all();
+  const r = await env.DB.prepare("SELECT id, name, email, phone, photo, status, nodl, created FROM users ORDER BY created DESC").all();
   return json({ users: r.results || [] });
 }
 
@@ -448,23 +486,31 @@ async function handleAdminUser(request, env) {
   if (!env.DB) return json({ error: "Accounts need a D1 database." }, 400);
   await ensureD1(env);
   const action = (b.action || "").toString();
-  if (action === "approve" || action === "reject") {
-    await env.DB.prepare("UPDATE users SET status = ? WHERE id = ?").bind(action === "approve" ? "approved" : "rejected", Number(b.id)).run();
-    return json({ ok: true });
-  }
-  if (action === "remove") {
-    await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(Number(b.id)).run();
+  const id = Number(b.id);
+  if (action === "approve") { await env.DB.prepare("UPDATE users SET status='approved' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "reject") { await env.DB.prepare("UPDATE users SET status='rejected' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "suspend") { await env.DB.prepare("UPDATE users SET status='suspended' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "unsuspend") { await env.DB.prepare("UPDATE users SET status='approved' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "remove") { await env.DB.prepare("DELETE FROM users WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "nodl") { await env.DB.prepare("UPDATE users SET nodl=? WHERE id=?").bind(b.value ? 1 : 0, id).run(); return json({ ok: true }); }
+  if (action === "resetpw") {
+    const np = (b.password || "").toString();
+    if (np.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
+    const u = await getUserById(env, id);
+    if (!u) return json({ error: "Account not found." }, 404);
+    await env.DB.prepare("UPDATE users SET pass=? WHERE id=?").bind(await passHash(u.email, np), id).run();
     return json({ ok: true });
   }
   if (action === "create") {
+    const name = (b.name || "").toString().trim().slice(0, 80);
     const email = (b.email || "").toString().trim().toLowerCase();
     const phone = (b.phone || "").toString().trim();
     const password = (b.password || "").toString();
     if (!validEmail(email)) return json({ error: "Enter a valid email." }, 400);
     if (password.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
     if (await getUserByEmail(env, email)) return json({ error: "That email already exists." }, 400);
-    await env.DB.prepare("INSERT INTO users (email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(email, phone, await passHash(email, password), "", "approved", Date.now()).run();
+    await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(name, email, phone, await passHash(email, password), "", "approved", Date.now()).run();
     return json({ ok: true });
   }
   return json({ error: "Unknown action." }, 400);
@@ -477,7 +523,7 @@ async function handleAdminUser(request, env) {
 async function presenceName(env, request) {
   const id = await verifyUid(env, parseCookies(request).uid);
   if (id === "admin") return "Owner";
-  if (id) { const u = await getUserById(env, id); return u ? u.email : "User"; }
+  if (id) { const u = await getUserById(env, id); return u ? (u.name || u.email) : "User"; }
   return "Guest";
 }
 
@@ -1206,7 +1252,8 @@ const LOGIN = `<!DOCTYPE html>
 
     <div id="signup" hidden>
       <p>Create an account. The owner approves new accounts.</p>
-      <input id="su_email" type="email" placeholder="Email address" autocomplete="email" />
+      <input id="su_name" type="text" placeholder="Full name" autocomplete="name" />
+      <input id="su_email" type="email" placeholder="Email address" autocomplete="email" style="margin-top:10px" />
       <input id="su_phone" type="tel" placeholder="Phone number" autocomplete="tel" style="margin-top:10px" />
       <input id="su_pw" type="password" placeholder="Choose a password" autocomplete="new-password" style="margin-top:10px" />
       <div class="selfie">
@@ -1270,14 +1317,15 @@ const LOGIN = `<!DOCTYPE html>
     // Request access
     function signup(){
       var m = $("su_msg"); m.textContent = "";
-      var email = $("su_email").value.trim(), phone = $("su_phone").value.trim(), pw = $("su_pw").value;
+      var name = $("su_name").value.trim(), email = $("su_email").value.trim(), phone = $("su_phone").value.trim(), pw = $("su_pw").value;
+      if(name.length < 2){ m.textContent = "Enter your full name."; return; }
       if(email.indexOf("@") < 1){ m.textContent = "Enter a valid email address."; return; }
       if(phone.replace(/[^0-9]/g, "").length < 6){ m.textContent = "Enter a valid phone number."; return; }
       if(pw.length < 4){ m.textContent = "Password must be at least 4 characters."; return; }
       if(!photo){ m.textContent = "Please take your selfie photo first."; return; }
       $("su_go").disabled = true;
       fetch("/api/signup", { method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ email: email, phone: phone, password: pw, photo: photo }) })
+        body: JSON.stringify({ name: name, email: email, phone: phone, password: pw, photo: photo }) })
       .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
       .then(function(x){ $("su_go").disabled = false;
         if(x.ok){ $("signup").innerHTML = "<p style=\\"color:#34d399;font-size:1.05rem;line-height:1.6\\">Thank you! Your request was sent.<br>The owner will approve your account soon.</p>"; }
@@ -1584,9 +1632,19 @@ const PAGE = `<!DOCTYPE html>
       else if(ann){ ann.hidden=true; }
     }
     function loadConfig(){ return fetch("/api/config").then(function(r){return r.json();}).then(function(c){ applyConfig(c); }).catch(function(){}); }
-    function loadMe(){ fetch("/api/me").then(function(r){return r.json();}).then(function(d){
-      if(d&&d.user&&d.user.photo&&/^data:image/.test(d.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=d.user.photo; if(a) a.hidden=false; }
+    var ME={admin:false,user:null};
+    function dlAllowed(){ return feat("downloads") && !(ME.user && ME.user.nodl); }
+    function loadMe(){ return fetch("/api/me").then(function(r){return r.json();}).then(function(d){
+      ME.admin=!!(d&&d.admin); ME.user=(d&&d.user)||null;
+      if(ME.user&&ME.user.photo&&/^data:image/.test(ME.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=ME.user.photo; if(a) a.hidden=false; }
+      updateCfgBanner(); if(ME.admin) loadPending();
+      var np=$("npDl"); if(np) np.style.display=dlAllowed()?"":"none";
+      if(ME.user&&ME.user.nodl){ go(curTab||"home"); } // re-render so per-account download control applies
     }).catch(function(){}); }
+    function loadPending(){ fetch("/api/pending").then(function(r){return r.json();}).then(function(d){ var n=(d&&d.pending)||0;
+      var g=document.querySelector('.iconbtn[title="Settings"]'); if(!g) return; g.style.position="relative"; var b=$("pendBadge");
+      if(n>0){ if(!b){ b=document.createElement("span"); b.id="pendBadge"; b.style.cssText="position:absolute;top:3px;right:3px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--err);color:#fff;font-size:.62rem;font-weight:800;display:grid;place-items:center"; g.appendChild(b); } b.textContent=n; b.hidden=false; }
+      else if(b){ b.hidden=true; } }).catch(function(){}); }
     // Live presence: tell the server what this device is doing, so the owner can see who is on.
     var _cid=""; try{ _cid=localStorage.getItem("zing_cid")||""; if(!_cid){ _cid=Date.now().toString(36)+Math.random().toString(36).slice(2,8); localStorage.setItem("zing_cid",_cid); } }catch(e){ _cid="c"+Math.random().toString(36).slice(2,10); }
     var _activity="Home";
@@ -1680,9 +1738,9 @@ const PAGE = `<!DOCTYPE html>
       var v = pid ? {a:Number(id),p:Number(pid)} : {a:Number(id)};
       agql(q,v).then(function(){ toast("Saved to My Music ♥"); }).catch(function(e){ if(e.message==="login")return; toast("Couldn’t save: "+(e.message||"login not connected")); }); }); }
 
-    function checkStatus(){ fetch("/api/status").then(function(r){return r.json();}).then(function(s){
-      if(s.configured){ $("cfgBanner").hidden=true; $("cfgBadge").textContent=""; }
-      else { $("cfgBanner").hidden=false; $("cfgBadge").textContent="Not configured"; } }).catch(function(){}); }
+    var _configured=true;
+    function updateCfgBanner(){ var show=ME.admin && !_configured; var b=$("cfgBanner"); if(b) b.hidden=!show; var bd=$("cfgBadge"); if(bd) bd.textContent=show?"Not configured":""; }
+    function checkStatus(){ fetch("/api/status").then(function(r){return r.json();}).then(function(s){ _configured=!!s.configured; updateCfgBanner(); }).catch(function(){}); }
 
     function loadCache(){ try{ var o=JSON.parse(localStorage.getItem(CACHE_KEY)||"null"); if(o&&Date.now()-o.t<CACHE_TTL&&o.a&&o.a.length) return o.a; }catch(e){} return null; }
     function saveCache(a){ try{ localStorage.setItem(CACHE_KEY, JSON.stringify({t:Date.now(),a:a})); }catch(e){} }
@@ -1931,7 +1989,7 @@ const PAGE = `<!DOCTYPE html>
         '<div class="tk">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
         dlBtn(t.id,t.file)+'</div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(albName(al),{img:albImg(al)})+'<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2><div class="sub">'+tracks.length+' tracks</div>'+
-        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((feat("downloads")&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((dlAllowed()&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
         (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
       highlightPlaying();
     }
@@ -2036,7 +2094,7 @@ const PAGE = `<!DOCTYPE html>
     function closeOverlay(quiet){ if(typeof stopPresPoll==="function") stopPresPoll(); var d=$("ovl"); if(d) d.remove(); if(quiet!==true && _dirtyView){ _dirtyView=false; go(curTab); } }
 
     // ---------- Downloads ----------
-    function dlBtn(id,file){ if(!feat("downloads")) return ""; return '<button class="dl" onclick="event.stopPropagation();downloadTrack('+id+', '+esc(JSON.stringify(file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button>'; }
+    function dlBtn(id,file){ if(!dlAllowed()) return ""; return '<button class="dl" onclick="event.stopPropagation();downloadTrack('+id+', '+esc(JSON.stringify(file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button>'; }
     function dlUrl(id,file){ var p=new URLSearchParams({trackId:id, file:file||""}); return "/api/download?"+p.toString(); }
     function downloadTrack(id,file){ var a=document.createElement("a"); a.href=dlUrl(id,file); a.download=""; document.body.appendChild(a); a.click(); a.remove(); toast("Download started…"); }
     function downloadAlbum(albumId){ var al=(window._albums||{})[albumId]; if(!al) return; var tr=al.tracks||[]; var i=0;
@@ -2059,21 +2117,37 @@ const PAGE = `<!DOCTYPE html>
           row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
           row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
         '</div></div>'+
+        (ME.user ? ('<div class="set-sec"><h3>Your account</h3><div class="card">'+
+          row(esc(ME.user.name||ME.user.email), esc(ME.user.email), ic("chevron_right"), "openProfile()")+
+        '</div></div>') : '')+
         '<div class="set-sec"><h3>Admin</h3><div class="card">'+
-          row("Admin panel","Accounts, app name, features, announcement", ic("chevron_right"), "openAccess()")+
+          row("Admin panel","Accounts, appearance, features, who's online", ic("chevron_right"), "openAccess()")+
         '</div></div>'+
-        '<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
+        (ME.admin ? ('<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
           '<button class="chip" onclick="showZingConfig()">Zing settings</button>'+
           '<button class="chip" onclick="showZingActions()">Zing actions</button>'+
           '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
-          '<div id="diag" style="margin-top:14px"></div></div>'+
+          '<div id="diag" style="margin-top:14px"></div></div>') : '')+
         '<div class="set-sec"><h3>Account</h3><div class="card">'+
           '<div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div>'+
         '</div></div>';
     }
+    function openProfile(){ if(!ME.user){ return; } var u=ME.user;
+      overlay("Profile", '<div style="text-align:center;margin-bottom:8px">'+
+        (u.photo&&/^data:image/.test(u.photo)?'<img src="'+esc(u.photo)+'" alt="" style="width:120px;height:120px;border-radius:999px;object-fit:cover" />':'<div style="width:120px;height:120px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;color:#fff;font-weight:800;font-size:2rem">'+esc((u.name||u.email||"?").slice(0,1).toUpperCase())+'</div>')+
+        '<div style="font-weight:800;font-size:1.2rem;margin-top:12px">'+esc(u.name||"")+'</div><div class="muted">'+esc(u.email||"")+'</div>'+(u.phone?'<div class="muted">'+esc(u.phone)+'</div>':'')+'</div>'+
+        '<div class="set-sec"><h3>Change password</h3><div class="card" style="padding:15px">'+
+          '<input id="pw_old" class="field" type="password" placeholder="Current password" autocomplete="current-password" />'+
+          '<input id="pw_new" class="field" style="margin-top:10px" type="password" placeholder="New password" autocomplete="new-password" />'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="changePw()">Change password</button>'+
+          '<div id="pw_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'+
+        '<div class="set-sec"><div class="card"><div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div></div></div>');
+    }
+    function changePw(){ var o=$("pw_old"),n=$("pw_new"),m=$("pw_msg"); if(m) m.textContent="";
+      post("/api/me/password",{old:(o||{}).value||"",new:(n||{}).value||""}).then(function(){ toast("Password changed ✓"); if(o)o.value=""; if(n)n.value=""; }).catch(function(e){ if(m) m.textContent=e.message||"Could not change."; }); }
 
     // ---------- Access management (who can access) ----------
     function backToSettings(){ stopPresPoll(); ovlSet("Settings", settingsHtml()); }
@@ -2106,9 +2180,12 @@ const PAGE = `<!DOCTYPE html>
     function userAvatar(u){ return (u.photo && /^data:image/.test(u.photo))
       ? '<img src="'+esc(u.photo)+'" alt="" style="width:46px;height:46px;border-radius:999px;object-fit:cover;flex:none" />'
       : '<div style="width:46px;height:46px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((u.email||"?").slice(0,1).toUpperCase())+'</div>'; }
-    function userAction(id, action){ post("/api/admin/user",{admin:_admPw,action:action,id:id}).then(function(){ toast(action==="approve"?"Approved ✓":"Done."); loadAccess(); }).catch(function(e){ toast(e.message||"Failed."); }); }
-    function userCreate(){ var e=$("nu_e"),p=$("nu_p"),w=$("nu_w"),m=$("nu_msg"); if(m) m.textContent="";
-      post("/api/admin/user",{admin:_admPw,action:"create",email:(e||{}).value||"",phone:(p||{}).value||"",password:(w||{}).value||""}).then(function(){ toast("Account created."); loadAccess(); }).catch(function(err){ if(m) m.textContent=err.message||"Could not create."; }); }
+    function userAction(id, action, extra){ var body={admin:_admPw,action:action,id:id}; if(extra){ for(var k in extra) body[k]=extra[k]; }
+      post("/api/admin/user",body).then(function(){ toast(action==="approve"?"Approved ✓":"Done."); loadAccess(); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function userReset(id){ var p=prompt("Enter a new password for this account:"); if(p===null) return; if(p.length<4){ toast("Password must be at least 4 characters."); return; }
+      post("/api/admin/user",{admin:_admPw,action:"resetpw",id:id,password:p}).then(function(){ toast("Password reset ✓"); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function userCreate(){ var nm=$("nu_n"),e=$("nu_e"),p=$("nu_p"),w=$("nu_w"),m=$("nu_msg"); if(m) m.textContent="";
+      post("/api/admin/user",{admin:_admPw,action:"create",name:(nm||{}).value||"",email:(e||{}).value||"",phone:(p||{}).value||"",password:(w||{}).value||""}).then(function(){ toast("Account created."); loadAccess(); }).catch(function(err){ if(m) m.textContent=err.message||"Could not create."; }); }
     var _cfgEdit={features:{}};
     function toggleRow(k,label){ var on=_cfgEdit.features[k]!==false;
       return '<div class="row"><div class="rlabel"><div class="rt">'+esc(label)+'</div></div><div class="seg" id="cf_'+k+'">'+
@@ -2167,24 +2244,32 @@ const PAGE = `<!DOCTYPE html>
       var usersCards="";
       var users=(usersData&&usersData.users);
       if(users===null||users===undefined){
-        usersCards='<div class="set-sec"><h3>Accounts</h3><div class="card" style="padding:14px"><p class="muted" style="margin:0">Sign-up accounts need a <b>D1 database</b> (binding <code>DB</code>). Add it to use email/password accounts with approval.</p></div></div>';
+        usersCards='<div class="set-sec"><h3>Accounts</h3><div class="card" style="padding:14px"><p class="muted" style="margin:0">Sign-up accounts need the storage set up first (see below). Then people can request access with email, phone and a selfie.</p></div></div>';
       } else {
         var pending=users.filter(function(u){return u.status==="pending";});
-        var approved=users.filter(function(u){return u.status==="approved";});
+        var others=users.filter(function(u){return u.status!=="pending"&&u.status!=="rejected";});
         if(pending.length){
           usersCards+='<div class="set-sec"><h3>Account requests ('+pending.length+')</h3><div class="card">'+pending.map(function(u){
-            return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.email)+'</div><div class="ci-code">'+esc(u.phone||"")+'</div></div>'+
+            return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.name||u.email)+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div>'+
               '<button class="btn sm" style="margin:0" onclick="userAction('+u.id+',\\'approve\\')">Approve</button>'+
               '<button class="trash" title="Reject" onclick="userAction('+u.id+',\\'reject\\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
         }
-        var alist = approved.length
-          ? '<div class="card">'+approved.map(function(u){ return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.email)+'</div><div class="ci-code">'+esc(u.phone||"")+'</div></div>'+
-              '<button class="trash" title="Remove" onclick="userAction('+u.id+',\\'remove\\')">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
-          : '<p class="muted" style="margin:2px 0 0">No accounts yet.</p>';
-        usersCards+='<div class="set-sec"><h3>Accounts ('+approved.length+')</h3>'+alist+
-          '<div class="card" style="padding:15px;margin-top:10px">'+
+        var alist = others.length
+          ? others.map(function(u){ var susp=(u.status==="suspended");
+              return '<div class="card" style="padding:12px;margin-bottom:8px">'+
+                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div></div>'+
+                '<div class="chips" style="padding:0;margin-top:10px">'+
+                  (susp?'<button class="chip" onclick="userAction('+u.id+',\\'unsuspend\\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\\'suspend\\')">Suspend</button>')+
+                  '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
+                  '<button class="chip" onclick="userAction('+u.id+',\\'nodl\\',{value:'+(u.nodl?0:1)+'})">'+(u.nodl?'Enable downloads':'Disable downloads')+'</button>'+
+                  '<button class="chip" onclick="userAction('+u.id+',\\'remove\\')">Remove</button>'+
+                '</div></div>'; }).join("")
+          : '<p class="muted" style="margin:2px 0 10px">No accounts yet.</p>';
+        usersCards+='<div class="set-sec"><h3>Accounts ('+others.length+')</h3>'+alist+
+          '<div class="card" style="padding:15px;margin-top:2px">'+
             '<div style="font-weight:600;margin-bottom:8px">Create an account</div>'+
-            '<input id="nu_e" class="field" type="email" placeholder="Email address" autocomplete="off" />'+
+            '<input id="nu_n" class="field" placeholder="Full name" autocomplete="off" />'+
+            '<input id="nu_e" class="field" style="margin-top:10px" type="email" placeholder="Email address" autocomplete="off" />'+
             '<input id="nu_p" class="field" style="margin-top:10px" type="tel" placeholder="Phone number" autocomplete="off" />'+
             '<input id="nu_w" class="field" style="margin-top:10px" type="password" placeholder="Password" autocomplete="new-password" />'+
             '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
@@ -2317,7 +2402,7 @@ const PAGE = `<!DOCTYPE html>
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
-    window.userAction=userAction; window.userCreate=userCreate;
+    window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw;
 
     hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); loadConfig().then(function(){ home(); });
   </script>
