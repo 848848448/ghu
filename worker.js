@@ -1277,7 +1277,7 @@ const PAGE = `<!DOCTYPE html>
 
   <script>
     var artists=[], artistsLoaded=false;
-    var CACHE_KEY="zing_artists_cache_v2", CACHE_TTL=86400000;
+    var CACHE_KEY="zing_artists_cache_v2", CACHE_TTL=3600000;
     var queue=[], qi=-1;
     var curTab="home", _dirtyView=false, _admPw="";
 
@@ -1405,9 +1405,11 @@ const PAGE = `<!DOCTYPE html>
 
     function loadCache(){ try{ var o=JSON.parse(localStorage.getItem(CACHE_KEY)||"null"); if(o&&Date.now()-o.t<CACHE_TTL&&o.a&&o.a.length) return o.a; }catch(e){} return null; }
     function saveCache(a){ try{ localStorage.setItem(CACHE_KEY, JSON.stringify({t:Date.now(),a:a})); }catch(e){} }
+    function refreshArtists(){ return post("/api/artists",{}).then(function(d){ if(d.artists&&d.artists.length){ artists=d.artists; saveCache(artists); } return true; }).catch(function(){ return false; }); }
     function ensureArtists(){
       if(artistsLoaded) return Promise.resolve(true);
-      var c=loadCache(); if(c){ artists=c; artistsLoaded=true; return Promise.resolve(true); }
+      var c=loadCache();
+      if(c){ artists=c; artistsLoaded=true; refreshArtists(); return Promise.resolve(true); } // show cached now, refresh in the background
       loading("Loading artists…");
       return post("/api/artists",{}).then(function(d){ artists=d.artists||[]; artistsLoaded=true; saveCache(artists); setStatus(""); return true; })
         .catch(function(e){ setStatus("Could not load: "+esc(e.message),"err"); return false; });
