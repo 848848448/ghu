@@ -869,11 +869,11 @@ async function zingLogin(env) {
   const query =
     "mutation($e: String!, $p: String!) { authenticateUserWithPassword(email: $e, password: $p) { __typename ... on UserAuthenticationWithPasswordSuccess { sessionToken } ... on UserAuthenticationWithPasswordFailure { message } } }";
   try {
-    const r = await fetch(env.API_URL, {
+    const r = await fetchT(env.API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables: { e: cr.email, p: cr.password } }),
-    });
+    }, 15000);
     if (!r.ok) return { ok: false, error: "Login endpoint returned " + r.status + "." };
     const d = await r.json().catch(() => ({}));
     if (d && d.errors && d.errors.length) {
@@ -1142,16 +1142,28 @@ async function currentToken(env, forceLogin) {
 }
 
 // Fetch from the audio server, retrying once with a fresh token on a 403.
+// fetch with a hard timeout, so a slow/unreachable upstream never hangs the
+// Worker (which would make the Admin "Test" appear to do nothing).
+async function fetchT(url, opts, ms) {
+  const ctl = new AbortController();
+  const id = setTimeout(() => ctl.abort(), ms || 15000);
+  try {
+    return await fetch(url, Object.assign({}, opts || {}, { signal: ctl.signal }));
+  } finally { clearTimeout(id); }
+}
+
 async function fetchAudio(env, trackId, extraHeaders) {
   let token = await currentToken(env, false);
   const build = (t) =>
     env.AUDIO_API_BASE +
     "?trackId=" + encodeURIComponent(trackId) +
     "&token=" + encodeURIComponent(t || "");
-  let r = await fetch(build(token), { headers: extraHeaders || {} });
-  if (r.status === 403 && (canFirebase(env) || canAutoLogin(env))) {
-    token = await currentToken(env, true); // force a fresh token
-    r = await fetch(build(token), { headers: extraHeaders || {} });
+  let r = await fetchT(build(token), { headers: extraHeaders || {} }, 15000);
+  // On a 403, always try once more with a freshly fetched token (covers an
+  // expired token whether the login comes from secrets OR the Admin panel).
+  if (r.status === 403) {
+    token = await currentToken(env, true);
+    if (token) r = await fetchT(build(token), { headers: extraHeaders || {} }, 15000);
   }
   return r;
 }
@@ -2952,8 +2964,9 @@ const PAGE = `<!DOCTYPE html>
     function musicMsg(txt,color){ var m=$("musicMsg"); if(m){ m.style.color=color||"var(--muted)"; m.textContent=txt||""; } }
     function saveMusic(){ musicMsg("Saving & testing…","var(--muted)");
       post("/api/admin/music",{admin:_admPw,action:"save",email:($("mzEmail")||{}).value||"",password:($("mzPass")||{}).value||"",token:($("mzToken")||{}).value||""}).then(function(d){ renderMusicStatus(d.has); var p=$("mzPass"); if(p)p.value=""; testMusic(); }).catch(function(e){ musicMsg(e.message||"Could not save.","var(--err)"); }); }
-    function testMusic(){ musicMsg("Testing the music server…","var(--muted)");
-      post("/api/admin/music",{admin:_admPw,action:"test"}).then(function(d){ if(d.has) renderMusicStatus(d.has);
+    function testMusic(){ musicMsg("Testing the music server… (up to ~30 seconds)","var(--muted)");
+      var done=false, to=setTimeout(function(){ if(!done) musicMsg("The music server didn’t answer in time — it may be unreachable, or the login is wrong. Try again, or use a token.","var(--err)"); }, 40000);
+      post("/api/admin/music",{admin:_admPw,action:"test"}).then(function(d){ done=true; clearTimeout(to); if(d.has) renderMusicStatus(d.has);
         if(d.ok){ musicMsg("✓ Works! Music should play now.","var(--ok)"); }
         else { var extra=""; var dt=d.detail||{};
           if(dt.loginError) extra+="\\nLogin error: "+dt.loginError;
@@ -2961,7 +2974,7 @@ const PAGE = `<!DOCTYPE html>
           if(dt.authMutations&&dt.authMutations.candidates) extra+="\\nAvailable logins: "+(dt.authMutations.candidates.join(", ")||"(none found)");
           var msg=(d.error||"Test failed.")+extra;
           var m=$("musicMsg"); if(m){ m.style.color="var(--err)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;margin:0;font-size:.8rem">'+esc(msg)+'</pre><button class="btn sm" style="margin-top:6px" onclick="window._copy='+JSON.stringify(JSON.stringify(msg))+';copyText(this)">Copy</button>'; }
-        } }).catch(function(e){ musicMsg(e.message||"Test failed.","var(--err)"); }); }
+        } }).catch(function(e){ done=true; clearTimeout(to); musicMsg(e.message||"Test failed.","var(--err)"); }); }
     function clearMusic(){ if(!confirm("Clear the saved music-server login?")) return; post("/api/admin/music",{admin:_admPw,action:"clear"}).then(function(d){ renderMusicStatus(d.has); musicMsg("Cleared.","var(--muted)"); }).catch(function(){}); }
     function statTile(n,label){ return '<div style="flex:1;background:var(--surface-2);border-radius:12px;padding:12px 6px"><div style="font-size:1.5rem;font-weight:800">'+(n||0)+'</div><div class="muted" style="font-size:.72rem">'+esc(label)+'</div></div>'; }
     function timeAgo(at){ var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
