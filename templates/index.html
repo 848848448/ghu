@@ -94,6 +94,10 @@
       display:grid; place-items:center; color:#fff; box-shadow:0 8px 16px rgba(0,0,0,.45); opacity:0; transform:translateY(6px);
       transition:opacity .15s, transform .15s; }
     .hcard:hover .fab, .tile:hover .fab{ opacity:1; transform:translateY(0); }
+    .hcard, .tile{ transition:transform .12s ease; }
+    .hcard:active, .tile:active{ transform:scale(.96); }
+    .hcard .cover, .tile .cover{ transition:transform .18s ease, box-shadow .18s ease; }
+    .hcard:hover .cover, .tile:hover .cover{ transform:translateY(-2px); box-shadow:0 12px 26px rgba(0,0,0,.4); }
     .fab .ms{ font-size:22px; }
 
     /* Grids (see-all pages) */
@@ -137,9 +141,21 @@
     .track .dl{ flex:none; width:38px; height:38px; border-radius:999px; border:none; background:transparent; color:var(--muted); cursor:pointer; display:grid; place-items:center; }
     .track .dl:hover{ color:#fff; background:var(--grad); } .track .dl .ms{ font-size:20px; }
 
-    .empty{ color:var(--muted); padding:40px 18px; text-align:center; }
+    .empty{ color:var(--muted); padding:44px 22px; text-align:center; line-height:1.6; }
     .spinner{ display:inline-block; width:16px; height:16px; border:2px solid var(--muted); border-top-color:transparent; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-3px; margin-right:8px; }
     @keyframes spin{ to{ transform:rotate(360deg); } }
+    /* Loading skeletons (shimmer) */
+    .skel{ position:relative; overflow:hidden; background:var(--surface-2); border-radius:12px; }
+    .skel::after{ content:""; position:absolute; inset:0; transform:translateX(-100%);
+      background:linear-gradient(90deg,transparent,rgba(255,255,255,.07),transparent); animation:shim 1.35s infinite; }
+    :root[data-theme="light"] .skel::after{ background:linear-gradient(90deg,transparent,rgba(0,0,0,.05),transparent); }
+    @keyframes shim{ 100%{ transform:translateX(100%); } }
+    .sk-card{ width:150px; flex:0 0 auto; }
+    .sk-cover{ width:100%; aspect-ratio:1/1; border-radius:14px; }
+    .sk-line{ height:11px; border-radius:6px; margin-top:9px; } .sk-line.sm{ width:58%; }
+    /* Image fade-in over the gradient placeholder; broken images just fall back */
+    .cvimg{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity .4s ease; }
+    .cvimg.on{ opacity:1; }
     #status{ min-height:18px; font-size:.9rem; margin:6px 18px; }
     .ok{ color:var(--ok); } .err{ color:var(--err); } .muted{ color:var(--muted); }
 
@@ -414,9 +430,22 @@
     function setView(h){ $("view").innerHTML=h; window.scrollTo({top:0,behavior:"smooth"}); }
 
     function coverHtml(name,opts){ opts=opts||{}; var cls="cover"+(opts.round?" round":""); var url=imgUrl(opts.img);
-      if(url){ return '<div class="'+cls+'" style="background-image:url(\''+esc(url)+'\');background-size:cover;background-position:center;background-color:#161627">'+(opts.fab?'<div class="fab">'+ic("play_arrow")+'</div>':'')+'</div>'; }
+      var fab=opts.fab?'<div class="fab">'+ic("play_arrow")+'</div>':'';
       var inner=opts.round?'<span class="ini">'+esc(ini(name))+'</span>':'<span class="disc"></span>';
-      return '<div class="'+cls+'" style="background:'+grad(name)+'">'+inner+(opts.fab?'<div class="fab">'+ic("play_arrow")+'</div>':'')+'</div>'; }
+      // The gradient + initial/disc show first; the real cover fades in over it
+      // when it loads, and a broken image just removes itself (gradient stays).
+      var img=url?'<img class="cvimg" src="'+esc(url)+'" alt="" loading="lazy" onload="this.classList.add(\'on\')" onerror="this.remove()" />':'';
+      return '<div class="'+cls+'" style="background:'+grad(name)+'">'+inner+img+fab+'</div>'; }
+
+    // Shimmer skeletons shown while content loads (nicer than a bare spinner).
+    function skCard(){ return '<div class="sk-card"><div class="skel sk-cover"></div><div class="skel sk-line"></div><div class="skel sk-line sm"></div></div>'; }
+    function skRow(n){ var s=""; for(var i=0;i<(n||6);i++) s+=skCard(); return '<div class="hrow">'+s+'</div>'; }
+    function skGrid(n){ var s=""; for(var i=0;i<(n||9);i++) s+='<div class="tile"><div class="skel sk-cover"></div><div class="skel sk-line"></div><div class="skel sk-line sm"></div></div>'; return '<div class="grid albums">'+s+'</div>'; }
+    function skSec(title,n){ return '<div class="sec">'+secHead(title)+skRow(n)+'</div>'; }
+    function skHome(){ return '<div class="sec" style="margin-top:12px"><div class="skel" style="height:150px;border-radius:16px;margin:0 18px"></div></div>'+skSec("New Releases")+skSec("Popular this month"); }
+    function skTiles(n){ var s=""; for(var i=0;i<(n||9);i++) s+='<div class="tile"><div class="skel sk-cover"></div><div class="skel sk-line"></div><div class="skel sk-line sm"></div></div>'; return s; }
+    function skDetail(){ return '<div class="hero" style="margin-top:8px"><div class="skel" style="width:150px;height:150px;border-radius:16px;flex:none"></div><div style="flex:1;min-width:160px"><div class="skel sk-line" style="width:40%;height:9px"></div><div class="skel sk-line" style="width:75%;height:22px;margin-top:12px"></div><div class="skel sk-line sm" style="margin-top:10px"></div></div></div>'+
+      '<div style="margin:6px 18px">'+function(){ var r=""; for(var i=0;i<7;i++) r+='<div class="skel sk-line" style="height:40px;margin-top:10px;border-radius:12px"></div>'; return r; }()+'</div>'; }
 
     function post(path,payload){
       return fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload||{})})
@@ -519,7 +548,7 @@
       if((m=url.match(/playlist[s]?[\/=](\d+)/i))){ openPlaylist(+m[1]); return; }
       if(/^https?:/i.test(url)){ window.open(url,"_blank"); } }
     function home(){
-      loading("Loading…");
+      setStatus(""); setView(skHome());
       var pBan=gql("query { banners(take: 15, orderBy: [{ index: asc }]) { id enName heName enImage heImage url index platform } }").then(function(d){return d.banners||[];}).catch(function(){return [];});
       var pNew=post("/api/new",{}).then(function(d){return d.albums||[];}).catch(function(){return [];});
       var pPop=gql("query { getMostPlayed(input: { type: ALBUMS, period: MONTH, limit: 12 }) { albumsWithEntities { plays album { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } } }").then(function(d){ return (((d.getMostPlayed||{}).albumsWithEntities)||[]).map(function(x){return x.album;}).filter(Boolean); }).catch(function(){return [];});
@@ -580,7 +609,7 @@
         var ids=albums.map(function(a){return a.id;}).join(",");
         if(ids!==_newIds){ row.innerHTML=newRowHtml(albums); hydrateIcons(); }
       }).catch(function(){}); }
-    function openCategory(id){ saveRoute("category",id); loading("Loading…");
+    function openCategory(id){ saveRoute("category",id); setStatus(""); setView(secHead("Category")+'<div class="grid albums">'+skTiles(6)+'</div>');
       gql("query { category(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
         var g=d.category; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=function(){ go("home"); };
         var head='<div class="back" onclick="go(\'home\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead(g?genName(g):"Category");
@@ -652,7 +681,7 @@
         setView(secHead("Genres")+'<div class="chips">'+gs.map(function(g){ return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div>');
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
-    function openGenre(id){ saveRoute("genre",id); loading("Loading…");
+    function openGenre(id){ saveRoute("genre",id); setStatus(""); setView(secHead("Genre")+'<div class="grid albums">'+skTiles(6)+'</div>');
       gql("query { genre(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
         var g=d.genre; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=browseGenres;
         var head='<div class="back" onclick="browseGenres()">'+ic("arrow_back_ios_new")+'Genres</div>'+secHead(g?genName(g):"Genre");
@@ -662,7 +691,7 @@
     }
 
     // ---------- Playlists ----------
-    function browsePlaylists(){ loading("Loading playlists…");
+    function browsePlaylists(){ setStatus(""); setView(secHead("Playlists")+'<div class="grid albums">'+skTiles(6)+'</div>');
       gql("query { playlists(take: 300) { id name enName heName image cdnImage } }").then(function(d){ var ps=d.playlists||[]; setStatus("");
         if(!ps.length){ setView('<div class="empty">No playlists.</div>'); return; }
         setView(secHead("Playlists")+'<div class="grid albums">'+ps.map(function(p){ var nm=plName(p);
@@ -682,7 +711,7 @@
     var _albPage={skip:0,take:30,loading:false,end:false};
     function browseAlbums(){
       _albPage={skip:0,take:30,loading:false,end:false};
-      setView(secHead("Albums")+'<p class="muted" style="margin:-4px 18px 10px">All albums, newest first — old and new together.</p><div id="albGrid" class="grid albums"></div><div id="albMore" style="text-align:center;padding:18px"></div>');
+      setView(secHead("Albums")+'<p class="muted" style="margin:-4px 18px 10px">All albums, newest first — old and new together.</p><div id="albGrid" class="grid albums">'+skTiles(9)+'</div><div id="albMore" style="text-align:center;padding:18px"></div>');
       loadMoreAlbums();
     }
     function loadMoreAlbums(){
@@ -691,7 +720,7 @@
       post("/api/albums",{skip:_albPage.skip,take:_albPage.take}).then(function(d){
         var got=d.albums||[]; window._albums=window._albums||{};
         got.forEach(function(al){ window._albums[al.id]=al; });
-        var grid=$("albGrid"); if(grid) grid.insertAdjacentHTML("beforeend", got.map(function(al){ return albumTile(al, artNames(al.artists)); }).join(""));
+        var grid=$("albGrid"); if(grid){ if(_albPage.skip===0) grid.innerHTML=""; grid.insertAdjacentHTML("beforeend", got.map(function(al){ return albumTile(al, artNames(al.artists)); }).join("")); }
         _albPage.skip+=got.length; _albPage.loading=false;
         if(got.length<_albPage.take){ _albPage.end=true; if(more) more.innerHTML=(_albPage.skip?'<span class="muted">That\'s everything ('+_albPage.skip+' albums).</span>':'<span class="empty">No albums.</span>'); }
         else if(more){ more.innerHTML='<button class="btn ghost" onclick="loadMoreAlbums()">Load more</button>'; }
@@ -704,7 +733,7 @@
       setView(secHead("Artists")+'<div class="grid artists">'+sorted.map(artistTile).join("")+'</div>'+(artists.length>600?'<div class="empty">Showing 600 of '+artists.length+'. Use Search for a specific artist.</div>':''));
     }); }
 
-    function openArtist(id){ saveRoute("artist",id); loading("Loading…");
+    function openArtist(id){ saveRoute("artist",id); setStatus(""); setView(skDetail());
       post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; setStatus(""); var anm=a?(pick(a.enName,a.heName)||"Artist"):"Artist"; var aalt=a?((SET.lang==="he")?(a.enName||""):(a.heName||"")):""; window._curArtist=anm;
         var abio=a?(a.bio||pick(a.enDesc,a.heDesc)||""):"";
         var head='<div class="back" onclick="go(\'home\')">'+ic("arrow_back_ios_new")+'Back</div>'+
@@ -718,7 +747,7 @@
     }
 
     // ---------- Album ----------
-    function openAlbum(id){ saveRoute("album",id); loading("Loading album…");
+    function openAlbum(id){ saveRoute("album",id); setStatus(""); setView(skDetail());
       gql("query { album(where:{id:"+Number(id)+"}) { id enName heName images { cdnMedium cdnLarge medium large } artists { enName heName image } tracks { id enName heName file duration trackNumber } } }").then(function(d){
         var al=d.album; setStatus(""); if(!al){ setView('<div class="empty">Album not found.</div>'); return; }
         window._albums=window._albums||{}; window._albums[id]=al; renderAlbum(id, al);
