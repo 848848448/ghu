@@ -1849,8 +1849,8 @@ const PAGE = `<!DOCTYPE html>
 
     // ---------- App settings (saved on this device) ----------
     var SET_KEY="zing_settings";
-    function loadSettings(){ var d={lang:"en",theme:"dark",autoplay:true};
-      try{ var o=JSON.parse(localStorage.getItem(SET_KEY)||"null"); if(o){ if(o.lang==="he")d.lang="he"; if(o.theme==="light")d.theme="light"; if(o.autoplay===false)d.autoplay=false; } }catch(e){}
+    function loadSettings(){ var d={lang:"en",theme:"dark",autoplay:true,radio:true};
+      try{ var o=JSON.parse(localStorage.getItem(SET_KEY)||"null"); if(o){ if(o.lang==="he")d.lang="he"; if(o.theme==="light")d.theme="light"; if(o.autoplay===false)d.autoplay=false; if(o.radio===false)d.radio=false; } }catch(e){}
       return d; }
     var SET=loadSettings();
     function saveSettings(){ try{ localStorage.setItem(SET_KEY, JSON.stringify(SET)); }catch(e){} }
@@ -1932,6 +1932,8 @@ const PAGE = `<!DOCTYPE html>
       graphic_eq:"M7 18h2V6H7v12zm4 4h2V2h-2v20zm-8-8h2v-4H3v4zm12 4h2V6h-2v12zm4-8v4h2v-4h-2z",
       queue_music:"M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z",
       bedtime:"M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
+      more_vert:"M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
+      playlist_add:"M14 10H2v2h12v-2zm0-4H2v2h12V6zM2 16h8v-2H2v2zm19-6-1.41-1.41L16 12.17V4h-2v8.17l-3.59-3.58L9 10l5 5 5-5z",
       download:"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
       arrow_back_ios_new:"M17.77 3.77 16 2 6 12l10 10 1.77-1.77L9.54 12z",
       close:"M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
@@ -2122,6 +2124,11 @@ const PAGE = `<!DOCTYPE html>
           html+='<div class="sec">'+secHead("Liked songs", null, "openLiked()")+'<div class="hrow">'+liked.slice(0,12).map(function(t,i){
             return '<div class="hcard" onclick="playLiked('+i+')">'+coverHtml(t.title,{img:t.coverImg,fab:true})+'<div class="c-name">'+esc(t.title)+'</div><div class="c-sub">'+esc(t.artist||"")+'</div></div>'; }).join("")+'</div></div>';
         }
+        var mypl=getPlaylists();
+        if(mypl.length){
+          html+='<div class="sec">'+secHead("Your playlists", null, "openMyPlaylists()")+'<div class="hrow">'+mypl.slice(0,12).map(function(p){
+            return '<div class="hcard" onclick="openMyPlaylist(\\''+p.id+'\\')"><div class="cover" style="background:'+grad(p.name)+';display:grid;place-items:center;color:#fff">'+ic("queue_music")+'</div><div class="c-name">'+esc(p.name)+'</div><div class="c-sub">'+p.tracks.length+' songs</div></div>'; }).join("")+'</div></div>';
+        }
         if(albums.length && feat("albums")){
           html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow" id="newRow">'+newRowHtml(albums)+'</div></div>';
         }
@@ -2308,9 +2315,9 @@ const PAGE = `<!DOCTYPE html>
     function renderAlbum(id, al){
       var tracks=al.tracks||[]; var artistName=(al.artists&&al.artists.length)?artNames(al.artists):(window._curArtist||"");
       var back='<div class="back" onclick="'+(window._albumBack?'window._albumBack()':'go(\\'home\\')')+'">'+ic("arrow_back_ios_new")+'Back</div>';
-      var rows=tracks.map(function(t,i){ return '<div class="track" id="trk'+t.id+'" onclick="playAlbum('+id+','+i+')"><div class="num">'+(t.trackNumber||i+1)+'</div>'+
-        '<div class="tk">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
-        dlBtn(t.id,t.file)+'</div>'; }).join("");
+      var rows=tracks.map(function(t,i){ return '<div class="track" id="trk'+t.id+'"><div class="num" onclick="playAlbum('+id+','+i+')">'+(t.trackNumber||i+1)+'</div>'+
+        '<div class="tk" onclick="playAlbum('+id+','+i+')">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
+        dlBtn(t.id,t.file)+'<button class="np-btn" title="More" onclick="songMenuAlbum('+id+','+i+')">'+ic("more_vert")+'</button></div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(albName(al),{img:albImg(al)})+'<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2><div class="sub">'+tracks.length+' tracks</div>'+
         '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((dlAllowed()&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
         (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
@@ -2365,7 +2372,16 @@ const PAGE = `<!DOCTYPE html>
     function nextInOrder(){ var pos=_order.indexOf(qi); var np=pos+1;
       if(np>=_order.length){ if(_repeat==="all"){ if(_shuffle) buildOrder(_order.length?_order[0]:0); return _order.length?_order[0]:-1; } return -1; }
       return _order[np]; }
-    function nextTrack(){ if(!queue.length) return; if(_repeat==="one"){ playIndex(qi); return; } var n=nextInOrder(); if(n>=0) playIndex(n); }
+    function nextTrack(){ if(!queue.length) return; if(_repeat==="one"){ playIndex(qi); return; } var n=nextInOrder(); if(n>=0){ playIndex(n); return; } if(_repeat==="off" && SET.radio) extendRadio(); }
+    // Endless radio: when the queue runs out, keep going with similar songs.
+    function extendRadio(){ var t=queue[qi]; if(!t){ return; }
+      gql("query { relatedTracks(trackId:"+Number(t.id)+", take: 20) { track { id enName heName file duration artists { enName heName } album { images { cdnSmall cdnMedium } } } } }").then(function(d){
+        var list=(d.relatedTracks||[]).map(function(x){return x.track;}).filter(Boolean).filter(function(tk){ return !queue.some(function(q){ return q.id===tk.id; }); });
+        if(!list.length){ toast("End of the queue."); return; }
+        var startIdx=queue.length;
+        list.forEach(function(tk){ queue.push(normTrack({id:tk.id,file:tk.file||"",title:trackName(tk),artist:(tk.artists&&tk.artists.length?artNames(tk.artists):""),coverImg:(tk.album&&tk.album.images)?(tk.album.images.cdnSmall||tk.album.images.cdnMedium):null})); _order.push(queue.length-1); });
+        toast("Radio — more like this ♫"); playIndex(startIdx);
+      }).catch(function(){ toast("End of the queue."); }); }
     function prevTrack(){ if(audio.currentTime>3){ audio.currentTime=0; return; } if(!queue.length) return;
       var pos=_order.indexOf(qi); var pp=pos-1; if(pp<0){ if(_repeat==="all") pp=_order.length-1; else { audio.currentTime=0; return; } } playIndex(_order[pp]); }
     function toggleShuffle(){ _shuffle=!_shuffle; try{ localStorage.setItem("zing_shuffle",_shuffle?"1":"0"); }catch(e){} if(queue.length) buildOrder(qi); syncSheet(); toast(_shuffle?"Shuffle on":"Shuffle off"); }
@@ -2432,6 +2448,58 @@ const PAGE = `<!DOCTYPE html>
       else { var mins=parseInt(v,10); _sleepAt=Date.now()+mins*60000; _sleepTimer=setTimeout(function(){ audio.pause(); _sleepAt=0; toast("Sleep timer — paused"); syncSheet(); }, mins*60000); toast("Sleep timer set for "+mins+" min"); }
       closeOverlay(true); syncSheet(); }
 
+    // ---------- Queue actions: play next / add to queue ----------
+    function normTrack(t){ return {id:t.id, file:t.file||"", title:t.title||trackName(t)||"", artist:t.artist||(t.artists&&t.artists.length?artNames(t.artists):""), cover:t.cover||t.title||"", coverImg:t.coverImg||((t.album&&t.album.images)?(t.album.images.cdnSmall||t.album.images.cdnMedium):null)||null}; }
+    function playNext(t){ if(!t) return; if(!queue.length){ startQueue([normTrack(t)],0); toast("Playing"); return; }
+      queue.push(normTrack(t)); var idx=queue.length-1; var pos=_order.indexOf(qi); _order.splice(pos+1,0,idx); toast("Playing next ▸"); syncSheet(); }
+    function addToQueue(t){ if(!t) return; if(!queue.length){ startQueue([normTrack(t)],0); toast("Playing"); return; }
+      queue.push(normTrack(t)); _order.push(queue.length-1); toast("Added to queue"); syncSheet(); }
+
+    // ---------- Your own playlists (kept on this device) ----------
+    function getPlaylists(){ try{ var l=JSON.parse(localStorage.getItem("zing_playlists")||"[]"); return Array.isArray(l)?l:[]; }catch(e){ return []; } }
+    function savePlaylists(l){ try{ localStorage.setItem("zing_playlists",JSON.stringify(l)); }catch(e){} }
+    function createPlaylist(name){ name=(name||"").trim(); if(!name) return null; var l=getPlaylists(); var pl={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),name:name.slice(0,60),tracks:[]}; l.unshift(pl); savePlaylists(l); return pl; }
+    function addToPlaylist(plId,t){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl||!t) return; if(pl.tracks.some(function(x){return x.id===t.id;})){ toast("Already in “"+pl.name+"”"); return; } pl.tracks.push(normTrack(t)); savePlaylists(l); toast("Added to “"+pl.name+"” ♪"); }
+    function removeFromPlaylist(plId,trackId){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl) return; pl.tracks=pl.tracks.filter(function(x){return x.id!==trackId;}); savePlaylists(l); openMyPlaylist(plId); }
+    function deletePlaylist(plId){ if(!confirm("Delete this playlist?")) return; savePlaylists(getPlaylists().filter(function(p){return p.id!==plId;})); openMyPlaylists(); }
+    function newPlaylistPrompt(){ var n=prompt("Playlist name:"); if(n===null) return; var pl=createPlaylist(n); if(pl){ toast("Playlist created"); openMyPlaylist(pl.id); } }
+    function openMyPlaylists(){ var l=getPlaylists();
+      var head='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b style="font-size:1.05rem">Your playlists</b><button class="chip" onclick="newPlaylistPrompt()">'+ic("person_add")+' New</button></div>';
+      if(!l.length){ overlay("Your playlists", head+'<div class="empty">No playlists yet. Make one, then add songs from the ⋮ menu or the player.</div>'); return; }
+      var rows=l.map(function(p){ return '<div class="track" onclick="openMyPlaylist(\\''+p.id+'\\')"><div class="np-mini" style="background:'+grad(p.name)+';display:grid;place-items:center;color:#fff">'+ic("queue_music")+'</div><div class="tk">'+esc(p.name)+'<div class="sub">'+p.tracks.length+' songs</div></div>'+ic("chevron_right")+'</div>'; }).join("");
+      overlay("Your playlists", head+'<div class="tracks">'+rows+'</div>'); }
+    function openMyPlaylist(plId){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl){ openMyPlaylists(); return; }
+      var head='<div class="back" onclick="openMyPlaylists()">'+ic("arrow_back_ios_new")+'Playlists</div>'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 10px"><div><div style="font-weight:800;font-size:1.15rem">'+esc(pl.name)+'</div><div class="muted" style="font-size:.85rem">'+pl.tracks.length+' songs</div></div>'+
+        (pl.tracks.length?'<button class="btn sm" onclick="playMyPlaylist(\\''+pl.id+'\\',0)">'+ic("play_arrow")+' Play</button>':'')+'</div>';
+      var rows=pl.tracks.length? pl.tracks.map(function(t,i){ return '<div class="track"><div class="np-mini" onclick="playMyPlaylist(\\''+pl.id+'\\','+i+')" style="background:'+(imgUrl(t.coverImg)?("center/cover url('"+esc(imgUrl(t.coverImg))+"')"):grad(t.title))+'"></div>'+
+        '<div class="tk" onclick="playMyPlaylist(\\''+pl.id+'\\','+i+')">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div>'+
+        '<button class="trash" title="Remove" onclick="removeFromPlaylist(\\''+pl.id+'\\','+t.id+')">'+ic("close")+'</button></div>'; }).join("") : '<div class="empty">No songs yet. Add from the ⋮ menu on a song or the player.</div>';
+      overlay("Playlist", head+'<div class="tracks">'+rows+'</div>'+'<div style="margin-top:14px"><button class="chip" onclick="deletePlaylist(\\''+pl.id+'\\')">'+ic("delete")+' Delete playlist</button></div>'); }
+    function playMyPlaylist(plId,i){ var pl=getPlaylists().filter(function(p){return p.id===plId;})[0]; if(!pl||!pl.tracks.length) return; startQueue(pl.tracks.map(normTrack), i); closeOverlay(true); }
+    // Choose which playlist to add a song to (or make a new one).
+    function choosePlaylist(t){ if(!t) return; window._addTrack=normTrack(t); var l=getPlaylists();
+      var rows=l.map(function(p){ return '<div class="track" onclick="addToPlaylistUI(\\''+p.id+'\\')"><div class="np-mini" style="background:'+grad(p.name)+';display:grid;place-items:center;color:#fff">'+ic("queue_music")+'</div><div class="tk">'+esc(p.name)+'<div class="sub">'+p.tracks.length+' songs</div></div></div>'; }).join("");
+      overlay("Add to playlist", '<button class="btn" style="width:100%;justify-content:center;margin-bottom:12px" onclick="newPlaylistAdd()">'+ic("person_add")+' New playlist</button>'+(l.length?('<div class="tracks">'+rows+'</div>'):'<div class="empty">No playlists yet — make one above.</div>')); }
+    function addToPlaylistUI(plId){ addToPlaylist(plId, window._addTrack); closeOverlay(true); }
+    function newPlaylistAdd(){ var n=prompt("Playlist name:"); if(n===null) return; var pl=createPlaylist(n); if(pl&&window._addTrack){ addToPlaylist(pl.id, window._addTrack); } closeOverlay(true); }
+
+    // ---------- Song menu (⋮): like, add to playlist, play next, add to queue ----------
+    function songMenu(t){ if(!t) return; window._menuTrack=normTrack(t); var liked=isLiked(t.id);
+      var item=function(icn,label,fn){ return '<div class="track" onclick="'+fn+'"><div class="np-btn">'+ic(icn)+'</div><div class="tk">'+esc(label)+'</div></div>'; };
+      overlay(t.title||"Song", '<div class="muted" style="margin:-4px 0 10px">'+esc(t.artist||"")+'</div><div class="tracks">'+
+        item(liked?"favorite":"favorite_border", liked?"Remove from Liked":"Add to Liked", "menuLike()")+
+        item("queue_music","Add to playlist","menuPlaylist()")+
+        item("play_arrow","Play next","menuPlayNext()")+
+        item("queue_music","Add to queue","menuAddQueue()")+
+        '</div>'); }
+    function menuLike(){ toggleLike(window._menuTrack); closeOverlay(true); }
+    function menuPlaylist(){ var t=window._menuTrack; closeOverlay(true); choosePlaylist(t); }
+    function menuPlayNext(){ playNext(window._menuTrack); closeOverlay(true); }
+    function menuAddQueue(){ addToQueue(window._menuTrack); closeOverlay(true); }
+    function songMenuAlbum(albId, idx){ var al=(window._albums||{})[albId]; if(!al) return; var t=(al.tracks||[])[idx]; if(!t) return;
+      songMenu({id:t.id,file:t.file||"",title:trackName(t),artist:(al.artists&&al.artists.length?artNames(al.artists):(window._curArtist||"")),coverImg:albImg(al)}); }
+
     // ---------- Lyrics ----------
     function showLyrics(){ var t=queue[qi]; if(!t){ return; } toast("Loading lyrics…");
       gql("query { track(where:{id:"+Number(t.id)+"}) { enName heName heLyrics enLyrics } }").then(function(d){
@@ -2455,7 +2523,7 @@ const PAGE = `<!DOCTYPE html>
           '<button class="np-c" title="Next" onclick="nextTrack()">'+ic("skip_next")+'</button>'+
           '<button class="np-c" id="shRepeat" title="Repeat" onclick="cycleRepeat()">'+ic("repeat")+'</button>'+
         '</div>'+
-        '<div class="np-actions"><button class="chip" id="shLike" onclick="likeCurrent()">'+ic(isLiked(t.id)?"favorite":"favorite_border")+' Like</button><button class="chip" onclick="openSleep()">'+ic("bedtime")+' Sleep</button><button class="chip" onclick="dlCurrent()">'+ic("download")+' Download</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'+
+        '<div class="np-actions"><button class="chip" id="shLike" onclick="likeCurrent()">'+ic(isLiked(t.id)?"favorite":"favorite_border")+' Like</button><button class="chip" onclick="choosePlaylist(queue[qi])">'+ic("playlist_add")+' Playlist</button><button class="chip" onclick="openSleep()">'+ic("bedtime")+' Sleep</button><button class="chip" onclick="dlCurrent()">'+ic("download")+' Download</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'+
         '<div class="seg np-seg" style="margin:4px 0 12px"><button id="npTQ" onclick="npTab(\\'queue\\')">Up next</button><button id="npTL" onclick="npTab(\\'lyrics\\')">Lyrics</button><button id="npTS" onclick="npTab(\\'similar\\')">Similar</button></div>'+
         '<div id="npExtra"></div>');
       syncSheet(); npTab(_npTab);
@@ -2508,7 +2576,8 @@ const PAGE = `<!DOCTYPE html>
       Promise.all([pArt,pAlb]).then(function(res){ setStatus("");
         var arts=res[0], albs=res[1];
         if(arts===null&&albs===null){ setView('<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div><div class="empty">Couldn’t load your library — your login may not be connected for saving yet. Tell the developer what this says so it can be fixed.</div>'); return; }
-        var html='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead("My Music"); var any=false;
+        var html='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead("My Music")+
+          '<div class="chips" style="margin-bottom:6px"><button class="chip" onclick="openMyPlaylists()">'+ic("queue_music")+' Your playlists</button><button class="chip" onclick="openLiked()">'+ic("favorite")+' Liked songs</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'; var any=false;
         if(albs&&albs.length){ any=true; window._albums=window._albums||{}; albs.forEach(function(a){window._albums[a.id]=a;}); html+='<div class="sec">'+secHead("Saved Albums")+'<div class="grid albums">'+albs.map(function(al){return albumTile(al,artNames(al.artists));}).join("")+'</div></div>'; }
         if(arts&&arts.length){ any=true; html+='<div class="sec">'+secHead("Saved Artists")+'<div class="grid artists">'+arts.map(artistTile).join("")+'</div></div>'; }
         if(!any){ html+='<div class="empty">Nothing saved yet. Tap the ♥ on an album or artist to save it here.</div>'; }
@@ -2536,14 +2605,26 @@ const PAGE = `<!DOCTYPE html>
     function setLang(v){ SET.lang=(v==="he"?"he":"en"); saveSettings(); segMark("segLang",SET.lang); _dirtyView=true; }
     function setTheme(v){ SET.theme=(v==="light"?"light":"dark"); saveSettings(); applyTheme(); segMark("segTheme",SET.theme); }
     function setAutoplay(v){ SET.autoplay=(v==="on"); saveSettings(); segMark("segAuto",v); }
+    function setRadio(v){ SET.radio=(v==="on"); saveSettings(); segMark("segRadio",v); }
+    function clearData(key,label){ if(!confirm("Clear "+label+"?")) return; try{ localStorage.removeItem(key); }catch(e){} toast(label+" cleared"); }
     function signOut(){ location.href="/api/logout"; }
     function settingsHtml(){
-      var auto=SET.autoplay?"on":"off";
+      var auto=SET.autoplay?"on":"off"; var radio=SET.radio?"on":"off";
       return ''+
         '<div class="set-sec"><h3>App</h3><div class="card">'+
           row("Language","Show names in English or Hebrew", segEl("segLang",[["en","English"],["he","עברית"]],SET.lang,"setLang"))+
           row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
           row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
+          row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Your library</h3><div class="card">'+
+          row("Your playlists","Playlists you\\'ve made", ic("chevron_right"), "openMyPlaylists()")+
+          row("Liked songs","Songs you\\'ve ♥\\'d", ic("chevron_right"), "openLiked()")+
+          row("Recently played","Your play history", ic("chevron_right"), "openHistory()")+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Storage on this device</h3><div class="chips" style="padding:0">'+
+          '<button class="chip" onclick="clearData(\\'zing_hist\\',\\'Recently played\\')">Clear history</button>'+
+          '<button class="chip" onclick="clearData(\\'zing_liked\\',\\'Liked songs\\')">Clear liked</button>'+
         '</div></div>'+
         (ME.user ? ('<div class="set-sec"><h3>Your account</h3><div class="card">'+
           row(esc(ME.user.name||ME.user.email), esc(ME.user.email), ic("chevron_right"), "openProfile()")+
@@ -2888,7 +2969,11 @@ const PAGE = `<!DOCTYPE html>
     window.toggleShuffle=toggleShuffle; window.cycleRepeat=cycleRepeat; window.seekTo=seekTo; window.npTab=npTab; window.jumpQueue=jumpQueue;
     window.openHistory=openHistory; window.playHistory=playHistory; window.dlFromHistory=dlFromHistory;
     window.likeCurrent=likeCurrent; window.toggleLike=toggleLike; window.openLiked=openLiked; window.playLiked=playLiked; window.unlike=unlike;
-    window.openSleep=openSleep; window.setSleep=setSleep;
+    window.openSleep=openSleep; window.setSleep=setSleep; window.setRadio=setRadio; window.clearData=clearData;
+    window.playNext=playNext; window.addToQueue=addToQueue;
+    window.openMyPlaylists=openMyPlaylists; window.openMyPlaylist=openMyPlaylist; window.playMyPlaylist=playMyPlaylist; window.newPlaylistPrompt=newPlaylistPrompt; window.deletePlaylist=deletePlaylist; window.removeFromPlaylist=removeFromPlaylist;
+    window.choosePlaylist=choosePlaylist; window.addToPlaylistUI=addToPlaylistUI; window.newPlaylistAdd=newPlaylistAdd;
+    window.songMenu=songMenu; window.songMenuAlbum=songMenuAlbum; window.menuLike=menuLike; window.menuPlaylist=menuPlaylist; window.menuPlayNext=menuPlayNext; window.menuAddQueue=menuAddQueue;
     window.browseLibrary=browseLibrary; window.saveArtist=saveArtist; window.saveAlbum=saveAlbum;
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
