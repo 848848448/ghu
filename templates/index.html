@@ -851,13 +851,17 @@
     audio.addEventListener("ended", function(){ if(_sleepEnd){ _sleepEnd=false; toast("Sleep timer — paused"); syncSheet(); return; } nextTrack(); }); // keep playing one after another
     audio.addEventListener("loadedmetadata", function(){ _dur=audio.duration||0; var d=$("shDur"); if(d) d.textContent=fmt(_dur); });
     audio.addEventListener("timeupdate", function(){ if(audio.duration){ var pct=Math.round(audio.currentTime/audio.duration*1000); $("seek").value=String(pct); var s=$("shSeek"); if(s) s.value=String(pct); var c=$("shCur"); if(c) c.textContent=fmt(audio.currentTime); } });
-    // If a track won't load: retry once (fresh request), then skip past it so the
-    // rest of the album keeps playing instead of stopping on one bad track.
+    // If a track won't load: retry once, then skip past a single bad track. But
+    // if several in a row fail, it's the music-server login — stop churning and
+    // show one clear message (pointing the owner to the setup).
+    function playbackDown(){ audio.pause();
+      if(ME.admin){ toast("Music won’t play — set the Music server login in ⚙ Settings → Admin."); }
+      else { toast("Music isn’t playing right now — please tell the owner."); } }
     audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
       if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
       _fails++; var n=nextInOrder();
-      if(_fails<queue.length && n>=0){ toast("Skipping a track that won’t play…"); playIndex(n); }
-      else { toast("Could not play this track."); }
+      if(_fails>=3 || n<0){ playbackDown(); return; } // 3 in a row ⇒ server/login problem, stop
+      toast("Skipping a track that won’t play…"); playIndex(n);
     });
     $("seek").addEventListener("input", function(){ if(audio.duration){ audio.currentTime=this.value/1000*audio.duration; } });
     function dlCurrent(){ var t=queue[qi]; if(t) downloadTrack(t.id, t.file); }
