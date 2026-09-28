@@ -1152,18 +1152,31 @@ async function fetchT(url, opts, ms) {
   } finally { clearTimeout(id); }
 }
 
-async function fetchAudio(env, trackId, extraHeaders) {
+async function fetchAudio(env, trackId, extraHeaders, file) {
   let token = await currentToken(env, false);
-  const build = (t) =>
-    env.AUDIO_API_BASE +
-    "?trackId=" + encodeURIComponent(trackId) +
-    "&token=" + encodeURIComponent(t || "");
-  let r = await fetchT(build(token), { headers: extraHeaders || {} }, 15000);
-  // On a 403, always try once more with a freshly fetched token (covers an
-  // expired token whether the login comes from secrets OR the Admin panel).
+  const base = env.AUDIO_API_BASE;
+  const tok = () => encodeURIComponent(token || "");
+  const byId = () => base + "?trackId=" + encodeURIComponent(trackId) + "&token=" + tok();
+  const byIdFile = () => base + "?trackId=" + encodeURIComponent(trackId) + "&file=" + encodeURIComponent(file || "") + "&token=" + tok();
+  const byFile = () => base + "?file=" + encodeURIComponent(file || "") + "&token=" + tok();
+  const hdrs = { headers: extraHeaders || {} };
+  let r = await fetchT(byId(), hdrs, 15000);
+  // On a 403, try once more with a freshly fetched token (covers an expired
+  // token whether the login comes from secrets OR the Admin panel).
   if (r.status === 403) {
     token = await currentToken(env, true);
-    if (token) r = await fetchT(build(token), { headers: extraHeaders || {} }, 15000);
+    if (token) r = await fetchT(byId(), hdrs, 15000);
+  }
+  // Some tracks (notably singles) can't be resolved by track id alone — retry
+  // with the file path (id+file, then file-only). Only runs when the id-only
+  // request failed, so tracks that already work are untouched.
+  if (!r.ok && r.status !== 206 && file) {
+    for (const make of [byIdFile, byFile]) {
+      try {
+        const r2 = await fetchT(make(), hdrs, 15000);
+        if (r2.ok || r2.status === 206) return r2;
+      } catch (e) { /* try the next form, else keep the original response */ }
+    }
   }
   return r;
 }
@@ -1418,11 +1431,12 @@ async function handlePlay(url, request, env) {
   }
   const trackId = (url.searchParams.get("trackId") || "").trim();
   if (!trackId) return json({ error: "Missing track id." }, 400);
+  const filePath = (url.searchParams.get("file") || "").trim();
 
   const range = request.headers.get("Range");
   let upstream;
   try {
-    upstream = await fetchAudio(env, trackId, range ? { Range: range } : {});
+    upstream = await fetchAudio(env, trackId, range ? { Range: range } : {}, filePath);
   } catch (exc) {
     return json({ error: "Playback error: " + (exc && exc.message) }, 502);
   }
@@ -1461,7 +1475,7 @@ async function handleDownload(url, env) {
 
   let upstream;
   try {
-    upstream = await fetchAudio(env, trackId, {});
+    upstream = await fetchAudio(env, trackId, {}, filePath);
   } catch (exc) {
     return json({ error: "Download error: " + (exc && exc.message) }, 502);
   }
