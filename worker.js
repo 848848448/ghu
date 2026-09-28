@@ -746,9 +746,20 @@ async function handleAdminMusic(request, env) {
   }
   if (action === "test") {
     CACHED_TOKEN = null; CACHED_EXP = 0;
+    const detail = {};
     try {
+      const cr = await musicCreds(env);
+      detail.hasEmail = !!cr.email; detail.hasToken = !!cr.token;
+      // If email/password given, attempt the login and capture the exact result.
+      if (cr.email && cr.password) {
+        const lr = await zingLogin(env);
+        detail.loginOk = !!lr.ok;
+        detail.loginError = lr.ok ? null : lr.error;
+        if (!lr.ok) detail.authMutations = await introspectAuthMutations(env);
+      }
       const tok = await currentToken(env, true);
-      if (!tok) return json({ ok: false, error: "No login is set yet." });
+      detail.gotToken = !!tok;
+      if (!tok) return json({ ok: false, stage: "login", error: "Couldn’t get a login from the music server.", detail, has: await status() });
       // Find a real track id, then try the audio server with a 1-byte range.
       let tid = 1;
       try {
@@ -757,10 +768,11 @@ async function handleAdminMusic(request, env) {
         if (t[0] && t[0].id) tid = t[0].id;
       } catch (e) {}
       const r = await fetchAudio(env, tid, { Range: "bytes=0-0" });
-      if (r.status === 200 || r.status === 206) return json({ ok: true, status: r.status, has: await status() });
-      return json({ ok: false, status: r.status, error: r.status === 403 ? "The music server rejected the login (wrong email/password or expired token)." : ("Music server returned " + r.status + "."), has: await status() });
+      detail.audioStatus = r.status;
+      if (r.status === 200 || r.status === 206) return json({ ok: true, status: r.status, detail, has: await status() });
+      return json({ ok: false, stage: "audio", status: r.status, error: r.status === 403 ? "The music server rejected the login (wrong email/password, or Zing uses a different login)." : ("Music server returned " + r.status + "."), detail, has: await status() });
     } catch (e) {
-      return json({ ok: false, error: String((e && e.message) || e) });
+      return json({ ok: false, error: String((e && e.message) || e), detail });
     }
   }
   return json({ has: await status() });
@@ -2941,7 +2953,15 @@ const PAGE = `<!DOCTYPE html>
     function saveMusic(){ musicMsg("Saving & testing…","var(--muted)");
       post("/api/admin/music",{admin:_admPw,action:"save",email:($("mzEmail")||{}).value||"",password:($("mzPass")||{}).value||"",token:($("mzToken")||{}).value||""}).then(function(d){ renderMusicStatus(d.has); var p=$("mzPass"); if(p)p.value=""; testMusic(); }).catch(function(e){ musicMsg(e.message||"Could not save.","var(--err)"); }); }
     function testMusic(){ musicMsg("Testing the music server…","var(--muted)");
-      post("/api/admin/music",{admin:_admPw,action:"test"}).then(function(d){ if(d.has) renderMusicStatus(d.has); if(d.ok){ musicMsg("✓ Works! Music should play now.","var(--ok)"); } else { musicMsg(d.error||"Test failed.","var(--err)"); } }).catch(function(e){ musicMsg(e.message||"Test failed.","var(--err)"); }); }
+      post("/api/admin/music",{admin:_admPw,action:"test"}).then(function(d){ if(d.has) renderMusicStatus(d.has);
+        if(d.ok){ musicMsg("✓ Works! Music should play now.","var(--ok)"); }
+        else { var extra=""; var dt=d.detail||{};
+          if(dt.loginError) extra+="\\nLogin error: "+dt.loginError;
+          if(dt.audioStatus) extra+="\\nAudio server: HTTP "+dt.audioStatus;
+          if(dt.authMutations&&dt.authMutations.candidates) extra+="\\nAvailable logins: "+(dt.authMutations.candidates.join(", ")||"(none found)");
+          var msg=(d.error||"Test failed.")+extra;
+          var m=$("musicMsg"); if(m){ m.style.color="var(--err)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;margin:0;font-size:.8rem">'+esc(msg)+'</pre><button class="btn sm" style="margin-top:6px" onclick="window._copy='+JSON.stringify(JSON.stringify(msg))+';copyText(this)">Copy</button>'; }
+        } }).catch(function(e){ musicMsg(e.message||"Test failed.","var(--err)"); }); }
     function clearMusic(){ if(!confirm("Clear the saved music-server login?")) return; post("/api/admin/music",{admin:_admPw,action:"clear"}).then(function(d){ renderMusicStatus(d.has); musicMsg("Cleared.","var(--muted)"); }).catch(function(){}); }
     function statTile(n,label){ return '<div style="flex:1;background:var(--surface-2);border-radius:12px;padding:12px 6px"><div style="font-size:1.5rem;font-weight:800">'+(n||0)+'</div><div class="muted" style="font-size:.72rem">'+esc(label)+'</div></div>'; }
     function timeAgo(at){ var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
