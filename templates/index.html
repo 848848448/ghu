@@ -1099,6 +1099,7 @@
           '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="probeNew()">New releases (debug)</button>'+
+          '<button class="chip" onclick="probeAudio()">Singles (debug)</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
           '<div id="diag" style="margin-top:14px"></div></div>') : '')+
         '<div class="set-sec"><h3>Account</h3><div class="card">'+
@@ -1445,6 +1446,17 @@
         diagBox('<b>New releases (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this (or a screenshot) so I can fix which list the newest music comes from.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
       }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
     }
+    function probeAudio(){ diagBox('<span class="spinner"></span>Testing a single vs. an album on the music server…');
+      post("/api/probe/audio",{admin:_admPw}).then(function(d){ if(d.error){ diagBox("Error: "+esc(d.error)); return; }
+        function fmtT(x){ if(!x||!x.track){ return "(none found)"; } var t=x.track;
+          var lines=(t.results||[]).map(function(r){ return "    "+r.label+" → "+(r.error?("ERROR "+r.error):("HTTP "+r.status+(r.type?(" "+r.type):"")+(r.len?(" len="+r.len):""))); });
+          return x.album+"  ("+x.tracks+" tracks)\n    id="+t.id+"  file="+(t.file||"(none)")+"\n"+lines.join("\n"); }
+        var txt="SINGLE:\n"+fmtT(d.single)+"\n\nALBUM:\n"+fmtT(d.album);
+        window._copy=txt;
+        diagBox('<b>Singles (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this — it shows how a single differs from an album on the music server.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    window.probeAudio=probeAudio;
     function copyText(btn){ var t=window._copy||""; try{ navigator.clipboard.writeText(t).then(function(){btn.textContent="Copied!";},function(){fb();}); }catch(e){ fb(); }
       function fb(){ var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand("copy");}catch(e){} ta.remove(); btn.textContent="Copied!"; } }
 
