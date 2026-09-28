@@ -135,6 +135,9 @@ export default {
       if (path === "/api/probe/new" && request.method === "POST") {
         return await handleProbeNew(request, env);
       }
+      if (path === "/api/probe/audio" && request.method === "POST") {
+        return await handleProbeAudio(request, env);
+      }
       if (path === "/api/query" && request.method === "POST") {
         return await handleRawQuery(request, env);
       }
@@ -1304,6 +1307,42 @@ async function handleProbeNew(request, env) {
     }
   }
   return json({ probe: out });
+}
+
+// Owner-only diagnostic: compare how the audio server responds to a SINGLE vs.
+// an ordinary album track, across a few URL shapes, so we can see exactly what
+// singles need. Uses the current (working) token.
+async function handleProbeAudio(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.API_URL || !env.AUDIO_API_BASE) return json({ error: "Server not configured." }, 400);
+  let albums = [];
+  try {
+    const d = await graphql(env, "query { albums(take: 40, orderBy: [{ id: desc }]) { id enName heName tracks { id file } } }");
+    albums = ((d && d.data && d.data.albums) || []);
+  } catch (e) { return json({ error: "Could not read albums." }, 502); }
+  const single = albums.find((a) => (a.tracks || []).length === 1);
+  const multi = albums.find((a) => (a.tracks || []).length > 1);
+  const token = await currentToken(env, false);
+  const base = env.AUDIO_API_BASE;
+  const enc = encodeURIComponent;
+  const tryOne = async (label, u) => {
+    try { const r = await fetchT(u, { headers: { Range: "bytes=0-0" } }, 12000); return { label, status: r.status, type: r.headers.get("Content-Type"), len: r.headers.get("Content-Length") }; }
+    catch (e) { return { label, error: String((e && e.message) || e) }; }
+  };
+  const probeTrack = async (t) => {
+    if (!t) return null;
+    const id = enc(t.id), file = enc(t.file || ""), tk = enc(token || "");
+    const res = [];
+    res.push(await tryOne("id", base + "?trackId=" + id + "&token=" + tk));
+    res.push(await tryOne("id+file", base + "?trackId=" + id + "&file=" + file + "&token=" + tk));
+    res.push(await tryOne("file", base + "?file=" + file + "&token=" + tk));
+    return { id: t.id, file: t.file, hasFile: !!t.file, results: res };
+  };
+  return json({
+    single: single ? { album: single.enName || single.heName, tracks: (single.tracks || []).length, track: await probeTrack((single.tracks || [])[0]) } : null,
+    album: multi ? { album: multi.enName || multi.heName, tracks: (multi.tracks || []).length, track: await probeTrack((multi.tracks || [])[0]) } : null,
+  });
 }
 
 // Newest-added first: by id descending. On this catalog the album id increases
@@ -2773,6 +2812,7 @@ const PAGE = `<!DOCTYPE html>
           '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="probeNew()">New releases (debug)</button>'+
+          '<button class="chip" onclick="probeAudio()">Singles (debug)</button>'+
           '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
           '<div id="diag" style="margin-top:14px"></div></div>') : '')+
         '<div class="set-sec"><h3>Account</h3><div class="card">'+
@@ -3119,6 +3159,17 @@ const PAGE = `<!DOCTYPE html>
         diagBox('<b>New releases (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this (or a screenshot) so I can fix which list the newest music comes from.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
       }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
     }
+    function probeAudio(){ diagBox('<span class="spinner"></span>Testing a single vs. an album on the music server…');
+      post("/api/probe/audio",{admin:_admPw}).then(function(d){ if(d.error){ diagBox("Error: "+esc(d.error)); return; }
+        function fmtT(x){ if(!x||!x.track){ return "(none found)"; } var t=x.track;
+          var lines=(t.results||[]).map(function(r){ return "    "+r.label+" → "+(r.error?("ERROR "+r.error):("HTTP "+r.status+(r.type?(" "+r.type):"")+(r.len?(" len="+r.len):""))); });
+          return x.album+"  ("+x.tracks+" tracks)\\n    id="+t.id+"  file="+(t.file||"(none)")+"\\n"+lines.join("\\n"); }
+        var txt="SINGLE:\\n"+fmtT(d.single)+"\\n\\nALBUM:\\n"+fmtT(d.album);
+        window._copy=txt;
+        diagBox('<b>Singles (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this — it shows how a single differs from an album on the music server.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    window.probeAudio=probeAudio;
     function copyText(btn){ var t=window._copy||""; try{ navigator.clipboard.writeText(t).then(function(){btn.textContent="Copied!";},function(){fb();}); }catch(e){ fb(); }
       function fb(){ var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand("copy");}catch(e){} ta.remove(); btn.textContent="Copied!"; } }
 
