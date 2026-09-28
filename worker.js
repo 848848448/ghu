@@ -37,13 +37,14 @@ export default {
         return html(authed ? PAGE : LOGIN);
       }
       if (path === "/api/status") {
+        const auth = await hasAuthNow(env);
         return json({
           apiUrl: !!env.API_URL,
           audioBase: !!env.AUDIO_API_BASE,
-          token: hasAuth(env),
+          token: auth,
           autoLogin: canFirebase(env) || canAutoLogin(env),
           firebase: canFirebase(env),
-          configured: !!(env.API_URL && env.AUDIO_API_BASE && hasAuth(env)),
+          configured: !!(env.API_URL && env.AUDIO_API_BASE && auth),
           locked: locked,
           authed: authed,
           kv: hasStore(env),
@@ -106,6 +107,9 @@ export default {
       }
       if (path === "/api/admin/stats" && request.method === "POST") {
         return await handleAdminStats(request, env);
+      }
+      if (path === "/api/admin/music" && request.method === "POST") {
+        return await handleAdminMusic(request, env);
       }
       if (path === "/api/artists" && request.method === "POST") {
         return await handleArtists(env);
@@ -709,6 +713,59 @@ async function handleAdminStats(request, env) {
   return json(out);
 }
 
+// Admin: set the music-server login from inside the app (stored in D1), so
+// playback keeps working without touching Cloudflare. Never returns the
+// password/token — only whether they are set.
+async function handleAdminMusic(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "This needs a D1 database." }, 400);
+  const action = (b.action || "status").toString();
+  const status = async () => {
+    const c = await getMusicCreds(env);
+    return {
+      token: !!(c.token || env.USER_TOKEN),
+      autologin: !!((c.email && c.password) || (env.ZING_EMAIL && env.ZING_PASSWORD)),
+      email: c.email || env.ZING_EMAIL || "",
+    };
+  };
+  if (action === "save") {
+    const cur = await getMusicCreds(env);
+    const obj = Object.assign({}, cur);
+    if (typeof b.email === "string") obj.email = b.email.trim();
+    if (typeof b.password === "string" && b.password) obj.password = b.password; // keep old if blank
+    if (typeof b.token === "string" && b.token.trim()) obj.token = b.token.trim();
+    await saveMusicCreds(env, obj);
+    CACHED_TOKEN = null; CACHED_EXP = 0;
+    return json({ ok: true, has: await status() });
+  }
+  if (action === "clear") {
+    await saveMusicCreds(env, {});
+    CACHED_TOKEN = null; CACHED_EXP = 0;
+    return json({ ok: true, has: await status() });
+  }
+  if (action === "test") {
+    CACHED_TOKEN = null; CACHED_EXP = 0;
+    try {
+      const tok = await currentToken(env, true);
+      if (!tok) return json({ ok: false, error: "No login is set yet." });
+      // Find a real track id, then try the audio server with a 1-byte range.
+      let tid = 1;
+      try {
+        const d = await graphql(env, "query { albums(take: 1) { tracks { id } } }");
+        const t = (((d && d.data && d.data.albums) || [])[0] || {}).tracks || [];
+        if (t[0] && t[0].id) tid = t[0].id;
+      } catch (e) {}
+      const r = await fetchAudio(env, tid, { Range: "bytes=0-0" });
+      if (r.status === 200 || r.status === 206) return json({ ok: true, status: r.status, has: await status() });
+      return json({ ok: false, status: r.status, error: r.status === 403 ? "The music server rejected the login (wrong email/password or expired token)." : ("Music server returned " + r.status + "."), has: await status() });
+    } catch (e) {
+      return json({ ok: false, error: String((e && e.message) || e) });
+    }
+  }
+  return json({ has: await status() });
+}
+
 // --------------------------------------------------------------------------- //
 // Auto-login (optional): when ZING_EMAIL + ZING_PASSWORD are set, the Worker
 // logs in itself to get a fresh session token, so the token never has to be
@@ -761,15 +818,49 @@ async function firebaseRefresh(env) {
   }
 }
 
+// Music-server login can be set in the Admin panel (stored in D1) instead of
+// only via Cloudflare secrets, so the owner can fix it from their phone. The
+// in-app values take precedence over the secrets. These are never sent to the
+// browser (only booleans about whether they're set).
+const MUSIC_KEY = "music_creds";
+async function getMusicCreds(env) {
+  if (!env.DB) return {};
+  try {
+    await ensureD1(env);
+    const r = await env.DB.prepare("SELECT v FROM settings WHERE k = ?").bind(MUSIC_KEY).first();
+    const c = r && r.v ? JSON.parse(r.v) : {};
+    return (c && typeof c === "object") ? c : {};
+  } catch (e) { return {}; }
+}
+async function saveMusicCreds(env, obj) {
+  if (!env.DB) return;
+  await ensureD1(env);
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (k, v) VALUES (?, ?)").bind(MUSIC_KEY, JSON.stringify(obj || {})).run();
+}
+async function musicCreds(env) {
+  const c = await getMusicCreds(env);
+  return {
+    token: (c.token || env.USER_TOKEN || ""),
+    email: (c.email || env.ZING_EMAIL || ""),
+    password: (c.password || env.ZING_PASSWORD || ""),
+  };
+}
+async function hasAuthNow(env) {
+  if (hasAuth(env)) return true;
+  const c = await getMusicCreds(env);
+  return !!(c.token || (c.email && c.password));
+}
+
 async function zingLogin(env) {
-  if (!canAutoLogin(env)) return { ok: false, error: "ZING_EMAIL / ZING_PASSWORD not set." };
+  const cr = await musicCreds(env);
+  if (!(env.API_URL && cr.email && cr.password)) return { ok: false, error: "No music-server email/password set." };
   const query =
     "mutation($e: String!, $p: String!) { authenticateUserWithPassword(email: $e, password: $p) { __typename ... on UserAuthenticationWithPasswordSuccess { sessionToken } ... on UserAuthenticationWithPasswordFailure { message } } }";
   try {
     const r = await fetch(env.API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables: { e: env.ZING_EMAIL, p: env.ZING_PASSWORD } }),
+      body: JSON.stringify({ query, variables: { e: cr.email, p: cr.password } }),
     });
     if (!r.ok) return { ok: false, error: "Login endpoint returned " + r.status + "." };
     const d = await r.json().catch(() => ({}));
@@ -1028,13 +1119,14 @@ async function currentToken(env, forceLogin) {
     const res = await firebaseRefresh(env);
     if (res.ok) return res.token;
   }
-  // Alternative: email/password login (if the API supports it).
-  if (canAutoLogin(env)) {
+  // Alternative: email/password login (from secrets or the Admin panel).
+  const cr = await musicCreds(env);
+  if (env.API_URL && cr.email && cr.password) {
     const res = await zingLogin(env);
     if (res.ok) return res.token;
   }
   if (!forceLogin && CACHED_TOKEN) return CACHED_TOKEN;
-  return env.USER_TOKEN || "";
+  return cr.token || "";
 }
 
 // Fetch from the audio server, retrying once with a fresh token on a 403.
@@ -2821,9 +2913,32 @@ const PAGE = `<!DOCTYPE html>
       var statsCard='<div class="set-sec"><h3>Listening statistics</h3><div class="card" style="padding:15px">'+
         '<button class="btn ghost" style="width:100%;justify-content:center" onclick="loadStats()">'+ic("graphic_eq")+' Show statistics</button>'+
         '<div id="statsBox" style="margin-top:12px"></div></div></div>';
-      ovlSet("Admin", back+presCard+statsCard+usersCards+appCard+featCard+accCard);
+      var musicCard='<div class="set-sec"><h3>Music server login</h3><div class="card" style="padding:15px">'+
+        '<div id="musicStatus" class="muted" style="margin-bottom:12px"><span class="spinner"></span>Checking…</div>'+
+        '<div style="font-weight:600;margin-bottom:6px">Sign in with your Zing account (keeps working — refreshes itself)</div>'+
+        '<input id="mzEmail" class="field" type="email" placeholder="Zing email" autocomplete="off" />'+
+        '<input id="mzPass" class="field" style="margin-top:10px" type="password" placeholder="Zing password" autocomplete="new-password" />'+
+        '<div class="muted" style="font-size:.78rem;margin:10px 0 0">Or paste a one-time session token instead:</div>'+
+        '<input id="mzToken" class="field" style="margin-top:6px" placeholder="Session token (optional)" autocomplete="off" />'+
+        '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="saveMusic()">Save &amp; test</button><button class="chip" onclick="testMusic()">Test</button></div>'+
+        '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
+        '<div style="margin-top:6px"><button class="chip" onclick="clearMusic()">Clear login</button></div>'+
+        '</div></div>';
+      ovlSet("Admin", back+musicCard+presCard+statsCard+usersCards+appCard+featCard+accCard);
+      loadMusicStatus();
       stopPresPoll(); _presTimer=setInterval(refreshPres, 10000);
     }
+    function renderMusicStatus(h){ h=h||{}; var el=$("musicStatus"); if(!el) return; var parts=[];
+      if(h.autologin) parts.push("✓ Signed in"+(h.email?(" ("+esc(h.email)+")"):"")); if(h.token) parts.push("✓ Token set");
+      el.innerHTML=parts.length?('<span style="color:var(--ok)">'+parts.join(" · ")+'</span>'):'<span style="color:var(--warn)">Not set — songs won\\'t play until you sign in here.</span>';
+      var em=$("mzEmail"); if(em&&h.email&&!em.value) em.value=h.email; }
+    function loadMusicStatus(){ post("/api/admin/music",{admin:_admPw,action:"status"}).then(function(d){ renderMusicStatus(d.has); }).catch(function(){}); }
+    function musicMsg(txt,color){ var m=$("musicMsg"); if(m){ m.style.color=color||"var(--muted)"; m.textContent=txt||""; } }
+    function saveMusic(){ musicMsg("Saving & testing…","var(--muted)");
+      post("/api/admin/music",{admin:_admPw,action:"save",email:($("mzEmail")||{}).value||"",password:($("mzPass")||{}).value||"",token:($("mzToken")||{}).value||""}).then(function(d){ renderMusicStatus(d.has); var p=$("mzPass"); if(p)p.value=""; testMusic(); }).catch(function(e){ musicMsg(e.message||"Could not save.","var(--err)"); }); }
+    function testMusic(){ musicMsg("Testing the music server…","var(--muted)");
+      post("/api/admin/music",{admin:_admPw,action:"test"}).then(function(d){ if(d.has) renderMusicStatus(d.has); if(d.ok){ musicMsg("✓ Works! Music should play now.","var(--ok)"); } else { musicMsg(d.error||"Test failed.","var(--err)"); } }).catch(function(e){ musicMsg(e.message||"Test failed.","var(--err)"); }); }
+    function clearMusic(){ if(!confirm("Clear the saved music-server login?")) return; post("/api/admin/music",{admin:_admPw,action:"clear"}).then(function(d){ renderMusicStatus(d.has); musicMsg("Cleared.","var(--muted)"); }).catch(function(){}); }
     function statTile(n,label){ return '<div style="flex:1;background:var(--surface-2);border-radius:12px;padding:12px 6px"><div style="font-size:1.5rem;font-weight:800">'+(n||0)+'</div><div class="muted" style="font-size:.72rem">'+esc(label)+'</div></div>'; }
     function timeAgo(at){ var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
     function statsHtml(s){
@@ -2979,6 +3094,7 @@ const PAGE = `<!DOCTYPE html>
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
     window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw; window.loadStats=loadStats;
+    window.saveMusic=saveMusic; window.testMusic=testMusic; window.clearMusic=clearMusic; window.loadMusicStatus=loadMusicStatus;
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });

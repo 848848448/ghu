@@ -1277,9 +1277,32 @@
       var statsCard='<div class="set-sec"><h3>Listening statistics</h3><div class="card" style="padding:15px">'+
         '<button class="btn ghost" style="width:100%;justify-content:center" onclick="loadStats()">'+ic("graphic_eq")+' Show statistics</button>'+
         '<div id="statsBox" style="margin-top:12px"></div></div></div>';
-      ovlSet("Admin", back+presCard+statsCard+usersCards+appCard+featCard+accCard);
+      var musicCard='<div class="set-sec"><h3>Music server login</h3><div class="card" style="padding:15px">'+
+        '<div id="musicStatus" class="muted" style="margin-bottom:12px"><span class="spinner"></span>Checking…</div>'+
+        '<div style="font-weight:600;margin-bottom:6px">Sign in with your Zing account (keeps working — refreshes itself)</div>'+
+        '<input id="mzEmail" class="field" type="email" placeholder="Zing email" autocomplete="off" />'+
+        '<input id="mzPass" class="field" style="margin-top:10px" type="password" placeholder="Zing password" autocomplete="new-password" />'+
+        '<div class="muted" style="font-size:.78rem;margin:10px 0 0">Or paste a one-time session token instead:</div>'+
+        '<input id="mzToken" class="field" style="margin-top:6px" placeholder="Session token (optional)" autocomplete="off" />'+
+        '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="saveMusic()">Save &amp; test</button><button class="chip" onclick="testMusic()">Test</button></div>'+
+        '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
+        '<div style="margin-top:6px"><button class="chip" onclick="clearMusic()">Clear login</button></div>'+
+        '</div></div>';
+      ovlSet("Admin", back+musicCard+presCard+statsCard+usersCards+appCard+featCard+accCard);
+      loadMusicStatus();
       stopPresPoll(); _presTimer=setInterval(refreshPres, 10000);
     }
+    function renderMusicStatus(h){ h=h||{}; var el=$("musicStatus"); if(!el) return; var parts=[];
+      if(h.autologin) parts.push("✓ Signed in"+(h.email?(" ("+esc(h.email)+")"):"")); if(h.token) parts.push("✓ Token set");
+      el.innerHTML=parts.length?('<span style="color:var(--ok)">'+parts.join(" · ")+'</span>'):'<span style="color:var(--warn)">Not set — songs won\'t play until you sign in here.</span>';
+      var em=$("mzEmail"); if(em&&h.email&&!em.value) em.value=h.email; }
+    function loadMusicStatus(){ post("/api/admin/music",{admin:_admPw,action:"status"}).then(function(d){ renderMusicStatus(d.has); }).catch(function(){}); }
+    function musicMsg(txt,color){ var m=$("musicMsg"); if(m){ m.style.color=color||"var(--muted)"; m.textContent=txt||""; } }
+    function saveMusic(){ musicMsg("Saving & testing…","var(--muted)");
+      post("/api/admin/music",{admin:_admPw,action:"save",email:($("mzEmail")||{}).value||"",password:($("mzPass")||{}).value||"",token:($("mzToken")||{}).value||""}).then(function(d){ renderMusicStatus(d.has); var p=$("mzPass"); if(p)p.value=""; testMusic(); }).catch(function(e){ musicMsg(e.message||"Could not save.","var(--err)"); }); }
+    function testMusic(){ musicMsg("Testing the music server…","var(--muted)");
+      post("/api/admin/music",{admin:_admPw,action:"test"}).then(function(d){ if(d.has) renderMusicStatus(d.has); if(d.ok){ musicMsg("✓ Works! Music should play now.","var(--ok)"); } else { musicMsg(d.error||"Test failed.","var(--err)"); } }).catch(function(e){ musicMsg(e.message||"Test failed.","var(--err)"); }); }
+    function clearMusic(){ if(!confirm("Clear the saved music-server login?")) return; post("/api/admin/music",{admin:_admPw,action:"clear"}).then(function(d){ renderMusicStatus(d.has); musicMsg("Cleared.","var(--muted)"); }).catch(function(){}); }
     function statTile(n,label){ return '<div style="flex:1;background:var(--surface-2);border-radius:12px;padding:12px 6px"><div style="font-size:1.5rem;font-weight:800">'+(n||0)+'</div><div class="muted" style="font-size:.72rem">'+esc(label)+'</div></div>'; }
     function timeAgo(at){ var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
     function statsHtml(s){
@@ -1435,6 +1458,7 @@
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
     window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw; window.loadStats=loadStats;
+    window.saveMusic=saveMusic; window.testMusic=testMusic; window.clearMusic=clearMusic; window.loadMusicStatus=loadMusicStatus;
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
