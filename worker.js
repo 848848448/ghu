@@ -1767,7 +1767,9 @@ const PAGE = `<!DOCTYPE html>
       box-shadow:0 12px 30px rgba(0,0,0,.5); opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; z-index:70; font-size:.9rem; max-width:88%; text-align:center; }
     .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
     .chips{ display:flex; gap:8px; padding:0 18px; flex-wrap:wrap; }
-    .chip{ background:var(--surface); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:8px 14px; font-weight:600; font-size:.85rem; cursor:pointer; }
+    .chip{ background:var(--surface); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:8px 14px; font-weight:600; font-size:.85rem; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+    .chip .ms{ font-size:18px; }
+    .chip.on{ color:var(--accent); border-color:var(--accent); }
 
     /* Settings */
     .set-sec{ margin-top:22px; }
@@ -1929,6 +1931,7 @@ const PAGE = `<!DOCTYPE html>
       history:"M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
       graphic_eq:"M7 18h2V6H7v12zm4 4h2V2h-2v20zm-8-8h2v-4H3v4zm12 4h2V6h-2v12zm4-8v4h2v-4h-2z",
       queue_music:"M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z",
+      bedtime:"M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
       download:"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
       arrow_back_ios_new:"M17.77 3.77 16 2 6 12l10 10 1.77-1.77L9.54 12z",
       close:"M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
@@ -2113,6 +2116,11 @@ const PAGE = `<!DOCTYPE html>
         if(hist.length){
           html+='<div class="sec">'+secHead("Recently played", null, "openHistory()")+'<div class="hrow">'+hist.slice(0,12).map(function(t,i){
             return '<div class="hcard" onclick="playHistory('+i+')">'+coverHtml(t.title,{img:t.coverImg,fab:true})+'<div class="c-name">'+esc(t.title)+'</div><div class="c-sub">'+esc(t.artist||"")+'</div></div>'; }).join("")+'</div></div>';
+        }
+        var liked=getLiked();
+        if(liked.length){
+          html+='<div class="sec">'+secHead("Liked songs", null, "openLiked()")+'<div class="hrow">'+liked.slice(0,12).map(function(t,i){
+            return '<div class="hcard" onclick="playLiked('+i+')">'+coverHtml(t.title,{img:t.coverImg,fab:true})+'<div class="c-name">'+esc(t.title)+'</div><div class="c-sub">'+esc(t.artist||"")+'</div></div>'; }).join("")+'</div></div>';
         }
         if(albums.length && feat("albums")){
           html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow" id="newRow">'+newRowHtml(albums)+'</div></div>';
@@ -2368,7 +2376,7 @@ const PAGE = `<!DOCTYPE html>
     var _lastReport=0;
     function reportPlay(t){ if(!t) return; var now=Date.now(); if(now-_lastReport<3000) return; _lastReport=now;
       post("/api/played",{track:t.id,title:t.title||"",artist:t.artist||""}).catch(function(){}); }
-    audio.addEventListener("ended", function(){ nextTrack(); }); // keep playing one after another
+    audio.addEventListener("ended", function(){ if(_sleepEnd){ _sleepEnd=false; toast("Sleep timer — paused"); syncSheet(); return; } nextTrack(); }); // keep playing one after another
     audio.addEventListener("loadedmetadata", function(){ _dur=audio.duration||0; var d=$("shDur"); if(d) d.textContent=fmt(_dur); });
     audio.addEventListener("timeupdate", function(){ if(audio.duration){ var pct=Math.round(audio.currentTime/audio.duration*1000); $("seek").value=String(pct); var s=$("shSeek"); if(s) s.value=String(pct); var c=$("shCur"); if(c) c.textContent=fmt(audio.currentTime); } });
     // If a track won't load: retry once (fresh request), then skip past it so the
@@ -2395,6 +2403,35 @@ const PAGE = `<!DOCTYPE html>
     function playHistory(i){ var h=getHistory(); if(!h[i]) return; startQueue(h.map(function(x){ return {id:x.id,file:x.file||"",title:x.title,artist:x.artist,cover:x.title,coverImg:x.coverImg}; }), i); closeOverlay(true); }
     function dlFromHistory(i){ var h=getHistory(); if(h[i]) playHistory(i); }
 
+    // ---------- Liked songs (♥ per track, kept on this device) ----------
+    function getLiked(){ try{ var l=JSON.parse(localStorage.getItem("zing_liked")||"[]"); return Array.isArray(l)?l:[]; }catch(e){ return []; } }
+    function isLiked(id){ return getLiked().some(function(x){ return x.id===id; }); }
+    function toggleLike(t){ if(!t) return; var l=getLiked(); var was=l.some(function(x){ return x.id===t.id; });
+      if(was){ l=l.filter(function(x){ return x.id!==t.id; }); } else { l.unshift({id:t.id,file:t.file||"",title:t.title||"",artist:t.artist||"",coverImg:t.coverImg||null}); l=l.slice(0,300); }
+      try{ localStorage.setItem("zing_liked",JSON.stringify(l)); }catch(e){}
+      toast(was?"Removed from Liked":"Added to Liked ♥"); syncSheet(); }
+    function likeCurrent(){ toggleLike(queue[qi]); }
+    function openLiked(){ var l=getLiked();
+      if(!l.length){ overlay("Liked songs", '<div class="empty">No liked songs yet. Tap the ♥ on a song to save it here.</div>'); return; }
+      var rows=l.map(function(t,i){ return '<div class="track" onclick="playLiked('+i+')"><div class="np-mini" style="background:'+(imgUrl(t.coverImg)?("center/cover url(\\'"+esc(imgUrl(t.coverImg))+"\\')"):grad(t.title))+'"></div>'+
+        '<div class="tk">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div><div class="np-btn" onclick="event.stopPropagation();unlike('+t.id+')">'+ic("favorite")+'</div></div>'; }).join("");
+      overlay("Liked songs", '<div class="tracks">'+rows+'</div>'); }
+    function playLiked(i){ var l=getLiked(); if(!l[i]) return; startQueue(l.map(function(x){ return {id:x.id,file:x.file||"",title:x.title,artist:x.artist,cover:x.title,coverImg:x.coverImg}; }), i); closeOverlay(true); }
+    function unlike(id){ toggleLike({id:id}); openLiked(); }
+
+    // ---------- Sleep timer ----------
+    var _sleepAt=0, _sleepTimer=null;
+    function openSleep(){ var opts=[["off","Off"],["15","15 minutes"],["30","30 minutes"],["45","45 minutes"],["60","1 hour"],["end","End of this song"]];
+      var cur=_sleepAt?("in "+Math.max(1,Math.round((_sleepAt-Date.now())/60000))+" min"):(_sleepEnd?"end of song":"off");
+      overlay("Sleep timer", '<p class="muted" style="margin:0 0 12px">Music stops automatically. Currently: '+esc(cur)+'.</p>'+
+        '<div class="tracks">'+opts.map(function(o){ return '<div class="track" onclick="setSleep(\\''+o[0]+'\\')"><div class="tk">'+esc(o[1])+'</div>'+((o[0]==="off"&&!_sleepAt&&!_sleepEnd)?'<div class="np-eq">'+ic("favorite")+'</div>':'')+'</div>'; }).join("")+'</div>'); }
+    var _sleepEnd=false;
+    function setSleep(v){ if(_sleepTimer){ clearTimeout(_sleepTimer); _sleepTimer=null; } _sleepAt=0; _sleepEnd=false;
+      if(v==="off"){ toast("Sleep timer off"); }
+      else if(v==="end"){ _sleepEnd=true; toast("Will stop at end of this song"); }
+      else { var mins=parseInt(v,10); _sleepAt=Date.now()+mins*60000; _sleepTimer=setTimeout(function(){ audio.pause(); _sleepAt=0; toast("Sleep timer — paused"); syncSheet(); }, mins*60000); toast("Sleep timer set for "+mins+" min"); }
+      closeOverlay(true); syncSheet(); }
+
     // ---------- Lyrics ----------
     function showLyrics(){ var t=queue[qi]; if(!t){ return; } toast("Loading lyrics…");
       gql("query { track(where:{id:"+Number(t.id)+"}) { enName heName heLyrics enLyrics } }").then(function(d){
@@ -2418,7 +2455,7 @@ const PAGE = `<!DOCTYPE html>
           '<button class="np-c" title="Next" onclick="nextTrack()">'+ic("skip_next")+'</button>'+
           '<button class="np-c" id="shRepeat" title="Repeat" onclick="cycleRepeat()">'+ic("repeat")+'</button>'+
         '</div>'+
-        '<div class="np-actions"><button class="chip" onclick="dlCurrent()">'+ic("download")+' Download</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'+
+        '<div class="np-actions"><button class="chip" id="shLike" onclick="likeCurrent()">'+ic(isLiked(t.id)?"favorite":"favorite_border")+' Like</button><button class="chip" onclick="openSleep()">'+ic("bedtime")+' Sleep</button><button class="chip" onclick="dlCurrent()">'+ic("download")+' Download</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'+
         '<div class="seg np-seg" style="margin:4px 0 12px"><button id="npTQ" onclick="npTab(\\'queue\\')">Up next</button><button id="npTL" onclick="npTab(\\'lyrics\\')">Lyrics</button><button id="npTS" onclick="npTab(\\'similar\\')">Similar</button></div>'+
         '<div id="npExtra"></div>');
       syncSheet(); npTab(_npTab);
@@ -2434,6 +2471,7 @@ const PAGE = `<!DOCTYPE html>
       var sp=$("shPlay"); if(sp) sp.innerHTML=ic(audio.paused?"play_arrow":"pause");
       var sf=$("shShuffle"); if(sf) sf.classList.toggle("on",_shuffle);
       var sr=$("shRepeat"); if(sr){ sr.classList.toggle("on",_repeat!=="off"); sr.innerHTML=ic(_repeat==="one"?"repeat_one":"repeat"); }
+      var lk=$("shLike"); if(lk&&t){ var liked=isLiked(t.id); lk.classList.toggle("on",liked); lk.innerHTML=ic(liked?"favorite":"favorite_border")+" Like"; }
       if(_npTab==="queue" && $("npExtra")) npQueue();
     }
     // Up-next: the tracks coming after the current one, in play order.
@@ -2849,6 +2887,8 @@ const PAGE = `<!DOCTYPE html>
     window.openNowPlaying=openNowPlaying; window.npLyrics=npLyrics; window.npSimilar=npSimilar; window.playSimilar=playSimilar;
     window.toggleShuffle=toggleShuffle; window.cycleRepeat=cycleRepeat; window.seekTo=seekTo; window.npTab=npTab; window.jumpQueue=jumpQueue;
     window.openHistory=openHistory; window.playHistory=playHistory; window.dlFromHistory=dlFromHistory;
+    window.likeCurrent=likeCurrent; window.toggleLike=toggleLike; window.openLiked=openLiked; window.playLiked=playLiked; window.unlike=unlike;
+    window.openSleep=openSleep; window.setSleep=setSleep;
     window.browseLibrary=browseLibrary; window.saveArtist=saveArtist; window.saveAlbum=saveAlbum;
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
