@@ -101,6 +101,12 @@ export default {
       if (path === "/api/admin/user" && request.method === "POST") {
         return await handleAdminUser(request, env);
       }
+      if (path === "/api/played" && request.method === "POST") {
+        return await handlePlayed(request, env);
+      }
+      if (path === "/api/admin/stats" && request.method === "POST") {
+        return await handleAdminStats(request, env);
+      }
       if (path === "/api/artists" && request.method === "POST") {
         return await handleArtists(env);
       }
@@ -237,6 +243,7 @@ async function ensureD1(env) {
       env.DB.prepare("CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)"),
       env.DB.prepare("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, phone TEXT, pass TEXT, photo TEXT, status TEXT, created INTEGER)"),
       env.DB.prepare("CREATE TABLE IF NOT EXISTS presence (uid TEXT PRIMARY KEY, name TEXT, view TEXT, seen INTEGER)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS plays (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, track INTEGER, title TEXT, artist TEXT, at INTEGER)"),
     ]);
     // Best-effort migrations for columns added later (ignored if they exist).
     for (const a of ["ALTER TABLE users ADD COLUMN name TEXT", "ALTER TABLE users ADD COLUMN nodl INTEGER",
@@ -647,6 +654,59 @@ async function handleAdminPresence(request, env) {
   try { await env.DB.prepare("DELETE FROM presence WHERE seen < ?").bind(now - 3600000).run(); } catch (e) { /* ignore */ }
   const r = await env.DB.prepare("SELECT name, view, seen FROM presence WHERE seen >= ? ORDER BY seen DESC").bind(now - 90000).all();
   return json({ online: r.results || [], now });
+}
+
+// Record a play (called by the app when a track actually starts). De-duped so
+// the same person replaying/pausing the same track in a short window counts once.
+async function handlePlayed(request, env) {
+  if (!env.DB) return json({ ok: false });
+  const uid = (await verifyUid(env, parseCookies(request).uid)) || "guest";
+  const b = await request.json().catch(() => ({}));
+  const track = Number(b.track);
+  if (!track) return json({ ok: false });
+  await ensureD1(env);
+  const now = Date.now();
+  try {
+    const last = await env.DB.prepare("SELECT at FROM plays WHERE uid = ? AND track = ? ORDER BY at DESC LIMIT 1").bind(String(uid), track).first();
+    if (last && last.at && now - last.at < 30000) return json({ ok: true, dup: true });
+    await env.DB.prepare("INSERT INTO plays (uid, track, title, artist, at) VALUES (?, ?, ?, ?, ?)")
+      .bind(String(uid), track, (b.title || "").toString().slice(0, 200), (b.artist || "").toString().slice(0, 200), now).run();
+  } catch (e) { /* ignore */ }
+  return json({ ok: true });
+}
+
+// Admin: listening statistics — totals, top songs, most active people, and a
+// recent-plays feed (who played what).
+async function handleAdminStats(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Statistics need a D1 database.", d1: false }, 400);
+  await ensureD1(env);
+  const now = Date.now(), dayAgo = now - 86400000, weekAgo = now - 7 * 86400000;
+  // Build a uid -> display-name map from the users table.
+  const names = {};
+  try {
+    const us = await env.DB.prepare("SELECT id, name, email FROM users").all();
+    (us.results || []).forEach((u) => { names[String(u.id)] = u.name || u.email || ("User " + u.id); });
+  } catch (e) { /* ignore */ }
+  const who = (uid) => uid === "admin" ? "Owner" : (uid === "guest" || uid === "" ? "Guest" : (names[uid] || ("User " + uid)));
+  const out = { total: 0, today: 0, week: 0, topTracks: [], topUsers: [], recent: [] };
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays").first(); out.total = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(dayAgo).first(); out.today = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(weekAgo).first(); out.week = (t && t.n) || 0; } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT track, title, artist, COUNT(*) AS c FROM plays GROUP BY track ORDER BY c DESC LIMIT 20").all();
+    out.topTracks = (r.results || []).map((x) => ({ track: x.track, title: x.title, artist: x.artist, count: x.c }));
+  } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT uid, COUNT(*) AS c FROM plays GROUP BY uid ORDER BY c DESC LIMIT 12").all();
+    out.topUsers = (r.results || []).map((x) => ({ name: who(x.uid), count: x.c }));
+  } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT uid, track, title, artist, at FROM plays ORDER BY at DESC LIMIT 40").all();
+    out.recent = (r.results || []).map((x) => ({ name: who(x.uid), title: x.title, artist: x.artist, at: x.at }));
+  } catch (e) {}
+  return json(out);
 }
 
 // --------------------------------------------------------------------------- //
@@ -2304,7 +2364,10 @@ const PAGE = `<!DOCTYPE html>
     function cycleRepeat(){ _repeat=(_repeat==="off"?"all":(_repeat==="all"?"one":"off")); try{ localStorage.setItem("zing_repeat",_repeat); }catch(e){} syncSheet(); toast(_repeat==="off"?"Repeat off":(_repeat==="all"?"Repeat all":"Repeat one")); }
     audio.addEventListener("play", function(){ setPlayIcon(true); });
     audio.addEventListener("pause", function(){ setPlayIcon(false); });
-    audio.addEventListener("playing", function(){ _fails=0; pushHistory(queue[qi]); }); // played fine → clear failures, record history
+    audio.addEventListener("playing", function(){ _fails=0; var t=queue[qi]; pushHistory(t); reportPlay(t); }); // played fine → clear failures, record history + stats
+    var _lastReport=0;
+    function reportPlay(t){ if(!t) return; var now=Date.now(); if(now-_lastReport<3000) return; _lastReport=now;
+      post("/api/played",{track:t.id,title:t.title||"",artist:t.artist||""}).catch(function(){}); }
     audio.addEventListener("ended", function(){ nextTrack(); }); // keep playing one after another
     audio.addEventListener("loadedmetadata", function(){ _dur=audio.duration||0; var d=$("shDur"); if(d) d.textContent=fmt(_dur); });
     audio.addEventListener("timeupdate", function(){ if(audio.duration){ var pct=Math.round(audio.currentTime/audio.duration*1000); $("seek").value=String(pct); var s=$("shSeek"); if(s) s.value=String(pct); var c=$("shCur"); if(c) c.textContent=fmt(audio.currentTime); } });
@@ -2636,9 +2699,25 @@ const PAGE = `<!DOCTYPE html>
             '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
             '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
       }
-      ovlSet("Admin", back+presCard+usersCards+appCard+featCard+accCard);
+      var statsCard='<div class="set-sec"><h3>Listening statistics</h3><div class="card" style="padding:15px">'+
+        '<button class="btn ghost" style="width:100%;justify-content:center" onclick="loadStats()">'+ic("graphic_eq")+' Show statistics</button>'+
+        '<div id="statsBox" style="margin-top:12px"></div></div></div>';
+      ovlSet("Admin", back+presCard+statsCard+usersCards+appCard+featCard+accCard);
       stopPresPoll(); _presTimer=setInterval(refreshPres, 10000);
     }
+    function statTile(n,label){ return '<div style="flex:1;background:var(--surface-2);border-radius:12px;padding:12px 6px"><div style="font-size:1.5rem;font-weight:800">'+(n||0)+'</div><div class="muted" style="font-size:.72rem">'+esc(label)+'</div></div>'; }
+    function timeAgo(at){ var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
+    function statsHtml(s){
+      if(s.d1===false||s.error){ return '<div class="empty">'+esc(s.error||"Not available.")+'</div>'; }
+      if(!s.total){ return '<div class="empty">No plays yet. Once people start listening, you\\'ll see what\\'s popular here.</div>'; }
+      var tiles='<div style="display:flex;gap:8px;text-align:center;margin-bottom:14px">'+statTile(s.total,"All time")+statTile(s.week,"This week")+statTile(s.today,"Today")+'</div>';
+      var top=(s.topTracks||[]).length?('<div style="font-weight:700;margin:6px 0">Top songs</div>'+(s.topTracks||[]).slice(0,12).map(function(t,i){ return '<div class="code-item"><div style="width:24px;color:var(--muted);font-weight:700;flex:none">'+(i+1)+'</div><div style="min-width:0;flex:1"><div class="ci-name">'+esc(t.title||("Track "+t.track))+'</div><div class="ci-code">'+esc(t.artist||"")+'</div></div><div style="font-weight:800;color:var(--accent);flex:none">'+t.count+'</div></div>'; }).join("")):'';
+      var users=(s.topUsers||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Most active</div>'+(s.topUsers||[]).map(function(u){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(u.name)+'</div></div><div style="font-weight:800;color:var(--accent);flex:none">'+u.count+'</div></div>'; }).join("")):'';
+      var recent=(s.recent||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Recent plays</div>'+(s.recent||[]).slice(0,25).map(function(r){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(r.title||"—")+'</div><div class="ci-code">'+esc(r.name)+(r.artist?' · '+esc(r.artist):'')+' · '+timeAgo(r.at)+'</div></div></div>'; }).join("")):'';
+      return tiles+top+users+recent;
+    }
+    function loadStats(){ var box=$("statsBox"); if(!box) return; box.innerHTML='<div class="empty" style="padding:16px"><span class="spinner"></span>Loading…</div>';
+      post("/api/admin/stats",{admin:_admPw}).then(function(s){ box.innerHTML=statsHtml(s); }).catch(function(e){ if(e&&e.message==="login")return; box.innerHTML='<div class="empty">'+esc((e&&e.message)||"Could not load.")+'</div>'; }); }
     function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
       if(!c.trim()){ if(m) m.textContent="Enter a code."; return; }
       post("/api/admin/add",{admin:_admPw,name:n,code:c}).then(function(){ toast("Added."); loadAccess(); })
@@ -2774,7 +2853,7 @@ const PAGE = `<!DOCTYPE html>
     window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
     window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
     window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
-    window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw;
+    window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw; window.loadStats=loadStats;
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
