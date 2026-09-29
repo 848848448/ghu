@@ -955,13 +955,40 @@ async function loginDiag(env, request) {
     const fr = await firebaseSignIn(env, cr.email, cr.password);
     out.firebaseLoginOk = !!fr.ok;
     out.firebaseLoginError = fr.ok ? null : (fr.error || "unknown");
-    out.note = fr.ok
-      ? "Firebase sign-in OK, but the audio server still refused the token."
-      : "Firebase sign-in failed — likely the Zing email/password is wrong.";
+    if (fr.ok) {
+      out.note = "Firebase sign-in OK. Probing how Zing's audio wants the token…";
+      out.tokenClaims = decodeJwtClaims(fr.token);
+      // Real track id to test with.
+      let tid = 1;
+      try { const d = await graphql(env, "query { albums(take: 1) { tracks { id } } }"); const t = (((d && d.data && d.data.albums) || [])[0] || {}).tracks || []; if (t[0] && t[0].id) tid = t[0].id; } catch (e) {}
+      const base = env.AUDIO_API_BASE;
+      const rng = { Range: "bytes=0-0" };
+      try { const r1 = await fetchT(base + "?trackId=" + tid + "&token=" + encodeURIComponent(fr.token), { headers: rng }, 12000); out.audio_queryToken = r1.status; } catch (e) { out.audio_queryToken = "err"; }
+      try { const r2 = await fetchT(base + "?trackId=" + tid, { headers: Object.assign({}, rng, { Authorization: "Bearer " + fr.token }) }, 12000); out.audio_bearer = r2.status; } catch (e) { out.audio_bearer = "err"; }
+      try { const r3 = await fetchT(base + "?trackId=" + tid + "&token=" + encodeURIComponent(fr.token), { headers: Object.assign({}, rng, { Authorization: "Bearer " + fr.token }) }, 12000); out.audio_both = r3.status; } catch (e) { out.audio_both = "err"; }
+      try { out.startStreamingSession = await introspectMutation(env, "startStreamingSession"); } catch (e) {}
+    } else {
+      out.note = "Firebase sign-in failed — likely the Zing email/password is wrong.";
+    }
   } else {
     out.note = "No email/password saved — set the Music server login.";
   }
   return out;
+}
+
+// Return a mutation's arg names + return type (to learn how, e.g.,
+// startStreamingSession must be called).
+async function introspectMutation(env, name) {
+  const q = "query { __schema { mutationType { fields { name args { name type { kind name ofType { kind name } } } type { kind name ofType { kind name fields { name } } } } } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const fields = (((d.data || {}).__schema || {}).mutationType || {}).fields || [];
+    const f = fields.find((x) => x.name === name);
+    if (!f) return { found: false };
+    const tn = (t) => { while (t && !t.name && t.ofType) t = t.ofType; return t ? (t.kind + " " + t.name) : "?"; };
+    return { found: true, args: (f.args || []).map((a) => a.name + ": " + tn(a.type)), returns: tn(f.type), returnFields: (((f.type || {}).ofType || {}).fields || (f.type || {}).fields || []).map((x) => x.name) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 
 async function zingLogin(env) {
@@ -1279,6 +1306,15 @@ async function fetchAudio(env, trackId, extraHeaders, file) {
   if (r.status === 403) {
     token = await currentToken(env, true);
     if (token) r = await fetchT(byId(), hdrs, 15000);
+  }
+  // Still refused? The token may need to travel as an Authorization: Bearer
+  // header (how Firebase-based APIs usually expect it) rather than a query param.
+  if (!r.ok && r.status !== 206 && token) {
+    const bh = Object.assign({}, extraHeaders || {}, { Authorization: "Bearer " + token });
+    const noTok = base + "?trackId=" + encodeURIComponent(trackId);
+    for (const u of [noTok, byId()]) {
+      try { const rb = await fetchT(u, { headers: bh }, 15000); if (rb.ok || rb.status === 206) return rb; } catch (e) {}
+    }
   }
   // Some tracks (notably singles) can't be resolved by track id alone — retry
   // with the file path (id+file, then file-only). Only runs when the id-only
@@ -2692,8 +2728,11 @@ const PAGE = `<!DOCTYPE html>
             if(dg){ if(dg.firebaseKeyFound!==undefined) info+="\\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
               if(dg.firebaseLoginOk!==undefined) info+="\\nFirebase login: "+(dg.firebaseLoginOk?"OK ✓":"FAILED ✗");
               if(dg.firebaseLoginError) info+="\\nFirebase error: "+dg.firebaseLoginError;
-              if(dg.loginOk!==undefined) info+="\\nlogin: "+(dg.loginOk?"OK ✓":"FAILED ✗");
-              if(dg.loginError) info+="\\nlogin error: "+dg.loginError;
+              if(dg.audio_queryToken!==undefined) info+="\\naudio ?token: "+dg.audio_queryToken;
+              if(dg.audio_bearer!==undefined) info+="\\naudio Bearer: "+dg.audio_bearer;
+              if(dg.audio_both!==undefined) info+="\\naudio both: "+dg.audio_both;
+              if(dg.tokenClaims) info+="\\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?");
+              if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns+" fields["+(ss.returnFields||[]).join(",")+"]"):JSON.stringify(ss)); }
               if(dg.note) info+="\\nnote: "+dg.note; }
           }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
           showDiag(info); }); } showDiag(info);
