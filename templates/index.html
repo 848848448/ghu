@@ -864,7 +864,14 @@
       var ec=(audio.error&&audio.error.code)||0; var codes={1:"aborted",2:"network",3:"decode",4:"format not supported"};
       var info="Track: "+(t.title||"")+"\nid="+t.id+"\nfile="+(t.file||"(none)")+"\naudio.error="+ec+" ("+(codes[ec]||"?")+")";
       fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ info+="\n/api/play → HTTP "+r.status+"  "+(r.headers.get("Content-Type")||"");
-        if(r.status>=400){ return r.text().then(function(tx){ info+="\nbody: "+(tx||"").slice(0,300); showDiag(info); }); } showDiag(info);
+        if(r.status>=400){ return r.text().then(function(tx){
+          try{ var j=JSON.parse(tx); if(j.error) info+="\nerror: "+j.error; var dg=j.diag;
+            if(dg){ if(dg.loginOk!==undefined) info+="\nlogin: "+(dg.loginOk?"OK ✓":"FAILED ✗");
+              if(dg.loginError) info+="\nlogin error: "+dg.loginError;
+              if(dg.note) info+="\nnote: "+dg.note;
+              if(dg.authMutations) info+="\nZing logins available: "+((dg.authMutations||[]).join(", ")||"(none found)"); }
+          }catch(e){ info+="\nbody: "+(tx||"").slice(0,400); }
+          showDiag(info); }); } showDiag(info);
       }).catch(function(e){ info+="\nfetch error: "+((e&&e.message)||e); showDiag(info); }); }
     function showDiag(info){ window._copy=info; overlay("Why it won’t play", '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.8rem;margin:0">'+esc(info)+'</pre><button class="btn sm" style="margin-top:10px" onclick="copyText(this)">Copy</button><div class="muted" style="margin-top:8px">Send this to the developer.</div>'); }
     audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;

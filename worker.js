@@ -866,6 +866,32 @@ async function hasAuthNow(env) {
   return !!(c.token || (c.email && c.password));
 }
 
+// Compact login diagnosis, safe to return to an admin (never the secrets):
+// did the login work, and if it did, does the audio server still reject it?
+async function loginDiag(env, request) {
+  try {
+    if (!(await isAdminReq(env, request, {}))) return null;
+  } catch (e) { return null; }
+  const cr = await musicCreds(env);
+  const out = { hasEmail: !!cr.email, hasToken: !!cr.token };
+  if (cr.email && cr.password) {
+    const lr = await zingLogin(env);
+    out.loginOk = !!lr.ok;
+    out.loginError = lr.ok ? null : (lr.error || "unknown");
+    out.note = lr.ok
+      ? "Login OK, but the music server still rejected the token — Zing's audio needs a different token than email/password gives. Use the token box."
+      : "Login failed — the email/password (or the login method) is wrong.";
+    if (lr.ok) {
+      try { const am = await introspectAuthMutations(env); out.authMutations = (am && am.candidates) || null; } catch (e) {}
+    } else {
+      try { const am = await introspectAuthMutations(env); out.authMutations = (am && am.candidates) || null; } catch (e) {}
+    }
+  } else {
+    out.note = "No email/password saved — set the Music server login, or paste a token.";
+  }
+  return out;
+}
+
 async function zingLogin(env) {
   const cr = await musicCreds(env);
   if (!(env.API_URL && cr.email && cr.password)) return { ok: false, error: "No music-server email/password set." };
@@ -1480,7 +1506,7 @@ async function handlePlay(url, request, env) {
     return json({ error: "Playback error: " + (exc && exc.message) }, 502);
   }
   if (upstream.status === 403) {
-    return json({ error: "Access Denied (403). Token expired and re-login failed." }, 403);
+    return json({ error: "Access Denied (403). Token expired and re-login failed.", diag: await loginDiag(env, request) }, 403);
   }
   if (!upstream.ok && upstream.status !== 206) {
     return json({ error: "Server returned code " + upstream.status + "." }, 502);
@@ -2577,7 +2603,14 @@ const PAGE = `<!DOCTYPE html>
       var ec=(audio.error&&audio.error.code)||0; var codes={1:"aborted",2:"network",3:"decode",4:"format not supported"};
       var info="Track: "+(t.title||"")+"\\nid="+t.id+"\\nfile="+(t.file||"(none)")+"\\naudio.error="+ec+" ("+(codes[ec]||"?")+")";
       fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ info+="\\n/api/play → HTTP "+r.status+"  "+(r.headers.get("Content-Type")||"");
-        if(r.status>=400){ return r.text().then(function(tx){ info+="\\nbody: "+(tx||"").slice(0,300); showDiag(info); }); } showDiag(info);
+        if(r.status>=400){ return r.text().then(function(tx){
+          try{ var j=JSON.parse(tx); if(j.error) info+="\\nerror: "+j.error; var dg=j.diag;
+            if(dg){ if(dg.loginOk!==undefined) info+="\\nlogin: "+(dg.loginOk?"OK ✓":"FAILED ✗");
+              if(dg.loginError) info+="\\nlogin error: "+dg.loginError;
+              if(dg.note) info+="\\nnote: "+dg.note;
+              if(dg.authMutations) info+="\\nZing logins available: "+((dg.authMutations||[]).join(", ")||"(none found)"); }
+          }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
+          showDiag(info); }); } showDiag(info);
       }).catch(function(e){ info+="\\nfetch error: "+((e&&e.message)||e); showDiag(info); }); }
     function showDiag(info){ window._copy=info; overlay("Why it won’t play", '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.8rem;margin:0">'+esc(info)+'</pre><button class="btn sm" style="margin-top:10px" onclick="copyText(this)">Copy</button><div class="muted" style="margin-top:8px">Send this to the developer.</div>'); }
     audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
