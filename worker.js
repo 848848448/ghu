@@ -1259,17 +1259,18 @@ async function currentToken(env, forceLogin) {
     const res = await firebaseRefresh(env);
     if (res.ok) return res.token;
   }
-  const c = await getMusicCreds(env);
-  // A saved Firebase refresh token (from a previous sign-in) — renew silently.
-  if (c.firebaseRefresh) {
-    const res = await firebaseRefreshWith(env, c.firebaseRefresh);
-    if (res.ok) return res.token;
-  }
   const cr = await musicCreds(env);
-  // Zing uses Firebase: sign in with the email/password to get (and store) a
-  // fresh token + refresh token.
+  // Zing uses Firebase: a full email/password sign-in gives a token the audio
+  // server accepts. This is the reliable path, so it comes first. The result is
+  // cached (CACHED_EXP ~1h), so we don't sign in on every request.
   if (cr.email && cr.password) {
     const res = await firebaseSignIn(env, cr.email, cr.password);
+    if (res.ok) return res.token;
+  }
+  // Fallback: renew silently with a saved refresh token.
+  const c = await getMusicCreds(env);
+  if (c.firebaseRefresh) {
+    const res = await firebaseRefreshWith(env, c.firebaseRefresh);
     if (res.ok) return res.token;
   }
   // Last resort: a Keystone-style GraphQL login (most Zing-like APIs don't have one).
