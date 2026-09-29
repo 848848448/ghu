@@ -805,7 +805,7 @@
     function buildOrder(startIdx){ _order=queue.map(function(_,i){ return i; });
       if(_shuffle){ for(var i=_order.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var t=_order[i]; _order[i]=_order[j]; _order[j]=t; }
         var pos=_order.indexOf(startIdx); if(pos>0){ var tmp=_order[0]; _order[0]=_order[pos]; _order[pos]=tmp; } } }
-    function startQueue(tracks, index){ _fails=0; queue=tracks; buildOrder(index); playIndex(index); }
+    function startQueue(tracks, index){ _fails=0; _diagShown=false; queue=tracks; buildOrder(index); playIndex(index); }
     function playAlbum(albumId, index){ var al=(window._albums||{})[albumId]; if(!al) return; var tracks=al.tracks||[];
       var artistName=(al.artists&&al.artists.length)?artNames(al.artists):(window._curArtist||""); var aimg=albImg(al);
       startQueue(tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; }), index); }
@@ -857,8 +857,19 @@
     function playbackDown(){ audio.pause();
       if(ME.admin){ toast("Music won’t play — set the Music server login in ⚙ Settings → Admin."); }
       else { toast("Music isn’t playing right now — please tell the owner."); } }
+    // Owner-only: when a track fails, capture exactly why (audio error code +
+    // the real HTTP response from the music server) so we can pinpoint the bug.
+    var _diagShown=false;
+    function diagPlay(t){ if(!ME.admin||!t||_diagShown) return; _diagShown=true;
+      var ec=(audio.error&&audio.error.code)||0; var codes={1:"aborted",2:"network",3:"decode",4:"format not supported"};
+      var info="Track: "+(t.title||"")+"\nid="+t.id+"\nfile="+(t.file||"(none)")+"\naudio.error="+ec+" ("+(codes[ec]||"?")+")";
+      fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ info+="\n/api/play → HTTP "+r.status+"  "+(r.headers.get("Content-Type")||"");
+        if(r.status>=400){ return r.text().then(function(tx){ info+="\nbody: "+(tx||"").slice(0,300); showDiag(info); }); } showDiag(info);
+      }).catch(function(e){ info+="\nfetch error: "+((e&&e.message)||e); showDiag(info); }); }
+    function showDiag(info){ window._copy=info; overlay("Why it won’t play", '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.8rem;margin:0">'+esc(info)+'</pre><button class="btn sm" style="margin-top:10px" onclick="copyText(this)">Copy</button><div class="muted" style="margin-top:8px">Send this to the developer.</div>'); }
     audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
       if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
+      diagPlay(t); // show the owner the exact reason on the first real failure
       _fails++; var n=nextInOrder();
       if(_fails>=3 || n<0){ playbackDown(); return; } // 3 in a row ⇒ server/login problem, stop
       toast("Skipping a track that won’t play…"); playIndex(n);
