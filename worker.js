@@ -738,6 +738,8 @@ async function handleAdminMusic(request, env) {
     if (typeof b.email === "string") obj.email = b.email.trim();
     if (typeof b.password === "string" && b.password) obj.password = b.password; // keep old if blank
     if (typeof b.token === "string" && b.token.trim()) obj.token = b.token.trim();
+    // Drop any cached login so the new credentials take effect immediately.
+    delete obj.idToken; delete obj.idExp; delete obj.firebaseRefresh;
     await saveMusicCreds(env, obj);
     CACHED_TOKEN = null; CACHED_EXP = 0;
     return json({ ok: true, has: await status() });
@@ -883,7 +885,12 @@ async function firebaseRefreshWith(env, refreshToken) {
         body: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(refreshToken) }, 15000);
     const d = await r.json().catch(() => ({}));
     const idt = d && (d.id_token || d.access_token);
-    if (idt) { CACHED_TOKEN = idt; CACHED_EXP = Math.floor(Date.now() / 1000) + (parseInt(d.expires_in, 10) || 3600); return { ok: true, token: idt }; }
+    if (idt) {
+      const exp = Math.floor(Date.now() / 1000) + (parseInt(d.expires_in, 10) || 3600);
+      CACHED_TOKEN = idt; CACHED_EXP = exp;
+      try { const c = await getMusicCreds(env); c.idToken = idt; c.idExp = exp; if (d.refresh_token) c.firebaseRefresh = d.refresh_token; await saveMusicCreds(env, c); } catch (e) {}
+      return { ok: true, token: idt };
+    }
     return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Refresh returned " + r.status) };
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 }
@@ -898,9 +905,15 @@ async function firebaseSignIn(env, email, password) {
         body: JSON.stringify({ email, password, returnSecureToken: true }) }, 15000);
     const d = await r.json().catch(() => ({}));
     if (d && d.idToken) {
+      const exp = Math.floor(Date.now() / 1000) + (parseInt(d.expiresIn, 10) || 3600);
       CACHED_TOKEN = d.idToken;
-      CACHED_EXP = Math.floor(Date.now() / 1000) + (parseInt(d.expiresIn, 10) || 3600);
-      if (d.refreshToken) { const c = await getMusicCreds(env); c.firebaseRefresh = d.refreshToken; await saveMusicCreds(env, c); }
+      CACHED_EXP = exp;
+      // Cache the working token in D1 too, shared across all Worker isolates, so
+      // we DON'T sign in on every request (which Firebase rate-limits).
+      const c = await getMusicCreds(env);
+      c.idToken = d.idToken; c.idExp = exp;
+      if (d.refreshToken) c.firebaseRefresh = d.refreshToken;
+      await saveMusicCreds(env, c);
       return { ok: true, token: d.idToken };
     }
     return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Firebase sign-in failed (" + r.status + ").") };
@@ -1254,6 +1267,14 @@ async function currentToken(env, forceLogin) {
   if (!forceLogin && CACHED_TOKEN && (CACHED_EXP === 0 || now < CACHED_EXP - 60)) {
     return CACHED_TOKEN;
   }
+  // A token cached in D1 (shared across all isolates) — reuse it until it's
+  // about to expire, so we don't sign in on every request (Firebase rate-limits
+  // that, which caused intermittent 403s).
+  const c0 = await getMusicCreds(env);
+  if (!forceLogin && c0.idToken && c0.idExp && now < c0.idExp - 120) {
+    CACHED_TOKEN = c0.idToken; CACHED_EXP = c0.idExp;
+    return c0.idToken;
+  }
   // Preferred: Firebase refresh token from secrets (works forever).
   if (canFirebase(env)) {
     const res = await firebaseRefresh(env);
@@ -1261,8 +1282,8 @@ async function currentToken(env, forceLogin) {
   }
   const cr = await musicCreds(env);
   // Zing uses Firebase: a full email/password sign-in gives a token the audio
-  // server accepts. This is the reliable path, so it comes first. The result is
-  // cached (CACHED_EXP ~1h), so we don't sign in on every request.
+  // server accepts. The token is cached in D1 (above) so this runs at most once
+  // an hour, not on every request.
   if (cr.email && cr.password) {
     const res = await firebaseSignIn(env, cr.email, cr.password);
     if (res.ok) return res.token;
