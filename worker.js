@@ -753,12 +753,12 @@ async function handleAdminMusic(request, env) {
     try {
       const cr = await musicCreds(env);
       detail.hasEmail = !!cr.email; detail.hasToken = !!cr.token;
-      // If email/password given, attempt the login and capture the exact result.
+      // Zing uses Firebase — sign in with the email/password and capture the result.
       if (cr.email && cr.password) {
-        const lr = await zingLogin(env);
-        detail.loginOk = !!lr.ok;
-        detail.loginError = lr.ok ? null : lr.error;
-        if (!lr.ok) detail.authMutations = await introspectAuthMutations(env);
+        detail.firebaseKeyFound = !!(await getFirebaseKey(env));
+        const fr = await firebaseSignIn(env, cr.email, cr.password);
+        detail.loginOk = !!fr.ok;
+        detail.loginError = fr.ok ? null : fr.error;
       }
       const tok = await currentToken(env, true);
       detail.gotToken = !!tok;
@@ -833,6 +833,80 @@ async function firebaseRefresh(env) {
   }
 }
 
+// The Firebase Web API key (public, embedded in the Zing web/app). Uses the
+// secret, a saved value, or auto-discovers it from the Zing website (the Worker
+// can reach it even though it looks like just an app).
+async function getFirebaseKey(env) {
+  if (env.FIREBASE_API_KEY) return env.FIREBASE_API_KEY;
+  const c = await getMusicCreds(env);
+  if (c.firebaseKey) return c.firebaseKey;
+  const key = await discoverFirebaseKey(env);
+  if (key) { c.firebaseKey = key; await saveMusicCreds(env, c); }
+  return key || "";
+}
+async function discoverFirebaseKey(env) {
+  const rx = /AIza[0-9A-Za-z_\-]{35}/;
+  const seeds = ["https://jewishmusic.fm", "https://www.jewishmusic.fm", "https://app.jewishmusic.fm"];
+  for (const url of seeds) {
+    try {
+      const r = await fetchT(url, {}, 12000);
+      if (!r.ok) continue;
+      const html = await r.text();
+      let m = html.match(rx);
+      if (m) return m[0];
+      const scripts = [];
+      const re = /<script[^>]+src=["']([^"']+)["']/gi; let sm;
+      while ((sm = re.exec(html)) && scripts.length < 10) scripts.push(sm[1]);
+      for (let s of scripts) {
+        try {
+          if (s.startsWith("//")) s = "https:" + s;
+          else if (s.startsWith("/")) s = new URL(s, url).href;
+          else if (!/^https?:/i.test(s)) continue;
+          const jr = await fetchT(s, {}, 12000);
+          if (!jr.ok) continue;
+          const js = await jr.text();
+          const mm = js.match(rx);
+          if (mm) return mm[0];
+        } catch (e) { /* next */ }
+      }
+    } catch (e) { /* next seed */ }
+  }
+  return "";
+}
+// Refresh an ID token using a stored Firebase refresh token + the (public) key.
+async function firebaseRefreshWith(env, refreshToken) {
+  const key = await getFirebaseKey(env);
+  if (!key || !refreshToken) return { ok: false, error: "No Firebase key / refresh token." };
+  try {
+    const r = await fetchT("https://securetoken.googleapis.com/v1/token?key=" + encodeURIComponent(key),
+      { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(refreshToken) }, 15000);
+    const d = await r.json().catch(() => ({}));
+    const idt = d && (d.id_token || d.access_token);
+    if (idt) { CACHED_TOKEN = idt; CACHED_EXP = Math.floor(Date.now() / 1000) + (parseInt(d.expires_in, 10) || 3600); return { ok: true, token: idt }; }
+    return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Refresh returned " + r.status) };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+// Sign in to Firebase with the Zing email/password (Zing uses Firebase auth).
+// Saves the refresh token so future tokens renew automatically — forever.
+async function firebaseSignIn(env, email, password) {
+  const key = await getFirebaseKey(env);
+  if (!key) return { ok: false, error: "Couldn’t find the Zing Firebase key (auto-discovery failed)." };
+  try {
+    const r = await fetchT("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + encodeURIComponent(key),
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password, returnSecureToken: true }) }, 15000);
+    const d = await r.json().catch(() => ({}));
+    if (d && d.idToken) {
+      CACHED_TOKEN = d.idToken;
+      CACHED_EXP = Math.floor(Date.now() / 1000) + (parseInt(d.expiresIn, 10) || 3600);
+      if (d.refreshToken) { const c = await getMusicCreds(env); c.firebaseRefresh = d.refreshToken; await saveMusicCreds(env, c); }
+      return { ok: true, token: d.idToken };
+    }
+    return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Firebase sign-in failed (" + r.status + ").") };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+
 // Music-server login can be set in the Admin panel (stored in D1) instead of
 // only via Cloudflare secrets, so the owner can fix it from their phone. The
 // in-app values take precedence over the secrets. These are never sent to the
@@ -875,19 +949,17 @@ async function loginDiag(env, request) {
   const cr = await musicCreds(env);
   const out = { hasEmail: !!cr.email, hasToken: !!cr.token };
   if (cr.email && cr.password) {
-    const lr = await zingLogin(env);
-    out.loginOk = !!lr.ok;
-    out.loginError = lr.ok ? null : (lr.error || "unknown");
-    out.note = lr.ok
-      ? "Login OK, but the music server still rejected the token — Zing's audio needs a different token than email/password gives. Use the token box."
-      : "Login failed — the email/password (or the login method) is wrong.";
-    if (lr.ok) {
-      try { const am = await introspectAuthMutations(env); out.authMutations = (am && am.candidates) || null; } catch (e) {}
-    } else {
-      try { const am = await introspectAuthMutations(env); out.authMutations = (am && am.candidates) || null; } catch (e) {}
-    }
+    const key = await getFirebaseKey(env);
+    out.firebaseKeyFound = !!key;
+    if (!key) { out.note = "Couldn’t auto-find the Zing Firebase key. Tell the developer."; return out; }
+    const fr = await firebaseSignIn(env, cr.email, cr.password);
+    out.firebaseLoginOk = !!fr.ok;
+    out.firebaseLoginError = fr.ok ? null : (fr.error || "unknown");
+    out.note = fr.ok
+      ? "Firebase sign-in OK, but the audio server still refused the token."
+      : "Firebase sign-in failed — likely the Zing email/password is wrong.";
   } else {
-    out.note = "No email/password saved — set the Music server login, or paste a token.";
+    out.note = "No email/password saved — set the Music server login.";
   }
   return out;
 }
@@ -1155,13 +1227,25 @@ async function currentToken(env, forceLogin) {
   if (!forceLogin && CACHED_TOKEN && (CACHED_EXP === 0 || now < CACHED_EXP - 60)) {
     return CACHED_TOKEN;
   }
-  // Preferred: Firebase refresh token (works forever, no re-login).
+  // Preferred: Firebase refresh token from secrets (works forever).
   if (canFirebase(env)) {
     const res = await firebaseRefresh(env);
     if (res.ok) return res.token;
   }
-  // Alternative: email/password login (from secrets or the Admin panel).
+  const c = await getMusicCreds(env);
+  // A saved Firebase refresh token (from a previous sign-in) — renew silently.
+  if (c.firebaseRefresh) {
+    const res = await firebaseRefreshWith(env, c.firebaseRefresh);
+    if (res.ok) return res.token;
+  }
   const cr = await musicCreds(env);
+  // Zing uses Firebase: sign in with the email/password to get (and store) a
+  // fresh token + refresh token.
+  if (cr.email && cr.password) {
+    const res = await firebaseSignIn(env, cr.email, cr.password);
+    if (res.ok) return res.token;
+  }
+  // Last resort: a Keystone-style GraphQL login (most Zing-like APIs don't have one).
   if (env.API_URL && cr.email && cr.password) {
     const res = await zingLogin(env);
     if (res.ok) return res.token;
@@ -2605,10 +2689,12 @@ const PAGE = `<!DOCTYPE html>
       fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ info+="\\n/api/play → HTTP "+r.status+"  "+(r.headers.get("Content-Type")||"");
         if(r.status>=400){ return r.text().then(function(tx){
           try{ var j=JSON.parse(tx); if(j.error) info+="\\nerror: "+j.error; var dg=j.diag;
-            if(dg){ if(dg.loginOk!==undefined) info+="\\nlogin: "+(dg.loginOk?"OK ✓":"FAILED ✗");
+            if(dg){ if(dg.firebaseKeyFound!==undefined) info+="\\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
+              if(dg.firebaseLoginOk!==undefined) info+="\\nFirebase login: "+(dg.firebaseLoginOk?"OK ✓":"FAILED ✗");
+              if(dg.firebaseLoginError) info+="\\nFirebase error: "+dg.firebaseLoginError;
+              if(dg.loginOk!==undefined) info+="\\nlogin: "+(dg.loginOk?"OK ✓":"FAILED ✗");
               if(dg.loginError) info+="\\nlogin error: "+dg.loginError;
-              if(dg.note) info+="\\nnote: "+dg.note;
-              if(dg.authMutations) info+="\\nZing logins available: "+((dg.authMutations||[]).join(", ")||"(none found)"); }
+              if(dg.note) info+="\\nnote: "+dg.note; }
           }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
           showDiag(info); }); } showDiag(info);
       }).catch(function(e){ info+="\\nfetch error: "+((e&&e.message)||e); showDiag(info); }); }
