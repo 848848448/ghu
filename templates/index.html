@@ -866,7 +866,8 @@
       fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ info+="\n/api/play → HTTP "+r.status+"  "+(r.headers.get("Content-Type")||"");
         if(r.status>=400){ return r.text().then(function(tx){
           try{ var j=JSON.parse(tx); if(j.error) info+="\nerror: "+j.error; var dg=j.diag;
-            if(dg){ if(dg.firebaseKeyFound!==undefined) info+="\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
+            if(dg){ if(dg.build) info+="\nBUILD: "+dg.build;
+              if(dg.firebaseKeyFound!==undefined) info+="\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
               if(dg.firebaseLoginOk!==undefined) info+="\nFirebase login: "+(dg.firebaseLoginOk?"OK ✓":"FAILED ✗");
               if(dg.firebaseLoginError) info+="\nFirebase error: "+dg.firebaseLoginError;
               if(dg.audio_queryToken!==undefined) info+="\naudio ?token: "+dg.audio_queryToken;

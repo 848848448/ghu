@@ -11,6 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
+const BUILD = "b70-firebase-cache-2026-09-29";
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -960,7 +961,7 @@ async function loginDiag(env, request) {
     if (!(await isAdminReq(env, request, {}))) return null;
   } catch (e) { return null; }
   const cr = await musicCreds(env);
-  const out = { hasEmail: !!cr.email, hasToken: !!cr.token };
+  const out = { build: BUILD, hasEmail: !!cr.email, hasToken: !!cr.token };
   if (cr.email && cr.password) {
     const key = await getFirebaseKey(env);
     out.firebaseKeyFound = !!key;
@@ -2747,7 +2748,8 @@ const PAGE = `<!DOCTYPE html>
       fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ info+="\\n/api/play → HTTP "+r.status+"  "+(r.headers.get("Content-Type")||"");
         if(r.status>=400){ return r.text().then(function(tx){
           try{ var j=JSON.parse(tx); if(j.error) info+="\\nerror: "+j.error; var dg=j.diag;
-            if(dg){ if(dg.firebaseKeyFound!==undefined) info+="\\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
+            if(dg){ if(dg.build) info+="\\nBUILD: "+dg.build;
+              if(dg.firebaseKeyFound!==undefined) info+="\\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
               if(dg.firebaseLoginOk!==undefined) info+="\\nFirebase login: "+(dg.firebaseLoginOk?"OK ✓":"FAILED ✗");
               if(dg.firebaseLoginError) info+="\\nFirebase error: "+dg.firebaseLoginError;
               if(dg.audio_queryToken!==undefined) info+="\\naudio ?token: "+dg.audio_queryToken;
