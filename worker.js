@@ -11,7 +11,8 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b70-firebase-cache-2026-09-29";
+const BUILD = "b71-signin-only-2026-09-30";
+const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -888,8 +889,7 @@ async function firebaseRefreshWith(env, refreshToken) {
     const idt = d && (d.id_token || d.access_token);
     if (idt) {
       const exp = Math.floor(Date.now() / 1000) + (parseInt(d.expires_in, 10) || 3600);
-      CACHED_TOKEN = idt; CACHED_EXP = exp;
-      try { const c = await getMusicCreds(env); c.idToken = idt; c.idExp = exp; if (d.refresh_token) c.firebaseRefresh = d.refresh_token; await saveMusicCreds(env, c); } catch (e) {}
+      CACHED_TOKEN = idt; CACHED_EXP = exp; // per-isolate only; NOT cached in D1 (these tokens are rejected by the audio server)
       return { ok: true, token: idt };
     }
     return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Refresh returned " + r.status) };
@@ -909,12 +909,10 @@ async function firebaseSignIn(env, email, password) {
       const exp = Math.floor(Date.now() / 1000) + (parseInt(d.expiresIn, 10) || 3600);
       CACHED_TOKEN = d.idToken;
       CACHED_EXP = exp;
-      // Cache the working token in D1 too, shared across all Worker isolates, so
-      // we DON'T sign in on every request (which Firebase rate-limits).
-      const c = await getMusicCreds(env);
-      c.idToken = d.idToken; c.idExp = exp;
-      if (d.refreshToken) c.firebaseRefresh = d.refreshToken;
-      await saveMusicCreds(env, c);
+      // Cache this working sign-in token in D1 (versioned), shared across all
+      // Worker isolates, so we don't sign in on every request (Firebase
+      // rate-limits that).
+      try { const c = await getMusicCreds(env); c.idToken = d.idToken; c.idExp = exp; c.tokenVer = TOKEN_VER; await saveMusicCreds(env, c); } catch (e) {}
       return { ok: true, token: d.idToken };
     }
     return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Firebase sign-in failed (" + r.status + ").") };
@@ -1272,7 +1270,7 @@ async function currentToken(env, forceLogin) {
   // about to expire, so we don't sign in on every request (Firebase rate-limits
   // that, which caused intermittent 403s).
   const c0 = await getMusicCreds(env);
-  if (!forceLogin && c0.idToken && c0.idExp && now < c0.idExp - 120) {
+  if (!forceLogin && c0.idToken && c0.tokenVer === TOKEN_VER && c0.idExp && now < c0.idExp - 120) {
     CACHED_TOKEN = c0.idToken; CACHED_EXP = c0.idExp;
     return c0.idToken;
   }
@@ -1283,16 +1281,11 @@ async function currentToken(env, forceLogin) {
   }
   const cr = await musicCreds(env);
   // Zing uses Firebase: a full email/password sign-in gives a token the audio
-  // server accepts. The token is cached in D1 (above) so this runs at most once
-  // an hour, not on every request.
+  // server accepts. (We deliberately do NOT use the securetoken refresh flow —
+  // its tokens are rejected by Zing's audio server. The sign-in token is cached
+  // in D1 above, so this runs at most ~once an hour, not on every request.)
   if (cr.email && cr.password) {
     const res = await firebaseSignIn(env, cr.email, cr.password);
-    if (res.ok) return res.token;
-  }
-  // Fallback: renew silently with a saved refresh token.
-  const c = await getMusicCreds(env);
-  if (c.firebaseRefresh) {
-    const res = await firebaseRefreshWith(env, c.firebaseRefresh);
     if (res.ok) return res.token;
   }
   // Last resort: a Keystone-style GraphQL login (most Zing-like APIs don't have one).
