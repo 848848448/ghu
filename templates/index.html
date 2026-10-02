@@ -884,6 +884,7 @@
                 if(tr.openedWith!==undefined) info+="\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
                 if(tr.audioAfterSession) info+="\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
                 if(tr.error) info+="\n  error: "+tr.error; }
+              if(dg.recon){ var rc=dg.recon; info+="\nrecon bundles: "+((rc.bundles||[]).length); if(rc.error) info+="\n  recon error: "+rc.error; if(rc.hits){ for(var kw in rc.hits){ info+="\n  ["+kw+"] "+rc.hits[kw].join("  ||  "); } } }
               if(dg.note) info+="\nnote: "+dg.note; }
           }catch(e){ info+="\nbody: "+(tx||"").slice(0,400); }
           showDiag(info); }); } showDiag(info);
