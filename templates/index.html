@@ -898,9 +898,16 @@
     audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
       if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
       diagPlay(t); // show the owner the exact reason on the first real failure
-      _fails++; var n=nextInOrder();
-      if(_fails>=3 || n<0){ playbackDown(); return; } // 3 in a row ⇒ server/login problem, stop
-      toast("Skipping a track that won’t play…"); playIndex(n);
+      // Find out *why* it failed: a 403 means this one track is locked/unavailable
+      // (most of the catalog still plays), not that the whole player is down.
+      fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){return r.status;}).catch(function(){return 0;}).then(function(st){
+        var locked=(st===403);
+        _fails++; var n=nextInOrder();
+        if(n>=0 && _fails<3){ if(locked) toast("This song isn’t available — skipping."); else toast("Skipping a track that won’t play…"); playIndex(n); return; }
+        // Nothing else to try.
+        if(locked){ toast("This song isn’t available to stream right now."); }
+        else { playbackDown(); } // real outage (login/server) ⇒ alert
+      });
     });
     $("seek").addEventListener("input", function(){ if(audio.duration){ audio.currentTime=this.value/1000*audio.duration; } });
     function dlCurrent(){ var t=queue[qi]; if(t) downloadTrack(t.id, t.file); }
