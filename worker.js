@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b77-audioform-2026-10-02";
+const BUILD = "b78-recon-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -989,6 +989,7 @@ async function loginDiag(env, request, realTrackId) {
       try { out.startStreamingSession = await introspectMutation(env, "startStreamingSession"); } catch (e) {}
       try { out.sessionResult = await introspectType(env, "SessionResult"); } catch (e) {}
       try { out.sessionTry = await tryStartSession(env, fr.token, tid); } catch (e) { out.sessionTry = { error: String((e && e.message) || e) }; }
+      try { out.recon = await reconClientJS(env); } catch (e) { out.recon = { error: String((e && e.message) || e) }; }
     } else {
       out.note = "Firebase sign-in failed — likely the Zing email/password is wrong.";
     }
@@ -1058,6 +1059,41 @@ async function introspectEnum(env, name) {
     if (!t) return { found: false };
     return (t.enumValues || []).map((e) => e.name);
   } catch (e) { return [String((e && e.message) || e)]; }
+}
+
+// Fetch the real jewishmusic.fm web player's JS and extract how it builds the
+// audio/stream request (so we stop guessing the session form).
+async function reconClientJS(env) {
+  const out = { bundles: [], hits: {} };
+  try {
+    const r = await fetchT("https://jewishmusic.fm/", {}, 12000);
+    const html = await r.text();
+    const srcs = [];
+    const re = /<script[^>]+src=["']([^"']+)["']/g; let m;
+    while ((m = re.exec(html)) && srcs.length < 14) srcs.push(m[1]);
+    const abs = srcs.map((s) => s.startsWith("http") ? s : ("https://jewishmusic.fm" + (s.startsWith("/") ? "" : "/") + s));
+    out.bundles = abs.slice(0, 14);
+    const audHost = (() => { try { return new URL(env.AUDIO_API_BASE).host; } catch (e) { return null; } })();
+    const keywords = ["startStreamingSession", "sessionId", "royaltyMode", "Heartbeat", "/stream", ".mp3", "trackId"];
+    if (audHost) keywords.push(audHost);
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const u of abs.slice(0, 10)) {
+      try {
+        const jr = await fetchT(u, {}, 10000); if (!jr.ok) continue;
+        let js = await jr.text(); if (js.length > 3000000) js = js.slice(0, 3000000);
+        for (const kw of keywords) {
+          const kre = new RegExp("(.{0,70})" + esc(kw) + "(.{0,140})", "g");
+          let mm, n = 0;
+          while ((mm = kre.exec(js)) && n < 2) {
+            const key = kw === audHost ? "AUDIO_HOST" : kw;
+            (out.hits[key] = out.hits[key] || []).push((mm[1] + "«" + (kw === audHost ? "HOST" : kw) + "»" + mm[2]).replace(/\s+/g, " ").slice(0, 230));
+            n++;
+          }
+        }
+      } catch (e) {}
+    }
+  } catch (e) { out.error = String((e && e.message) || e); }
+  return out;
 }
 
 // List root query/mutation field names matching a pattern (to discover how to
@@ -2925,6 +2961,7 @@ const PAGE = `<!DOCTYPE html>
                 if(tr.openedWith!==undefined) info+="\\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
                 if(tr.audioAfterSession) info+="\\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
                 if(tr.error) info+="\\n  error: "+tr.error; }
+              if(dg.recon){ var rc=dg.recon; info+="\\nrecon bundles: "+((rc.bundles||[]).length); if(rc.error) info+="\\n  recon error: "+rc.error; if(rc.hits){ for(var kw in rc.hits){ info+="\\n  ["+kw+"] "+rc.hits[kw].join("  ||  "); } } }
               if(dg.note) info+="\\nnote: "+dg.note; }
           }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
           showDiag(info); }); } showDiag(info);
