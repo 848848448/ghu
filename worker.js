@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b71-signin-only-2026-09-30";
+const BUILD = "b72-sortfix-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2429,7 +2429,7 @@ const PAGE = `<!DOCTYPE html>
       if(/^https?:/i.test(url)){ window.open(url,"_blank"); } }
     function home(){
       setStatus(""); setView(skHome());
-      var pBan=gql("query { banners(take: 15, orderBy: [{ index: asc }]) { id enName heName enImage heImage url index platform } }").then(function(d){return d.banners||[];}).catch(function(){return [];});
+      var pBan=gql("query { banners(take: 15) { id enName heName enImage heImage url index platform } }").then(function(d){ var b=d.banners||[]; b.sort(function(x,y){return (x.index||0)-(y.index||0);}); return b; }).catch(function(){return [];});
       var pNew=post("/api/new",{}).then(function(d){return d.albums||[];}).catch(function(){return [];});
       var pPop=gql("query { getMostPlayed(input: { type: ALBUMS, period: MONTH, limit: 12 }) { albumsWithEntities { plays album { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } } }").then(function(d){ return (((d.getMostPlayed||{}).albumsWithEntities)||[]).map(function(x){return x.album;}).filter(Boolean); }).catch(function(){return [];});
       var pGen=gql("query { genres(take: 20) { id enName heName } }").then(function(d){return d.genres||[];}).catch(function(){return [];});
@@ -2508,9 +2508,9 @@ const PAGE = `<!DOCTYPE html>
       }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
     }
     function openStory(id){ saveRoute("story",id); loading("Loading…");
-      gql("query { story(where:{id:"+Number(id)+"}) { id enName heName imageUrl articles(orderBy:[{ index: asc }]) { id enName heName pdfUrl releaseDate } } }").then(function(d){
+      gql("query { story(where:{id:"+Number(id)+"}) { id enName heName imageUrl articles { id enName heName pdfUrl releaseDate index } } }").then(function(d){
         var s=d.story; setStatus(""); if(!s){ setView('<div class="empty">Story not found.</div>'); return; }
-        var nm=pick(s.enName,s.heName)||"Story"; var arts=s.articles||[];
+        var nm=pick(s.enName,s.heName)||"Story"; var arts=(s.articles||[]).slice().sort(function(x,y){return (x.index||0)-(y.index||0);});
         var back='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>';
         var rows=arts.map(function(a){ var an=pick(a.enName,a.heName)||("Part "+a.id);
           return '<div class="track" onclick="openArticle('+esc(JSON.stringify(a.pdfUrl||"")).replace(/"/g,"&quot;")+')"><div class="num">'+ic("featured_play_list")+'</div><div class="tk">'+esc(an)+'</div><div class="dl">'+ic("chevron_right")+'</div></div>'; }).join("");
