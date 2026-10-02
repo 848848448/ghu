@@ -872,6 +872,7 @@
               if(dg.firebaseLoginError) info+="\nFirebase error: "+dg.firebaseLoginError;
               if(dg.realTrack!==undefined) info+="\nreal track "+dg.realTrack+" → ?token range: "+dg.audio_real_range+"  full: "+dg.audio_real_full+"  Bearer: "+dg.audio_real_bearer;
               if(dg.sampleTrack!==undefined) info+="\nsample track "+dg.sampleTrack+" → ?token: "+dg.audio_sample;
+              if(dg.catalogSummary) info+="\ncatalog scan (10 albums): "+JSON.stringify(dg.catalogSummary)+"  "+JSON.stringify(dg.catalogScan).slice(0,260);
               if(dg.tokenClaims) info+="\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?")+(dg.tokenClaims.user_id?(" uid="+dg.tokenClaims.user_id):"");
               if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
               if(dg.sessionResult){ var sr=dg.sessionResult; info+="\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }

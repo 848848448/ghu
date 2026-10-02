@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b81-heartbeat-2026-10-02";
+const BUILD = "b82-catalogscan-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -992,6 +992,21 @@ async function loginDiag(env, request, realTrackId) {
       } catch (e) { out.audio_sample = "err"; }
       // Keep the Bearer-form probe on the real track for completeness.
       try { const r = await fetchT(base + "?trackId=" + encodeURIComponent(tid), { headers: { Range: "bytes=0-1", Authorization: "Bearer " + fr.token } }, 12000); out.audio_real_bearer = r.status; } catch (e) { out.audio_real_bearer = "err"; }
+      // Catalog scan: one track from several different albums, to see how much
+      // of the library actually streams with the plain token (206) vs 403.
+      try {
+        const d = await graphql(env, "query { albums(take: 10, orderBy: [{ id: desc }]) { id enName tracks(take: 1) { id } } }");
+        const albs = ((d && d.data && d.data.albums) || []);
+        out.catalogScan = [];
+        for (const a of albs) {
+          const t0 = (a.tracks || [])[0];
+          if (!t0 || t0.id == null) continue;
+          let s = "err";
+          try { const r = await fetchT(qurl(t0.id), { headers: { Range: "bytes=0-1" } }, 8000); s = r.status; } catch (e) {}
+          out.catalogScan.push({ album: a.id, track: t0.id, status: s });
+        }
+        out.catalogSummary = out.catalogScan.reduce((m, x) => { m[x.status] = (m[x.status] || 0) + 1; return m; }, {});
+      } catch (e) { out.catalogScan = [{ error: String((e && e.message) || e) }]; }
       try { out.startStreamingSession = await introspectMutation(env, "startStreamingSession"); } catch (e) {}
       try { out.sessionResult = await introspectType(env, "SessionResult"); } catch (e) {}
       try { out.sessionTry = await tryStartSession(env, fr.token, tid); } catch (e) { out.sessionTry = { error: String((e && e.message) || e) }; }
@@ -2982,6 +2997,7 @@ const PAGE = `<!DOCTYPE html>
               if(dg.firebaseLoginError) info+="\\nFirebase error: "+dg.firebaseLoginError;
               if(dg.realTrack!==undefined) info+="\\nreal track "+dg.realTrack+" → ?token range: "+dg.audio_real_range+"  full: "+dg.audio_real_full+"  Bearer: "+dg.audio_real_bearer;
               if(dg.sampleTrack!==undefined) info+="\\nsample track "+dg.sampleTrack+" → ?token: "+dg.audio_sample;
+              if(dg.catalogSummary) info+="\\ncatalog scan (10 albums): "+JSON.stringify(dg.catalogSummary)+"  "+JSON.stringify(dg.catalogScan).slice(0,260);
               if(dg.tokenClaims) info+="\\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?")+(dg.tokenClaims.user_id?(" uid="+dg.tokenClaims.user_id):"");
               if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
               if(dg.sessionResult){ var sr=dg.sessionResult; info+="\\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }
