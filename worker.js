@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b79-recon-btn-2026-10-02";
+const BUILD = "b80-recon2-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1070,35 +1070,50 @@ async function introspectEnum(env, name) {
 // Fetch the real jewishmusic.fm web player's JS and extract how it builds the
 // audio/stream request (so we stop guessing the session form).
 async function reconClientJS(env) {
-  const out = { bundles: [], hits: {} };
-  try {
-    const r = await fetchT("https://jewishmusic.fm/", {}, 12000);
-    const html = await r.text();
-    const srcs = [];
-    const re = /<script[^>]+src=["']([^"']+)["']/g; let m;
-    while ((m = re.exec(html)) && srcs.length < 14) srcs.push(m[1]);
-    const abs = srcs.map((s) => s.startsWith("http") ? s : ("https://jewishmusic.fm" + (s.startsWith("/") ? "" : "/") + s));
-    out.bundles = abs.slice(0, 14);
-    const audHost = (() => { try { return new URL(env.AUDIO_API_BASE).host; } catch (e) { return null; } })();
-    const keywords = ["startStreamingSession", "sessionId", "royaltyMode", "Heartbeat", "/stream", ".mp3", "trackId"];
-    if (audHost) keywords.push(audHost);
-    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    for (const u of abs.slice(0, 10)) {
-      try {
-        const jr = await fetchT(u, {}, 10000); if (!jr.ok) continue;
-        let js = await jr.text(); if (js.length > 3000000) js = js.slice(0, 3000000);
-        for (const kw of keywords) {
-          const kre = new RegExp("(.{0,70})" + esc(kw) + "(.{0,140})", "g");
-          let mm, n = 0;
-          while ((mm = kre.exec(js)) && n < 2) {
-            const key = kw === audHost ? "AUDIO_HOST" : kw;
-            (out.hits[key] = out.hits[key] || []).push((mm[1] + "«" + (kw === audHost ? "HOST" : kw) + "»" + mm[2]).replace(/\s+/g, " ").slice(0, 230));
-            n++;
-          }
+  const out = { bundles: [], hits: {}, pages: [] };
+  const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml" };
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const audHost = (() => { try { return new URL(env.AUDIO_API_BASE).host; } catch (e) { return null; } })();
+  const apiHost = (() => { try { return new URL(env.API_URL).host; } catch (e) { return null; } })();
+  const keywords = ["startStreamingSession", "sessionId", "royaltyMode", "Heartbeat", "/stream", ".mp3", "trackId"];
+  if (audHost) keywords.push(audHost);
+  // Collect candidate JS URLs from one or more entry pages.
+  const jsUrls = new Set();
+  const entryPages = ["https://jewishmusic.fm/", "https://app.jewishmusic.fm/", "https://www.jewishmusic.fm/"];
+  for (const page of entryPages) {
+    try {
+      const r = await fetchT(page, { headers: UA }, 12000);
+      const html = await r.text();
+      out.pages.push({ url: page, status: r.status, len: html.length, head: html.slice(0, 160).replace(/\s+/g, " ") });
+      // Broad extraction: src=, href=, modulepreload, and bare /_next or .js paths.
+      const pats = [
+        /["'](https?:\/\/[^"']+?\.js[^"']*)["']/g,
+        /["'](\/[^"']+?\.js[^"']*)["']/g,
+        /(\/_next\/static\/[^"'\s)]+\.js)/g,
+        /src=["']([^"']+)["']/g,
+      ];
+      const baseHost = new URL(page).origin;
+      for (const p of pats) { let m; while ((m = p.exec(html))) { let s = m[1]; if (!/\.js(\?|$)/.test(s)) continue; const abs = s.startsWith("http") ? s : (baseHost + (s.startsWith("/") ? "" : "/") + s); jsUrls.add(abs); } }
+      if (jsUrls.size) break; // got bundles from this page
+    } catch (e) { out.pages.push({ url: page, error: String((e && e.message) || e) }); }
+  }
+  const abs = Array.from(jsUrls).slice(0, 16);
+  out.bundles = abs;
+  for (const u of abs.slice(0, 12)) {
+    try {
+      const jr = await fetchT(u, { headers: UA }, 10000); if (!jr.ok) continue;
+      let js = await jr.text(); if (js.length > 3500000) js = js.slice(0, 3500000);
+      for (const kw of keywords) {
+        const kre = new RegExp("(.{0,70})" + esc(kw) + "(.{0,150})", "g");
+        let mm, n = 0;
+        while ((mm = kre.exec(js)) && n < 2) {
+          const key = kw === audHost ? "AUDIO_HOST" : kw;
+          (out.hits[key] = out.hits[key] || []).push((mm[1] + "«" + (kw === audHost ? "HOST" : kw) + "»" + mm[2]).replace(/\s+/g, " ").slice(0, 240));
+          n++;
         }
-      } catch (e) {}
-    }
-  } catch (e) { out.error = String((e && e.message) || e); }
+      }
+    } catch (e) {}
+  }
   return out;
 }
 
@@ -3437,7 +3452,8 @@ const PAGE = `<!DOCTYPE html>
     function reconMusic(){ musicMsg("Reading the Zing player… (up to ~30 seconds)","var(--muted)");
       post("/api/admin/music",{admin:_admPw,action:"recon"}).then(function(d){ var rc=(d&&d.recon)||{}; var info="recon bundles: "+((rc.bundles||[]).length);
         if(rc.error) info+="\\nerror: "+rc.error;
-        if(rc.bundles) info+="\\n"+rc.bundles.join("\\n");
+        if(rc.pages){ info+="\\npages:"; rc.pages.forEach(function(p){ info+="\\n  "+p.url+" → "+(p.error?("ERR "+p.error):("HTTP "+p.status+" len="+p.len+" | "+(p.head||""))); }); }
+        if(rc.bundles&&rc.bundles.length) info+="\\nbundles:\\n"+rc.bundles.join("\\n");
         if(rc.hits){ for(var kw in rc.hits){ info+="\\n\\n["+kw+"]\\n"+rc.hits[kw].join("\\n"); } }
         window._copy=info; var m=$("musicMsg"); if(m){ m.style.color="var(--text)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.75rem;max-height:50vh;overflow:auto">'+esc(info)+'</pre><button class="btn sm" style="margin-top:6px" onclick="copyText(this)">Copy</button>'; }
       }).catch(function(e){ musicMsg(e.message||"Recon failed.","var(--err)"); }); }
