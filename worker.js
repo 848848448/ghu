@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b78-recon-2026-10-02";
+const BUILD = "b79-recon-btn-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -781,6 +781,12 @@ async function handleAdminMusic(request, env) {
     } catch (e) {
       return json({ ok: false, error: String((e && e.message) || e), detail });
     }
+  }
+  if (action === "recon") {
+    // Read the real jewishmusic.fm player JS. Needs no login or audio server,
+    // so it won't trip rate limits.
+    try { return json({ ok: true, recon: await reconClientJS(env) }); }
+    catch (e) { return json({ ok: false, error: String((e && e.message) || e) }); }
   }
   return json({ has: await status() });
 }
@@ -3402,7 +3408,7 @@ const PAGE = `<!DOCTYPE html>
         '<input id="mzToken" class="field" style="margin-top:6px" placeholder="Session token (optional)" autocomplete="off" />'+
         '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="saveMusic()">Save &amp; test</button><button class="chip" onclick="testMusic()">Test</button></div>'+
         '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
-        '<div style="margin-top:6px"><button class="chip" onclick="clearMusic()">Clear login</button></div>'+
+        '<div style="margin-top:6px;display:flex;gap:8px"><button class="chip" onclick="clearMusic()">Clear login</button><button class="chip" onclick="reconMusic()">Stream recon (dev)</button></div>'+
         '</div></div>';
       ovlSet("Admin", back+musicCard+presCard+statsCard+usersCards+appCard+featCard+accCard);
       loadMusicStatus();
@@ -3428,6 +3434,13 @@ const PAGE = `<!DOCTYPE html>
           var m=$("musicMsg"); if(m){ m.style.color="var(--err)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;margin:0;font-size:.8rem">'+esc(msg)+'</pre><button class="btn sm" style="margin-top:6px" onclick="window._copy='+JSON.stringify(JSON.stringify(msg))+';copyText(this)">Copy</button>'; }
         } }).catch(function(e){ done=true; clearTimeout(to); musicMsg(e.message||"Test failed.","var(--err)"); }); }
     function clearMusic(){ if(!confirm("Clear the saved music-server login?")) return; post("/api/admin/music",{admin:_admPw,action:"clear"}).then(function(d){ renderMusicStatus(d.has); musicMsg("Cleared.","var(--muted)"); }).catch(function(){}); }
+    function reconMusic(){ musicMsg("Reading the Zing player… (up to ~30 seconds)","var(--muted)");
+      post("/api/admin/music",{admin:_admPw,action:"recon"}).then(function(d){ var rc=(d&&d.recon)||{}; var info="recon bundles: "+((rc.bundles||[]).length);
+        if(rc.error) info+="\\nerror: "+rc.error;
+        if(rc.bundles) info+="\\n"+rc.bundles.join("\\n");
+        if(rc.hits){ for(var kw in rc.hits){ info+="\\n\\n["+kw+"]\\n"+rc.hits[kw].join("\\n"); } }
+        window._copy=info; var m=$("musicMsg"); if(m){ m.style.color="var(--text)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.75rem;max-height:50vh;overflow:auto">'+esc(info)+'</pre><button class="btn sm" style="margin-top:6px" onclick="copyText(this)">Copy</button>'; }
+      }).catch(function(e){ musicMsg(e.message||"Recon failed.","var(--err)"); }); }
     function statTile(n,label){ return '<div style="flex:1;background:var(--surface-2);border-radius:12px;padding:12px 6px"><div style="font-size:1.5rem;font-weight:800">'+(n||0)+'</div><div class="muted" style="font-size:.72rem">'+esc(label)+'</div></div>'; }
     function timeAgo(at){ var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
     function statsHtml(s){
