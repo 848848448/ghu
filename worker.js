@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b83-lockedmsg-2026-10-02";
+const BUILD = "b84-light403-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1892,10 +1892,16 @@ async function handlePlay(url, request, env) {
     return json({ error: "Playback error: " + (exc && exc.message) }, 502);
   }
   if (upstream.status === 403) {
-    return json({ error: "Access Denied (403). Token expired and re-login failed.", diag: await loginDiag(env, request, trackId) }, 403);
+    // This track is locked/unavailable on Zing's audio server. Return a light,
+    // cheap response — no heavy sign-in/session probing here (that was tripping
+    // rate limits). Deep diagnosis lives behind the Admin "Stream recon" button.
+    return json({ error: "This track isn’t available to stream.", locked: true, status: 403 }, 403);
   }
   if (!upstream.ok && upstream.status !== 206) {
-    return json({ error: "Server returned code " + upstream.status + "." }, 502);
+    const msg = upstream.status === 429
+      ? "The music server is busy right now — please wait a minute and try again."
+      : ("Server returned code " + upstream.status + ".");
+    return json({ error: msg, status: upstream.status }, 502);
   }
 
   const headers = new Headers();
@@ -3022,7 +3028,6 @@ const PAGE = `<!DOCTYPE html>
     function showDiag(info){ window._copy=info; overlay("Why it won’t play", '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.8rem;margin:0">'+esc(info)+'</pre><button class="btn sm" style="margin-top:10px" onclick="copyText(this)">Copy</button><div class="muted" style="margin-top:8px">Send this to the developer.</div>'); }
     audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
       if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
-      diagPlay(t); // show the owner the exact reason on the first real failure
       // Find out *why* it failed: a 403 means this one track is locked/unavailable
       // (most of the catalog still plays), not that the whole player is down.
       fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){return r.status;}).catch(function(){return 0;}).then(function(st){
