@@ -870,11 +870,12 @@
               if(dg.firebaseKeyFound!==undefined) info+="\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
               if(dg.firebaseLoginOk!==undefined) info+="\nFirebase login: "+(dg.firebaseLoginOk?"OK ✓":"FAILED ✗");
               if(dg.firebaseLoginError) info+="\nFirebase error: "+dg.firebaseLoginError;
-              if(dg.audio_queryToken!==undefined) info+="\naudio ?token: "+dg.audio_queryToken;
-              if(dg.audio_bearer!==undefined) info+="\naudio Bearer: "+dg.audio_bearer;
-              if(dg.audio_both!==undefined) info+="\naudio both: "+dg.audio_both;
-              if(dg.tokenClaims) info+="\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?");
-              if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns+" fields["+(ss.returnFields||[]).join(",")+"]"):JSON.stringify(ss)); }
+              if(dg.realTrack!==undefined) info+="\nreal track "+dg.realTrack+" → ?token range: "+dg.audio_real_range+"  full: "+dg.audio_real_full+"  Bearer: "+dg.audio_real_bearer;
+              if(dg.sampleTrack!==undefined) info+="\nsample track "+dg.sampleTrack+" → ?token: "+dg.audio_sample;
+              if(dg.tokenClaims) info+="\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?")+(dg.tokenClaims.user_id?(" uid="+dg.tokenClaims.user_id):"");
+              if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
+              if(dg.sessionResult){ var sr=dg.sessionResult; info+="\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }
+              if(dg.sessionTry){ var tr=dg.sessionTry; info+="\nsession try: userId="+tr.userId+" profileId="+tr.profileId; if(tr.errors&&tr.errors.length) info+="\n  errors: "+tr.errors.join(" | "); if(tr.result) info+="\n  result: "+JSON.stringify(tr.result).slice(0,300); if(tr.error) info+="\n  error: "+tr.error; }
               if(dg.note) info+="\nnote: "+dg.note; }
           }catch(e){ info+="\nbody: "+(tx||"").slice(0,400); }
           showDiag(info); }); } showDiag(info);

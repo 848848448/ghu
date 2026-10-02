@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b72-sortfix-2026-10-02";
+const BUILD = "b73-session-probe-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -954,7 +954,7 @@ async function hasAuthNow(env) {
 
 // Compact login diagnosis, safe to return to an admin (never the secrets):
 // did the login work, and if it did, does the audio server still reject it?
-async function loginDiag(env, request) {
+async function loginDiag(env, request, realTrackId) {
   try {
     if (!(await isAdminReq(env, request, {}))) return null;
   } catch (e) { return null; }
@@ -970,15 +970,25 @@ async function loginDiag(env, request) {
     if (fr.ok) {
       out.note = "Firebase sign-in OK. Probing how Zing's audio wants the token…";
       out.tokenClaims = decodeJwtClaims(fr.token);
-      // Real track id to test with.
-      let tid = 1;
-      try { const d = await graphql(env, "query { albums(take: 1) { tracks { id } } }"); const t = (((d && d.data && d.data.albums) || [])[0] || {}).tracks || []; if (t[0] && t[0].id) tid = t[0].id; } catch (e) {}
       const base = env.AUDIO_API_BASE;
-      const rng = { Range: "bytes=0-0" };
-      try { const r1 = await fetchT(base + "?trackId=" + tid + "&token=" + encodeURIComponent(fr.token), { headers: rng }, 12000); out.audio_queryToken = r1.status; } catch (e) { out.audio_queryToken = "err"; }
-      try { const r2 = await fetchT(base + "?trackId=" + tid, { headers: Object.assign({}, rng, { Authorization: "Bearer " + fr.token }) }, 12000); out.audio_bearer = r2.status; } catch (e) { out.audio_bearer = "err"; }
-      try { const r3 = await fetchT(base + "?trackId=" + tid + "&token=" + encodeURIComponent(fr.token), { headers: Object.assign({}, rng, { Authorization: "Bearer " + fr.token }) }, 12000); out.audio_both = r3.status; } catch (e) { out.audio_both = "err"; }
+      // Probe the ACTUAL track the user tried to play (not a generic sample),
+      // so we can tell whether this specific track is gated.
+      const tid = realTrackId || 1;
+      out.realTrack = tid;
+      const qurl = (id) => base + "?trackId=" + encodeURIComponent(id) + "&token=" + encodeURIComponent(fr.token);
+      try { const r = await fetchT(qurl(tid), { headers: { Range: "bytes=0-1" } }, 12000); out.audio_real_range = r.status; } catch (e) { out.audio_real_range = "err"; }
+      try { const r = await fetchT(qurl(tid), {}, 12000); out.audio_real_full = r.status; } catch (e) { out.audio_real_full = "err"; }
+      // Compare against a known sample track (first track of the first album).
+      try {
+        const d = await graphql(env, "query { albums(take: 1) { tracks { id } } }");
+        const st = (((d && d.data && d.data.albums) || [])[0] || {}).tracks || [];
+        if (st[0] && st[0].id) { out.sampleTrack = st[0].id; const r = await fetchT(qurl(st[0].id), { headers: { Range: "bytes=0-1" } }, 12000); out.audio_sample = r.status; }
+      } catch (e) { out.audio_sample = "err"; }
+      // Keep the Bearer-form probe on the real track for completeness.
+      try { const r = await fetchT(base + "?trackId=" + encodeURIComponent(tid), { headers: { Range: "bytes=0-1", Authorization: "Bearer " + fr.token } }, 12000); out.audio_real_bearer = r.status; } catch (e) { out.audio_real_bearer = "err"; }
       try { out.startStreamingSession = await introspectMutation(env, "startStreamingSession"); } catch (e) {}
+      try { out.sessionResult = await introspectType(env, "SessionResult"); } catch (e) {}
+      try { out.sessionTry = await tryStartSession(env, fr.token, tid); } catch (e) { out.sessionTry = { error: String((e && e.message) || e) }; }
     } else {
       out.note = "Firebase sign-in failed — likely the Zing email/password is wrong.";
     }
@@ -1000,6 +1010,46 @@ async function introspectMutation(env, name) {
     if (!f) return { found: false };
     const tn = (t) => { while (t && !t.name && t.ofType) t = t.ofType; return t ? (t.kind + " " + t.name) : "?"; };
     return { found: true, args: (f.args || []).map((a) => a.name + ": " + tn(a.type)), returns: tn(f.type), returnFields: (((f.type || {}).ofType || {}).fields || (f.type || {}).fields || []).map((x) => x.name) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
+// Introspect a named GraphQL type to learn its fields (e.g. SessionResult, so
+// we know what startStreamingSession returns and how to use it).
+async function introspectType(env, name) {
+  const q = "query($n:String!){ __type(name:$n){ name kind fields { name type { kind name ofType { kind name } } } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, variables: { n: name } }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const t = (d.data || {}).__type;
+    if (!t) return { found: false };
+    const tn = (x) => { while (x && !x.name && x.ofType) x = x.ofType; return x ? (x.kind + " " + x.name) : "?"; };
+    return { found: true, kind: t.kind, fields: (t.fields || []).map((f) => f.name + ": " + tn(f.type)) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
+// Send an authenticated GraphQL request to Zing with the Firebase idToken.
+async function zingAuthed(env, token, query) {
+  const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (token || "") }, body: JSON.stringify({ query }) }, 12000);
+  return await r.json().catch(() => ({}));
+}
+
+// Attempt to open a streaming session for a track and report what comes back
+// (or the GraphQL errors, which usually name any required args we're missing).
+async function tryStartSession(env, token, trackId) {
+  try {
+    const t = await introspectType(env, "SessionResult");
+    const sel = (t.fields || []).map((f) => String(f).split(":")[0].trim()).filter(Boolean);
+    const selStr = sel.length ? "{ " + sel.join(" ") + " }" : "{ __typename }";
+    let profileId = null, userId = null;
+    try { const p = await zingAuthed(env, token, "query { profiles { id } }"); const ps = ((p.data || {}).profiles) || []; if (ps[0]) profileId = ps[0].id; } catch (e) {}
+    try { const m = await zingAuthed(env, token, "query { me { id } }"); userId = (((m.data || {}).me) || {}).id; } catch (e) {}
+    const args = ["trackId: " + Number(trackId)];
+    if (userId != null) args.push("userId: " + Number(userId));
+    if (profileId != null) args.push("profileId: " + Number(profileId));
+    args.push('platform: "WEB"'); args.push('version: "1.0.0"');
+    const q = "mutation { startStreamingSession(" + args.join(", ") + ") " + selStr + " }";
+    const r = await zingAuthed(env, token, q);
+    return { profileId, userId, query: q, result: r.data || null, errors: (r.errors || []).map((e) => e.message).slice(0, 4) };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 
@@ -1642,7 +1692,7 @@ async function handlePlay(url, request, env) {
     return json({ error: "Playback error: " + (exc && exc.message) }, 502);
   }
   if (upstream.status === 403) {
-    return json({ error: "Access Denied (403). Token expired and re-login failed.", diag: await loginDiag(env, request) }, 403);
+    return json({ error: "Access Denied (403). Token expired and re-login failed.", diag: await loginDiag(env, request, trackId) }, 403);
   }
   if (!upstream.ok && upstream.status !== 206) {
     return json({ error: "Server returned code " + upstream.status + "." }, 502);
@@ -2745,11 +2795,12 @@ const PAGE = `<!DOCTYPE html>
               if(dg.firebaseKeyFound!==undefined) info+="\\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
               if(dg.firebaseLoginOk!==undefined) info+="\\nFirebase login: "+(dg.firebaseLoginOk?"OK ✓":"FAILED ✗");
               if(dg.firebaseLoginError) info+="\\nFirebase error: "+dg.firebaseLoginError;
-              if(dg.audio_queryToken!==undefined) info+="\\naudio ?token: "+dg.audio_queryToken;
-              if(dg.audio_bearer!==undefined) info+="\\naudio Bearer: "+dg.audio_bearer;
-              if(dg.audio_both!==undefined) info+="\\naudio both: "+dg.audio_both;
-              if(dg.tokenClaims) info+="\\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?");
-              if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns+" fields["+(ss.returnFields||[]).join(",")+"]"):JSON.stringify(ss)); }
+              if(dg.realTrack!==undefined) info+="\\nreal track "+dg.realTrack+" → ?token range: "+dg.audio_real_range+"  full: "+dg.audio_real_full+"  Bearer: "+dg.audio_real_bearer;
+              if(dg.sampleTrack!==undefined) info+="\\nsample track "+dg.sampleTrack+" → ?token: "+dg.audio_sample;
+              if(dg.tokenClaims) info+="\\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?")+(dg.tokenClaims.user_id?(" uid="+dg.tokenClaims.user_id):"");
+              if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
+              if(dg.sessionResult){ var sr=dg.sessionResult; info+="\\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }
+              if(dg.sessionTry){ var tr=dg.sessionTry; info+="\\nsession try: userId="+tr.userId+" profileId="+tr.profileId; if(tr.errors&&tr.errors.length) info+="\\n  errors: "+tr.errors.join(" | "); if(tr.result) info+="\\n  result: "+JSON.stringify(tr.result).slice(0,300); if(tr.error) info+="\\n  error: "+tr.error; }
               if(dg.note) info+="\\nnote: "+dg.note; }
           }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
           showDiag(info); }); } showDiag(info);
