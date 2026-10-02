@@ -1354,7 +1354,8 @@
     function reconMusic(){ musicMsg("Reading the Zing player… (up to ~30 seconds)","var(--muted)");
       post("/api/admin/music",{admin:_admPw,action:"recon"}).then(function(d){ var rc=(d&&d.recon)||{}; var info="recon bundles: "+((rc.bundles||[]).length);
         if(rc.error) info+="\nerror: "+rc.error;
-        if(rc.bundles) info+="\n"+rc.bundles.join("\n");
+        if(rc.pages){ info+="\npages:"; rc.pages.forEach(function(p){ info+="\n  "+p.url+" → "+(p.error?("ERR "+p.error):("HTTP "+p.status+" len="+p.len+" | "+(p.head||""))); }); }
+        if(rc.bundles&&rc.bundles.length) info+="\nbundles:\n"+rc.bundles.join("\n");
         if(rc.hits){ for(var kw in rc.hits){ info+="\n\n["+kw+"]\n"+rc.hits[kw].join("\n"); } }
         window._copy=info; var m=$("musicMsg"); if(m){ m.style.color="var(--text)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.75rem;max-height:50vh;overflow:auto">'+esc(info)+'</pre><button class="btn sm" style="margin-top:6px" onclick="copyText(this)">Copy</button>'; }
       }).catch(function(e){ musicMsg(e.message||"Recon failed.","var(--err)"); }); }
