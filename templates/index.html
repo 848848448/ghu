@@ -897,7 +897,6 @@
     function showDiag(info){ window._copy=info; overlay("Why it won’t play", '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.8rem;margin:0">'+esc(info)+'</pre><button class="btn sm" style="margin-top:10px" onclick="copyText(this)">Copy</button><div class="muted" style="margin-top:8px">Send this to the developer.</div>'); }
     audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
       if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
-      diagPlay(t); // show the owner the exact reason on the first real failure
       // Find out *why* it failed: a 403 means this one track is locked/unavailable
       // (most of the catalog still plays), not that the whole player is down.
       fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){return r.status;}).catch(function(){return 0;}).then(function(st){
