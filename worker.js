@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b80-recon2-2026-10-02";
+const BUILD = "b81-heartbeat-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1191,30 +1191,42 @@ async function tryStartSession(env, token, trackId) {
       out.sessionAttempts.push({ deviceId: did, result: a.result, errors: a.errors });
       if (a.result && a.result.allowed) { good = { deviceId: did, result: a.result }; break; }
     }
-    // If a session opened, hunt for the form the audio server wants the
-    // session passed in (query param name, token replacement, or header).
+    // Look for a resolver that turns a track/session into a stream URL, and the
+    // heartbeat/end mutations — the audio server may need the session heartbeat
+    // before it serves a CLIENT-royalty track.
+    out.streamQueries = await introspectRootNames(env, "query", /stream|audio|url|playback|media|listen|hls|manifest/i);
+    out.streamMutations = await introspectRootNames(env, "mutation", /stream|audio|url|playback|media|listen|heartbeat|royalty/i);
+    out.heartbeatArgs = await introspectMutation(env, "updateSessionHeartbeat");
+
+    // If a session opened, try: (a) heartbeat then re-request, (b) a few audio
+    // forms. Kept small to avoid rate limits.
     if (good) {
       out.openedWith = good.deviceId; out.session = good.result;
       const base = env.AUDIO_API_BASE, rawSid = good.result.sessionId || "";
       const sid = encodeURIComponent(rawSid);
       const tk = encodeURIComponent(token);
       const T = base + "?trackId=" + trackId + "&token=" + tk;
-      const did = good.deviceId, uid = userId, pid = profileId;
-      const udid = (deviceList.find((d) => d.id === did) || {}).udid || "";
+      const did = good.deviceId;
+      // Send a heartbeat for the session (best-guess args from introspection).
+      try {
+        const hbArgs = ((out.heartbeatArgs || {}).args || []).map((a) => String(a).split(":")[0].trim());
+        const parts = [];
+        if (hbArgs.includes("sessionId")) parts.push('sessionId: "' + rawSid + '"');
+        if (hbArgs.includes("deviceId")) parts.push("deviceId: " + Number(did));
+        if (hbArgs.includes("userId") && userId != null) parts.push("userId: " + Number(userId));
+        if (hbArgs.includes("trackId")) parts.push("trackId: " + Number(trackId));
+        if (hbArgs.includes("profileId") && profileId != null) parts.push("profileId: " + Number(profileId));
+        const hbSel = ((out.heartbeatArgs || {}).returns || "").indexOf("OBJECT") === 0 ? " { __typename }" : "";
+        const hq = "mutation { updateSessionHeartbeat(" + parts.join(", ") + ")" + hbSel + " }";
+        out.heartbeatCall = hq;
+        const hr = await zingAuthed(env, token, hq);
+        out.heartbeatResult = hr.data || null;
+        out.heartbeatErrors = (hr.errors || []).map((e) => e.message).slice(0, 2);
+      } catch (e) { out.heartbeatError = String((e && e.message) || e); }
       const probes = {
-        q_sessionId: { url: T + "&sessionId=" + sid },
-        q_session: { url: T + "&session=" + sid },
-        q_session_id: { url: T + "&session_id=" + sid },
-        q_streamingSessionId: { url: T + "&streamingSessionId=" + sid },
-        q_sid: { url: T + "&sid=" + sid },
-        q_ss: { url: T + "&ss=" + sid },
-        token_is_sid: { url: base + "?trackId=" + trackId + "&token=" + sid },
-        q_device_session: { url: T + "&deviceId=" + did + "&sessionId=" + sid },
-        q_full: { url: T + "&sessionId=" + sid + "&deviceId=" + did + "&userId=" + uid + "&profileId=" + pid },
-        q_udid: { url: T + "&sessionId=" + sid + "&udid=" + encodeURIComponent(udid) },
-        h_x_session_id: { url: T, headers: { "X-Session-Id": rawSid } },
-        h_session_id: { url: T, headers: { "Session-Id": rawSid } },
-        h_x_streaming: { url: T, headers: { "X-Streaming-Session-Id": rawSid } },
+        afterHB_plain: { url: T },
+        afterHB_sessionId: { url: T + "&sessionId=" + sid },
+        afterHB_device_session: { url: T + "&deviceId=" + did + "&sessionId=" + sid },
       };
       out.audioAfterSession = {};
       for (const k in probes) {
@@ -2979,7 +2991,11 @@ const PAGE = `<!DOCTYPE html>
                 if(tr.createDeviceInput) info+="\\n  UserDeviceCreateInput: "+(tr.createDeviceInput.fields?tr.createDeviceInput.fields.join(", "):JSON.stringify(tr.createDeviceInput)).slice(0,400);
                 if(tr.osEnum) info+="\\n  OS enum: "+(Array.isArray(tr.osEnum)?tr.osEnum.join(", "):JSON.stringify(tr.osEnum));
                 if(tr.sessionAttempts) info+="\\n  session attempts: "+JSON.stringify(tr.sessionAttempts).slice(0,400);
+                if(tr.streamQueries) info+="\\n  stream queries: "+tr.streamQueries.join(", ");
+                if(tr.streamMutations) info+="\\n  stream mutations: "+tr.streamMutations.join(", ");
+                if(tr.heartbeatArgs) info+="\\n  updateSessionHeartbeat: "+(tr.heartbeatArgs.args?("args["+tr.heartbeatArgs.args.join(", ")+"] returns "+tr.heartbeatArgs.returns):JSON.stringify(tr.heartbeatArgs));
                 if(tr.openedWith!==undefined) info+="\\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
+                if(tr.heartbeatCall) info+="\\n  heartbeat: "+(tr.heartbeatErrors&&tr.heartbeatErrors.length?("ERR "+tr.heartbeatErrors.join(" | ")):("ok "+JSON.stringify(tr.heartbeatResult||{})));
                 if(tr.audioAfterSession) info+="\\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
                 if(tr.error) info+="\\n  error: "+tr.error; }
               if(dg.recon){ var rc=dg.recon; info+="\\nrecon bundles: "+((rc.bundles||[]).length); if(rc.error) info+="\\n  recon error: "+rc.error; if(rc.hits){ for(var kw in rc.hits){ info+="\\n  ["+kw+"] "+rc.hits[kw].join("  ||  "); } } }
