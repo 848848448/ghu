@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b90-playback-2026-10-02";
+const BUILD = "b91-nogreet-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2543,8 +2543,6 @@ const PAGE = `<!DOCTYPE html>
     .card{ box-shadow:0 1px 2px rgba(0,0,0,.04); transition:border-color .2s ease, box-shadow .2s ease; }
     .cover{ box-shadow:0 10px 24px rgba(0,0,0,.34), inset 0 0 40px rgba(0,0,0,.16); }
     .empty{ font-size:.96rem; }
-    .greet{ margin:16px 18px 2px; font-size:1.4rem; font-weight:800; letter-spacing:.2px;
-      background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; animation:fadeUp .4s ease both; }
     @media (prefers-reduced-motion: reduce){ *{ transition:none !important; animation-duration:.01ms !important; } }
   </style>
 </head>
@@ -2859,7 +2857,6 @@ const PAGE = `<!DOCTYPE html>
       if((m=url.match(/artist[s]?[\\/=](\\d+)/i))){ openArtist(+m[1]); return; }
       if((m=url.match(/playlist[s]?[\\/=](\\d+)/i))){ openPlaylist(+m[1]); return; }
       if(/^https?:/i.test(url)){ window.open(url,"_blank"); } }
-    function greeting(){ var h=new Date().getHours(); var base=h<5?"Good night":h<12?"Good morning":h<17?"Good afternoon":h<21?"Good evening":"Good night"; return base+(ME.user&&ME.user.name?(", "+ME.user.name.split(" ")[0]):""); }
     function home(){
       setStatus(""); setView(skHome());
       var pBan=gql("query { banners(take: 15) { id enName heName enImage heImage url index platform } }").then(function(d){ var b=d.banners||[]; b.sort(function(x,y){return (x.index||0)-(y.index||0);}); return b; }).catch(function(){return [];});
@@ -2876,7 +2873,7 @@ const PAGE = `<!DOCTYPE html>
         // Keep featured in the admin-chosen order.
         if(featured.length){ var fm={}; featured.forEach(function(a){fm[a.id]=a;}); featured=CFG.featured.map(function(id){return fm[id];}).filter(Boolean); }
         window._albums=window._albums||{};
-        var html='<div class="greet">'+esc(greeting())+'</div>';
+        var html="";
         if(banners.length && feat("banners")){
           var bcards=banners.map(bannerCard).filter(Boolean).join("");
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
