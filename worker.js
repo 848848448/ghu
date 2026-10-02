@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b86-content-2026-10-02";
+const BUILD = "b87-admin-sections-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -51,6 +51,7 @@ export default {
           authed: authed,
           kv: hasStore(env),
           d1: !!env.DB,
+          build: BUILD,
         });
       }
       if (path === "/api/config") {
@@ -2428,6 +2429,12 @@ const PAGE = `<!DOCTYPE html>
     .card{ background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
     .row{ display:flex; align-items:center; gap:12px; padding:13px 15px; border-bottom:1px solid var(--line); }
     .row:last-child{ border-bottom:none; }
+    .arow{ display:flex; align-items:center; gap:4px; padding:12px 12px; cursor:pointer; border-bottom:1px solid var(--line); transition:background .12s; }
+    .arow:last-child{ border-bottom:none; }
+    .arow:active{ background:var(--surface-2); }
+    .arow .aic{ width:38px; height:38px; border-radius:11px; background:var(--surface-3); display:grid; place-items:center; flex:none; margin-right:12px; color:var(--accent); }
+    .arow .ms svg{ width:22px; height:22px; }
+    .abadge{ display:inline-block; min-width:18px; text-align:center; background:var(--accent); color:#fff; border-radius:999px; font-size:.68rem; font-weight:800; padding:1px 6px; margin-left:6px; vertical-align:1px; }
     .row .rlabel{ flex:1; min-width:0; }
     .row .rlabel .rt{ font-weight:600; font-size:.98rem; }
     .row .rlabel .rd{ color:var(--muted); font-size:.8rem; margin-top:2px; }
@@ -3469,18 +3476,118 @@ const PAGE = `<!DOCTYPE html>
         opts.map(function(k){ var bg=k?('linear-gradient(135deg,'+CFG_ACCENTS[k][0]+','+CFG_ACCENTS[k][1]+')'):'var(--surface-3)'; var sel=(_cfgEdit.accent||"")===k;
           return '<button data-v="'+esc(k)+'" onclick="cfgAccent(\\''+k+'\\')" title="'+esc(k||"Default")+'" style="width:34px;height:34px;border-radius:999px;border:2px solid '+(sel?"#fff":"transparent")+';background:'+bg+';cursor:pointer;flex:none"></button>'; }).join("")+'</div>'; }
     var FEAT_LABELS={banners:"Featured banners",albums:"Albums",popular:"Popular",search:"Search",genres:"Genres",categories:"Categories",playlists:"Playlists",artists:"Artists",stories:"Stories",downloads:"Downloads",favorites:"Favorites (♥)"};
-    function saveAdminConfig(){ var an=$("cfgApp"), am=$("cfgAnn"), m=$("cfgMsg"); if(m) m.textContent="";
-      _cfgEdit.appName=an?an.value:""; _cfgEdit.announcement=am?am.value:""; _cfgEdit.ownerEmail=($("cfgOwner")||{}).value||"";
-      post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; applyConfig(d.config||_cfgEdit); toast("Saved."); })
-        .catch(function(e){ if(m) m.textContent=e.message||"Could not save."; }); }
+    function saveAdminConfig(){ var an=$("cfgApp"), am=$("cfgAnn"), ow=$("cfgOwner"), m=$("cfgMsg"); if(m) m.textContent="";
+      if(an) _cfgEdit.appName=an.value; if(am) _cfgEdit.announcement=am.value; if(ow) _cfgEdit.ownerEmail=ow.value;
+      post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; _adm.cfg=d.config||_cfgEdit; applyConfig(d.config||_cfgEdit); toast("Saved ✓"); })
+        .catch(function(e){ if(m){ m.textContent=e.message||"Could not save."; } else toast(e.message||"Could not save."); }); }
+
+    // ---- Admin: hub + separate section pages ----
+    var _adm={};
+    function sectRow(key,icon,title,sub,badge){ return '<div class="arow" onclick="adminSection(\\''+key+'\\')">'+
+      '<div class="aic">'+ic(icon)+'</div><div class="rlabel" style="flex:1;min-width:0"><div class="rt">'+esc(title)+(badge?' <span class="abadge">'+esc(String(badge))+'</span>':'')+'</div><div class="rd">'+esc(sub||"")+'</div></div>'+ic("chevron_right")+'</div>'; }
     function renderAdmin(d, cfg, usersData, presData){
+      _adm={d:d, cfg:cfg||{}, users:usersData||{}, pres:presData||{}};
       var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
       if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
-      var presCard='<div class="set-sec"><h3>Who\\'s online (<span id="presCount">'+(((presData&&presData.online)||[]).length)+'</span>)</h3><div class="card"><div id="presList">'+presenceListHtml(presData)+'</div></div></div>';
-      _cfgEdit={appName:cfg.appName||"",announcement:cfg.announcement||"",theme:cfg.theme||"",lang:cfg.lang||"",accent:cfg.accent||"",ownerEmail:cfg.ownerEmail||"",features:{}};
-      CFG_FEATURES.forEach(function(k){ _cfgEdit.features[k]=(cfg.features&&cfg.features[k])!==false; });
-      var oemail=((usersData&&usersData.ownerEmail)||"").toLowerCase();
-      var appCard='<div class="set-sec"><h3>Appearance</h3><div class="card" style="padding:15px">'+
+      _cfgEdit={appName:_adm.cfg.appName||"",announcement:_adm.cfg.announcement||"",theme:_adm.cfg.theme||"",lang:_adm.cfg.lang||"",accent:_adm.cfg.accent||"",ownerEmail:_adm.cfg.ownerEmail||"",features:{}};
+      CFG_FEATURES.forEach(function(k){ _cfgEdit.features[k]=(_adm.cfg.features&&_adm.cfg.features[k])!==false; });
+      adminHub();
+    }
+    function adminHub(){
+      stopPresPoll();
+      var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
+      var cfg=_adm.cfg||{}, users=(_adm.users&&_adm.users.users)||[], pres=_adm.pres||{};
+      var hasUsers=!(users===null||users===undefined);
+      var pending=hasUsers?users.filter(function(u){return u.status==="pending";}).length:0;
+      var active=hasUsers?users.filter(function(u){return u.status!=="pending"&&u.status!=="rejected";}).length:0;
+      var online=((pres.online)||[]).length;
+      var nFeat=((cfg.featured)||[]).length, nHid=((cfg.hidden)||[]).length;
+      var rows='<div class="set-sec"><h3>Admin center</h3><div class="card" style="padding:6px">'+
+        sectRow('dashboard','graphic_eq','Dashboard','Plays, listeners & charts')+
+        sectRow('online','home','Who’s online',online?(online+' listening now'):'Nobody right now',online||"")+
+        sectRow('accounts','artist','Accounts',active+' active'+(pending?(' · '+pending+' waiting'):''),pending||"")+
+        sectRow('content','star','Content',(nFeat||nHid)?(nFeat+' pinned · '+nHid+' hidden'):'Feature or hide albums')+
+        sectRow('music','music_note','Music server login','Zing account for playback')+
+        sectRow('appearance','settings','Appearance','Name, color, theme, language')+
+        sectRow('features','category','Features & sections','Show or hide parts of the app')+
+        sectRow('codes','lock','Access codes','Simple sign-in codes')+
+        sectRow('system','featured_play_list','System & info','Version, storage & status')+
+        '</div></div>';
+      ovlSet("Admin", back+rows);
+    }
+    function adminSection(key){
+      stopPresPoll();
+      var back='<div class="back" onclick="adminHub()">'+ic("arrow_back_ios_new")+'Admin center</div>';
+      var html="", after=null;
+      if(key==="dashboard"){ html=secWrap("Dashboard",'<div id="statsBox"></div><button class="chip" style="margin-top:12px" onclick="loadStats()">'+ic("history")+' Refresh</button>'); after=loadStats; }
+      else if(key==="online"){ html=secWrap("Who’s online (<span id=\\"presCount\\">"+(((_adm.pres&&_adm.pres.online)||[]).length)+"</span>)",'<div id="presList">'+presenceListHtml(_adm.pres)+'</div>'); after=function(){ _presTimer=setInterval(refreshPres,10000); }; }
+      else if(key==="accounts"){ html=accountsSection(); }
+      else if(key==="content"){ html=contentSection(); }
+      else if(key==="music"){ html=musicSection(); after=loadMusicStatus; }
+      else if(key==="appearance"){ html=appearanceSection(); }
+      else if(key==="features"){ html=featuresSection(); }
+      else if(key==="codes"){ html=codesSection(); }
+      else if(key==="system"){ html=systemSection(); after=loadSystemInfo; }
+      ovlSet("Admin", back+html);
+      if(after) after();
+    }
+    function secWrap(title,inner){ return '<div class="set-sec"><h3>'+title+'</h3><div class="card" style="padding:15px">'+inner+'</div></div>'; }
+    function accountsSection(){
+      var oemail=((_adm.users&&_adm.users.ownerEmail)||"").toLowerCase();
+      var users=(_adm.users&&_adm.users.users);
+      if(users===null||users===undefined){ return secWrap("Accounts",'<p class="muted" style="margin:0">Sign-up accounts need the storage set up first. Then people can request access with email, phone and a selfie.</p>'); }
+      var out="";
+      var pending=users.filter(function(u){return u.status==="pending";});
+      var others=users.filter(function(u){return u.status!=="pending"&&u.status!=="rejected";});
+      if(pending.length){
+        out+='<div class="set-sec"><h3>Requests waiting ('+pending.length+')</h3><div class="card">'+pending.map(function(u){
+          return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.name||u.email)+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div>'+
+            '<button class="btn sm" style="margin:0" onclick="userAction('+u.id+',\\'approve\\')">Approve</button>'+
+            '<button class="trash" title="Reject" onclick="userAction('+u.id+',\\'reject\\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
+      }
+      var alist = others.length
+        ? '<input id="acctSearch" class="field" placeholder="Search by name, email, phone…" autocomplete="off" oninput="filterAccounts()" style="margin-bottom:10px" /><div id="acctList">'+others.map(function(u){ var susp=(u.status==="suspended"); var isOwner=(oemail&&(u.email||"").toLowerCase()===oemail);
+            var sk=esc(((u.name||"")+" "+(u.email||"")+" "+(u.phone||"")).toLowerCase());
+            var meta='<span>'+(u.plays||0)+' plays</span>'+(u.lastSeen?' · <span>seen '+timeAgo(u.lastSeen)+'</span>':'')+(u.created?' · <span>joined '+timeAgo(u.created)+'</span>':'');
+            return '<div class="card acct" data-search="'+sk+'" style="padding:12px;margin-bottom:8px">'+
+              '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div><div class="ci-code" style="color:var(--muted);margin-top:2px">'+meta+'</div></div></div>'+
+              '<div class="chips" style="padding:0;margin-top:10px">'+
+                (susp?'<button class="chip" onclick="userAction('+u.id+',\\'unsuspend\\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\\'suspend\\')">Suspend</button>')+
+                (isOwner?'':'<button class="chip" onclick="userAction('+u.id+',\\'setrole\\',{value:'+(u.role==="admin"?0:1)+'})">'+(u.role==="admin"?"Remove admin":"Make admin")+'</button>')+
+                '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
+                '<button class="chip" onclick="userAction('+u.id+',\\'nodl\\',{value:'+(u.nodl?0:1)+'})">'+(u.nodl?'Enable downloads':'Disable downloads')+'</button>'+
+                '<button class="chip" onclick="userAction('+u.id+',\\'remove\\')">Remove</button>'+
+              '</div></div>'; }).join("")+'<div id="acctNone" class="muted" style="display:none;padding:6px 2px">No accounts match.</div></div>'
+        : '<p class="muted" style="margin:2px 0 10px">No accounts yet.</p>';
+      out+='<div class="set-sec"><h3>Accounts ('+others.length+')</h3>'+alist+
+        '<div class="card" style="padding:15px;margin-top:2px">'+
+          '<div style="font-weight:600;margin-bottom:8px">Create an account</div>'+
+          '<input id="nu_n" class="field" placeholder="Full name" autocomplete="off" />'+
+          '<input id="nu_e" class="field" style="margin-top:10px" type="email" placeholder="Email address" autocomplete="off" />'+
+          '<input id="nu_p" class="field" style="margin-top:10px" type="tel" placeholder="Phone number" autocomplete="off" />'+
+          '<input id="nu_w" class="field" style="margin-top:10px" type="password" placeholder="Password" autocomplete="new-password" />'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
+          '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
+      return out;
+    }
+    function contentSection(){ var cfg=_adm.cfg||{}; var nFeat=((cfg.featured)||[]).length, nHid=((cfg.hidden)||[]).length;
+      return secWrap("Content — featured &amp; hidden",
+        '<p class="muted" style="margin:0 0 10px">Open any album and use the <b>Admin</b> buttons there to <b>Pin to Home</b> (shows in a “Featured” row) or <b>Hide</b> it from everyone.</p>'+
+        '<div style="display:flex;gap:8px;text-align:center">'+statTile(nFeat,"Pinned to Home",'var(--accent)')+statTile(nHid,"Hidden")+'</div>'+
+        ((nFeat||nHid)?('<div class="chips" style="padding:0;margin-top:10px">'+(nFeat?'<button class="chip" onclick="clearCurate(\\'featured\\')">Clear pinned</button>':'')+(nHid?'<button class="chip" onclick="clearCurate(\\'hidden\\')">Clear hidden</button>':'')+'</div>'):''));
+    }
+    function musicSection(){ return secWrap("Music server login",
+        '<div id="musicStatus" class="muted" style="margin-bottom:12px"><span class="spinner"></span>Checking…</div>'+
+        '<div style="font-weight:600;margin-bottom:6px">Sign in with your Zing account (keeps working — refreshes itself)</div>'+
+        '<input id="mzEmail" class="field" type="email" placeholder="Zing email" autocomplete="off" />'+
+        '<input id="mzPass" class="field" style="margin-top:10px" type="password" placeholder="Zing password" autocomplete="new-password" />'+
+        '<div class="muted" style="font-size:.78rem;margin:10px 0 0">Or paste a one-time session token instead:</div>'+
+        '<input id="mzToken" class="field" style="margin-top:6px" placeholder="Session token (optional)" autocomplete="off" />'+
+        '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="saveMusic()">Save &amp; test</button><button class="chip" onclick="testMusic()">Test</button></div>'+
+        '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
+        '<div style="margin-top:6px;display:flex;gap:8px"><button class="chip" onclick="clearMusic()">Clear login</button><button class="chip" onclick="reconMusic()">Stream recon (dev)</button></div>');
+    }
+    function appearanceSection(){ return '<div class="set-sec"><h3>Appearance</h3><div class="card" style="padding:15px">'+
         '<label class="muted" style="font-size:.8rem">App name</label>'+
         '<input id="cfgApp" class="field" style="margin:5px 0 14px" placeholder="Zing" value="'+esc(_cfgEdit.appName)+'" />'+
         accentRow()+
@@ -3492,88 +3599,43 @@ const PAGE = `<!DOCTYPE html>
           '<div class="row"><div class="rlabel"><div class="rt">Default language</div><div class="rd">Names in English or Hebrew</div></div><div class="seg" id="cfp_lang">'+optBtn("lang","","Off")+optBtn("lang","en","EN")+optBtn("lang","he","עברית")+'</div></div>'+
         '</div>'+
         '<div class="card" style="margin-top:10px;padding:15px"><label class="muted" style="font-size:.8rem">Owner email — this account (and anyone you make an admin) sees the admin settings</label>'+
-        '<input id="cfgOwner" class="field" style="margin:5px 0 0" type="email" placeholder="you@example.com" value="'+esc(_cfgEdit.ownerEmail)+'" autocomplete="off" /></div></div>';
-      var featCard='<div class="set-sec"><h3>Features &amp; sections — show / hide for everyone</h3><div class="card">'+
+        '<input id="cfgOwner" class="field" style="margin:5px 0 0" type="email" placeholder="you@example.com" value="'+esc(_cfgEdit.ownerEmail)+'" autocomplete="off" /></div>'+
+        '<div style="margin:12px 0"><button class="btn" style="width:100%;justify-content:center" onclick="saveAdminConfig()">Save appearance</button><div id="cfgMsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'; }
+    function featuresSection(){ return '<div class="set-sec"><h3>Features &amp; sections — show / hide for everyone</h3><div class="card">'+
         CFG_FEATURES.map(function(k){ return toggleRow(k, FEAT_LABELS[k]||k); }).join("")+
-        '</div></div>'+
-        '<div style="margin:12px 0"><button class="btn" style="width:100%;justify-content:center" onclick="saveAdminConfig()">Save app settings</button><div id="cfgMsg" class="err" style="margin-top:8px;min-height:16px"></div></div>';
-      var nFeat=((cfg&&cfg.featured)||[]).length, nHid=((cfg&&cfg.hidden)||[]).length;
-      var contentCard='<div class="set-sec"><h3>Content — featured &amp; hidden</h3><div class="card" style="padding:15px">'+
-        '<p class="muted" style="margin:0 0 10px">Open any album and use the <b>Admin</b> buttons there to <b>Pin to Home</b> (shows in a “Featured” row) or <b>Hide</b> it from everyone.</p>'+
-        '<div style="display:flex;gap:8px;text-align:center">'+statTile(nFeat,"Pinned to Home",'var(--accent)')+statTile(nHid,"Hidden")+'</div>'+
-        ((nFeat||nHid)?('<div class="chips" style="padding:0;margin-top:10px">'+(nFeat?'<button class="chip" onclick="clearCurate(\\'featured\\')">Clear pinned</button>':'')+(nHid?'<button class="chip" onclick="clearCurate(\\'hidden\\')">Clear hidden</button>':'')+'</div>'):'')+
-        '</div></div>';
-      var codes=d.codes||[];
+        '</div>'+
+        '<div style="margin:12px 0"><button class="btn" style="width:100%;justify-content:center" onclick="saveAdminConfig()">Save features</button><div id="cfgMsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'; }
+    function codesSection(){ var codes=(_adm.d&&_adm.d.codes)||[];
       var list = codes.length
         ? '<div class="card">'+codes.map(function(c){ return '<div class="code-item"><div style="min-width:0"><div class="ci-name">'+esc(c.name||"Someone")+'</div><div class="ci-code">'+esc(c.code)+'</div></div>'+
             '<button class="trash" title="Remove" data-code="'+esc(c.code)+'" onclick="removeCode(this)">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
-        : '<p class="muted" style="margin:2px 0 0">No accounts yet. Add one below.</p>';
-      var accCard='<div class="set-sec"><h3>Quick access codes (optional)</h3>'+
+        : '<p class="muted" style="margin:2px 0 0">No codes yet. Add one below.</p>';
+      return '<div class="set-sec"><h3>Quick access codes (optional)</h3>'+
         '<p class="muted" style="margin:0 0 10px;font-size:.85rem">A simple code to sign in with (no account needed). Your main password always works.</p>'+
         list+
         '<div class="card" style="padding:15px;margin-top:10px">'+
           '<input id="cn" class="field" placeholder="Name (for example: Yossi)" autocomplete="off" />'+
           '<input id="cc" class="field" style="margin-top:10px" placeholder="Access code / password" autocomplete="off" />'+
           '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add code</button>'+
-          '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
-
-      // User accounts (email/phone/password + selfie), needs D1.
-      var usersCards="";
-      var users=(usersData&&usersData.users);
-      if(users===null||users===undefined){
-        usersCards='<div class="set-sec"><h3>Accounts</h3><div class="card" style="padding:14px"><p class="muted" style="margin:0">Sign-up accounts need the storage set up first (see below). Then people can request access with email, phone and a selfie.</p></div></div>';
-      } else {
-        var pending=users.filter(function(u){return u.status==="pending";});
-        var others=users.filter(function(u){return u.status!=="pending"&&u.status!=="rejected";});
-        if(pending.length){
-          usersCards+='<div class="set-sec"><h3>Account requests ('+pending.length+')</h3><div class="card">'+pending.map(function(u){
-            return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.name||u.email)+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div>'+
-              '<button class="btn sm" style="margin:0" onclick="userAction('+u.id+',\\'approve\\')">Approve</button>'+
-              '<button class="trash" title="Reject" onclick="userAction('+u.id+',\\'reject\\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
-        }
-        var alist = others.length
-          ? '<input id="acctSearch" class="field" placeholder="Search accounts by name, email, phone…" autocomplete="off" oninput="filterAccounts()" style="margin-bottom:10px" /><div id="acctList">'+others.map(function(u){ var susp=(u.status==="suspended"); var isOwner=(oemail&&(u.email||"").toLowerCase()===oemail); var isA=(u.role==="admin"||isOwner);
-              var sk=esc(((u.name||"")+" "+(u.email||"")+" "+(u.phone||"")).toLowerCase());
-              var meta='<span>'+(u.plays||0)+' plays</span>'+(u.lastSeen?' · <span>seen '+timeAgo(u.lastSeen)+'</span>':'')+(u.created?' · <span>joined '+timeAgo(u.created)+'</span>':'');
-              return '<div class="card acct" data-search="'+sk+'" style="padding:12px;margin-bottom:8px">'+
-                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div><div class="ci-code" style="color:var(--muted);margin-top:2px">'+meta+'</div></div></div>'+
-                '<div class="chips" style="padding:0;margin-top:10px">'+
-                  (susp?'<button class="chip" onclick="userAction('+u.id+',\\'unsuspend\\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\\'suspend\\')">Suspend</button>')+
-                  (isOwner?'':'<button class="chip" onclick="userAction('+u.id+',\\'setrole\\',{value:'+(u.role==="admin"?0:1)+'})">'+(u.role==="admin"?"Remove admin":"Make admin")+'</button>')+
-                  '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
-                  '<button class="chip" onclick="userAction('+u.id+',\\'nodl\\',{value:'+(u.nodl?0:1)+'})">'+(u.nodl?'Enable downloads':'Disable downloads')+'</button>'+
-                  '<button class="chip" onclick="userAction('+u.id+',\\'remove\\')">Remove</button>'+
-                '</div></div>'; }).join("")+'<div id="acctNone" class="muted" style="display:none;padding:6px 2px">No accounts match.</div></div>'
-          : '<p class="muted" style="margin:2px 0 10px">No accounts yet.</p>';
-        usersCards+='<div class="set-sec"><h3>Accounts ('+others.length+')</h3>'+alist+
-          '<div class="card" style="padding:15px;margin-top:2px">'+
-            '<div style="font-weight:600;margin-bottom:8px">Create an account</div>'+
-            '<input id="nu_n" class="field" placeholder="Full name" autocomplete="off" />'+
-            '<input id="nu_e" class="field" style="margin-top:10px" type="email" placeholder="Email address" autocomplete="off" />'+
-            '<input id="nu_p" class="field" style="margin-top:10px" type="tel" placeholder="Phone number" autocomplete="off" />'+
-            '<input id="nu_w" class="field" style="margin-top:10px" type="password" placeholder="Password" autocomplete="new-password" />'+
-            '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
-            '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
-      }
-      var statsCard='<div class="set-sec"><h3>Dashboard</h3><div class="card" style="padding:15px">'+
-        '<div id="statsBox"></div>'+
-        '<button class="chip" style="margin-top:12px" onclick="loadStats()">'+ic("history")+' Refresh</button></div></div>';
-      var musicCard='<div class="set-sec"><h3>Music server login</h3><div class="card" style="padding:15px">'+
-        '<div id="musicStatus" class="muted" style="margin-bottom:12px"><span class="spinner"></span>Checking…</div>'+
-        '<div style="font-weight:600;margin-bottom:6px">Sign in with your Zing account (keeps working — refreshes itself)</div>'+
-        '<input id="mzEmail" class="field" type="email" placeholder="Zing email" autocomplete="off" />'+
-        '<input id="mzPass" class="field" style="margin-top:10px" type="password" placeholder="Zing password" autocomplete="new-password" />'+
-        '<div class="muted" style="font-size:.78rem;margin:10px 0 0">Or paste a one-time session token instead:</div>'+
-        '<input id="mzToken" class="field" style="margin-top:6px" placeholder="Session token (optional)" autocomplete="off" />'+
-        '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="saveMusic()">Save &amp; test</button><button class="chip" onclick="testMusic()">Test</button></div>'+
-        '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
-        '<div style="margin-top:6px;display:flex;gap:8px"><button class="chip" onclick="clearMusic()">Clear login</button><button class="chip" onclick="reconMusic()">Stream recon (dev)</button></div>'+
-        '</div></div>';
-      ovlSet("Admin", back+statsCard+presCard+usersCards+musicCard+contentCard+appCard+featCard+accCard);
-      loadMusicStatus();
-      loadStats(); // auto-load the dashboard
-      stopPresPoll(); _presTimer=setInterval(refreshPres, 10000);
-    }
+          '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'; }
+    function systemSection(){ return secWrap("System & info",'<div id="sysBox"><span class="spinner"></span>Checking…</div>'); }
+    function sysRow(label,val,ok){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(label)+'</div></div><div style="font-weight:700;flex:none;color:'+(ok===true?'var(--ok)':ok===false?'var(--err)':'var(--text)')+'">'+esc(String(val))+'</div></div>'; }
+    function loadSystemInfo(){ var box=$("sysBox"); if(!box) return;
+      var users=(_adm.users&&_adm.users.users)||[]; var cfg=_adm.cfg||{};
+      fetch("/api/status").then(function(r){return r.json();}).then(function(s){
+        if(!$("sysBox")) return;
+        var h=sysRow("App version", s.build||"—")+
+          sysRow("Music library (API)", s.apiUrl?"Connected":"Not set", !!s.apiUrl)+
+          sysRow("Audio server", s.audioBase?"Connected":"Not set", !!s.audioBase)+
+          sysRow("Music login", s.token?"Signed in":"Not signed in", !!s.token)+
+          sysRow("Auto-refresh login", s.autoLogin?"On":"Off", !!s.autoLogin)+
+          sysRow("Database (D1)", s.d1?"Connected":"Not set", !!s.d1)+
+          sysRow("Storage", s.kv?"Ready":"Not set", !!s.kv)+
+          sysRow("Accounts", users.length)+
+          sysRow("Pinned albums", ((cfg.featured)||[]).length)+
+          sysRow("Hidden albums", ((cfg.hidden)||[]).length);
+        box.innerHTML=h;
+      }).catch(function(){ if($("sysBox")) box.innerHTML='<div class="empty">Could not load.</div>'; }); }
     function renderMusicStatus(h){ h=h||{}; var el=$("musicStatus"); if(!el) return; var parts=[];
       if(h.autologin) parts.push("✓ Signed in"+(h.email?(" ("+esc(h.email)+")"):"")); if(h.token) parts.push("✓ Token set");
       el.innerHTML=parts.length?('<span style="color:var(--ok)">'+parts.join(" · ")+'</span>'):'<span style="color:var(--warn)">Not set — songs won\\'t play until you sign in here.</span>';
