@@ -876,14 +876,13 @@
               if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
               if(dg.sessionResult){ var sr=dg.sessionResult; info+="\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }
               if(dg.sessionTry){ var tr=dg.sessionTry;
-                info+="\nsession try: userId="+tr.userId+(tr.userFrom?(" (from "+tr.userFrom+")"):"")+" profileId="+tr.profileId;
-                if(tr.userQueries) info+="\n  user queries: "+tr.userQueries.join(", ");
-                if(tr.deviceQueries) info+="\n  device queries: "+tr.deviceQueries.join(", ");
-                if(tr.deviceMutations) info+="\n  device/session mutations: "+tr.deviceMutations.join(", ");
-                if(tr.profiles) info+="\n  profiles: "+JSON.stringify(tr.profiles).slice(0,200);
-                if(tr.result) info+="\n  session result: "+JSON.stringify(tr.result).slice(0,300);
+                info+="\nsession try: userId="+tr.userId+" profileId="+tr.profileId+" deviceId="+tr.deviceId;
+                if(tr.devices){ if(tr.devices.list) info+="\n  devices: "+JSON.stringify(tr.devices.list).slice(0,300); if(tr.devices.tried&&tr.devices.tried.length) info+="\n  device-query errs: "+JSON.stringify(tr.devices.tried).slice(0,300); }
+                if(tr.userDeviceType) info+="\n  UserDevice fields: "+(tr.userDeviceType.fields?tr.userDeviceType.fields.join(", "):JSON.stringify(tr.userDeviceType)).slice(0,300);
+                if(tr.createDeviceArgs) info+="\n  createOneUserDevice: "+(tr.createDeviceArgs.args?("args["+tr.createDeviceArgs.args.join(", ")+"]"):JSON.stringify(tr.createDeviceArgs)).slice(0,300);
+                if(tr.sessionAttempts) info+="\n  session attempts: "+JSON.stringify(tr.sessionAttempts).slice(0,400);
+                if(tr.openedWith!==undefined) info+="\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
                 if(tr.audioAfterSession) info+="\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
-                if(tr.errors&&tr.errors.length) info+="\n  errors: "+tr.errors.join(" | ");
                 if(tr.error) info+="\n  error: "+tr.error; }
               if(dg.note) info+="\nnote: "+dg.note; }
           }catch(e){ info+="\nbody: "+(tx||"").slice(0,400); }
