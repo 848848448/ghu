@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b76-devicelist-2026-10-02";
+const BUILD = "b77-audioform-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1134,18 +1134,36 @@ async function tryStartSession(env, token, trackId) {
       out.sessionAttempts.push({ deviceId: did, result: a.result, errors: a.errors });
       if (a.result && a.result.allowed) { good = { deviceId: did, result: a.result }; break; }
     }
-    // If a session opened, see whether the audio server now serves the track.
+    // If a session opened, hunt for the form the audio server wants the
+    // session passed in (query param name, token replacement, or header).
     if (good) {
       out.openedWith = good.deviceId; out.session = good.result;
-      const base = env.AUDIO_API_BASE, sid = encodeURIComponent(good.result.sessionId || "");
+      const base = env.AUDIO_API_BASE, rawSid = good.result.sessionId || "";
+      const sid = encodeURIComponent(rawSid);
       const tk = encodeURIComponent(token);
-      const urls = {
-        plain: base + "?trackId=" + trackId + "&token=" + tk,
-        sessionId: base + "?trackId=" + trackId + "&token=" + tk + "&sessionId=" + sid,
-        session: base + "?trackId=" + trackId + "&token=" + tk + "&session=" + sid,
+      const T = base + "?trackId=" + trackId + "&token=" + tk;
+      const did = good.deviceId, uid = userId, pid = profileId;
+      const udid = (deviceList.find((d) => d.id === did) || {}).udid || "";
+      const probes = {
+        q_sessionId: { url: T + "&sessionId=" + sid },
+        q_session: { url: T + "&session=" + sid },
+        q_session_id: { url: T + "&session_id=" + sid },
+        q_streamingSessionId: { url: T + "&streamingSessionId=" + sid },
+        q_sid: { url: T + "&sid=" + sid },
+        q_ss: { url: T + "&ss=" + sid },
+        token_is_sid: { url: base + "?trackId=" + trackId + "&token=" + sid },
+        q_device_session: { url: T + "&deviceId=" + did + "&sessionId=" + sid },
+        q_full: { url: T + "&sessionId=" + sid + "&deviceId=" + did + "&userId=" + uid + "&profileId=" + pid },
+        q_udid: { url: T + "&sessionId=" + sid + "&udid=" + encodeURIComponent(udid) },
+        h_x_session_id: { url: T, headers: { "X-Session-Id": rawSid } },
+        h_session_id: { url: T, headers: { "Session-Id": rawSid } },
+        h_x_streaming: { url: T, headers: { "X-Streaming-Session-Id": rawSid } },
       };
       out.audioAfterSession = {};
-      for (const k in urls) { try { const rr = await fetchT(urls[k], { headers: { Range: "bytes=0-1" } }, 12000); out.audioAfterSession[k] = rr.status; } catch (e) { out.audioAfterSession[k] = "err"; } }
+      for (const k in probes) {
+        try { const rr = await fetchT(probes[k].url, { headers: Object.assign({ Range: "bytes=0-1" }, probes[k].headers || {}) }, 10000); out.audioAfterSession[k] = rr.status; }
+        catch (e) { out.audioAfterSession[k] = "err"; }
+      }
     }
     return out;
   } catch (e) { out.error = String((e && e.message) || e); return out; }
