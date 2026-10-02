@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b73-session-probe-2026-10-02";
+const BUILD = "b74-session-ids-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1035,22 +1035,60 @@ async function zingAuthed(env, token, query) {
 
 // Attempt to open a streaming session for a track and report what comes back
 // (or the GraphQL errors, which usually name any required args we're missing).
-async function tryStartSession(env, token, trackId) {
+// List root query/mutation field names matching a pattern (to discover how to
+// get userId, deviceId, etc.).
+async function introspectRootNames(env, which, re) {
+  const field = which === "mutation" ? "mutationType" : "queryType";
+  const q = "query { __schema { " + field + " { fields { name } } } }";
   try {
-    const t = await introspectType(env, "SessionResult");
-    const sel = (t.fields || []).map((f) => String(f).split(":")[0].trim()).filter(Boolean);
-    const selStr = sel.length ? "{ " + sel.join(" ") + " }" : "{ __typename }";
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const fs = (((d.data || {}).__schema || {})[field] || {}).fields || [];
+    return fs.map((f) => f.name).filter((n) => re.test(n)).slice(0, 25);
+  } catch (e) { return [String((e && e.message) || e)]; }
+}
+
+async function tryStartSession(env, token, trackId) {
+  const out = {};
+  try {
+    // Discover candidate roots for the ids we still need.
+    out.userQueries = await introspectRootNames(env, "query", /user|viewer|^me$|account|profile/i);
+    out.deviceQueries = await introspectRootNames(env, "query", /device/i);
+    out.deviceMutations = await introspectRootNames(env, "mutation", /device|session/i);
+    // Profile (we know profiles works) — look for a userId on it.
     let profileId = null, userId = null;
-    try { const p = await zingAuthed(env, token, "query { profiles { id } }"); const ps = ((p.data || {}).profiles) || []; if (ps[0]) profileId = ps[0].id; } catch (e) {}
-    try { const m = await zingAuthed(env, token, "query { me { id } }"); userId = (((m.data || {}).me) || {}).id; } catch (e) {}
-    const args = ["trackId: " + Number(trackId)];
+    try { const p = await zingAuthed(env, token, "query { profiles { id userId } }"); const ps = ((p.data || {}).profiles) || []; if (ps[0]) { profileId = ps[0].id; if (ps[0].userId != null) userId = ps[0].userId; } out.profiles = ps.slice(0, 2); } catch (e) {}
+    // Try a handful of user-id queries.
+    for (const q of ["query { me { id } }", "query { currentUser { id } }", "query { viewer { id } }", "query { user { id } }", "query { account { id } }"]) {
+      if (userId != null) break;
+      try { const r = await zingAuthed(env, token, q); const key = q.match(/\{\s*(\w+)/)[1]; const v = (r.data || {})[key]; if (v && v.id != null) { userId = v.id; out.userFrom = key; } } catch (e) {}
+    }
+    out.userId = userId; out.profileId = profileId;
+    // Attempt startStreamingSession with a deviceId guess.
+    const deviceId = 1;
+    const args = ["trackId: " + Number(trackId), "deviceId: " + deviceId];
     if (userId != null) args.push("userId: " + Number(userId));
     if (profileId != null) args.push("profileId: " + Number(profileId));
-    args.push('platform: "WEB"'); args.push('version: "1.0.0"');
-    const q = "mutation { startStreamingSession(" + args.join(", ") + ") " + selStr + " }";
+    args.push('royaltyMode: "FREE"', 'platform: "WEB"', 'version: "1.0.0"');
+    const q = "mutation { startStreamingSession(" + args.join(", ") + ") { sessionId allowed reason royaltyMode } }";
+    out.query = q;
     const r = await zingAuthed(env, token, q);
-    return { profileId, userId, query: q, result: r.data || null, errors: (r.errors || []).map((e) => e.message).slice(0, 4) };
-  } catch (e) { return { error: String((e && e.message) || e) }; }
+    out.result = (r.data && r.data.startStreamingSession) || null;
+    out.errors = (r.errors || []).map((e) => e.message).slice(0, 4);
+    // If a session opened, see whether the audio server now serves the track.
+    if (out.result && out.result.allowed) {
+      const base = env.AUDIO_API_BASE, sid = encodeURIComponent(out.result.sessionId || "");
+      const tk = encodeURIComponent(token);
+      const urls = {
+        plain: base + "?trackId=" + trackId + "&token=" + tk,
+        sessionId: base + "?trackId=" + trackId + "&token=" + tk + "&sessionId=" + sid,
+        session: base + "?trackId=" + trackId + "&token=" + tk + "&session=" + sid,
+      };
+      out.audioAfterSession = {};
+      for (const k in urls) { try { const rr = await fetchT(urls[k], { headers: { Range: "bytes=0-1" } }, 12000); out.audioAfterSession[k] = rr.status; } catch (e) { out.audioAfterSession[k] = "err"; } }
+    }
+    return out;
+  } catch (e) { out.error = String((e && e.message) || e); return out; }
 }
 
 async function zingLogin(env) {
@@ -2800,7 +2838,16 @@ const PAGE = `<!DOCTYPE html>
               if(dg.tokenClaims) info+="\\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?")+(dg.tokenClaims.user_id?(" uid="+dg.tokenClaims.user_id):"");
               if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
               if(dg.sessionResult){ var sr=dg.sessionResult; info+="\\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }
-              if(dg.sessionTry){ var tr=dg.sessionTry; info+="\\nsession try: userId="+tr.userId+" profileId="+tr.profileId; if(tr.errors&&tr.errors.length) info+="\\n  errors: "+tr.errors.join(" | "); if(tr.result) info+="\\n  result: "+JSON.stringify(tr.result).slice(0,300); if(tr.error) info+="\\n  error: "+tr.error; }
+              if(dg.sessionTry){ var tr=dg.sessionTry;
+                info+="\\nsession try: userId="+tr.userId+(tr.userFrom?(" (from "+tr.userFrom+")"):"")+" profileId="+tr.profileId;
+                if(tr.userQueries) info+="\\n  user queries: "+tr.userQueries.join(", ");
+                if(tr.deviceQueries) info+="\\n  device queries: "+tr.deviceQueries.join(", ");
+                if(tr.deviceMutations) info+="\\n  device/session mutations: "+tr.deviceMutations.join(", ");
+                if(tr.profiles) info+="\\n  profiles: "+JSON.stringify(tr.profiles).slice(0,200);
+                if(tr.result) info+="\\n  session result: "+JSON.stringify(tr.result).slice(0,300);
+                if(tr.audioAfterSession) info+="\\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
+                if(tr.errors&&tr.errors.length) info+="\\n  errors: "+tr.errors.join(" | ");
+                if(tr.error) info+="\\n  error: "+tr.error; }
               if(dg.note) info+="\\nnote: "+dg.note; }
           }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
           showDiag(info); }); } showDiag(info);
