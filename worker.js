@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b85-admin-dash-2026-10-02";
+const BUILD = "b86-content-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -76,6 +76,9 @@ export default {
       }
       if (path === "/api/admin/config" && request.method === "POST") {
         return await handleAdminConfig(request, env);
+      }
+      if (path === "/api/admin/curate" && request.method === "POST") {
+        return await handleAdminCurate(request, env);
       }
       if (path === "/api/me") {
         return await handleMe(request, env);
@@ -314,7 +317,7 @@ function isAdmin(env, body) {
 // password.
 // --------------------------------------------------------------------------- //
 async function getConfig(env) {
-  const out = { appName: "", announcement: "", theme: "", lang: "", accent: "", ownerEmail: "", features: {} };
+  const out = { appName: "", announcement: "", theme: "", lang: "", accent: "", ownerEmail: "", features: {}, featured: [], hidden: [] };
   let raw = null;
   if (env.DB) {
     await ensureD1(env);
@@ -335,6 +338,8 @@ async function getConfig(env) {
       out.accent = CONFIG_ACCENTS.indexOf(c.accent) > 0 ? c.accent : "";
       out.ownerEmail = typeof c.ownerEmail === "string" ? c.ownerEmail : "";
       if (c.features && typeof c.features === "object") out.features = c.features;
+      out.featured = Array.isArray(c.featured) ? c.featured.map(Number).filter((n) => n > 0).slice(0, 24) : [];
+      out.hidden = Array.isArray(c.hidden) ? c.hidden.map(Number).filter((n) => n > 0).slice(0, 500) : [];
     }
   } catch (e) { /* ignore */ }
   return out;
@@ -369,8 +374,43 @@ async function handleAdminConfig(request, env) {
   };
   const inF = (inC.features && typeof inC.features === "object") ? inC.features : {};
   CONFIG_FEATURES.forEach((k) => { clean.features[k] = inF[k] !== false; });
+  // Preserve the curated featured/hidden album lists. Accept them if sent,
+  // otherwise keep whatever is already stored (this form doesn't edit them).
+  const prev = await getConfig(env);
+  clean.featured = Array.isArray(inC.featured) ? inC.featured.map(Number).filter((n) => n > 0).slice(0, 24) : (prev.featured || []);
+  clean.hidden = Array.isArray(inC.hidden) ? inC.hidden.map(Number).filter((n) => n > 0).slice(0, 500) : (prev.hidden || []);
   await saveConfig(env, clean);
   return json({ ok: true, config: clean });
+}
+
+// Admin: pin/unpin an album to the Home "Featured" row, or hide/unhide an
+// album everywhere. Toggled from the album page by a logged-in admin.
+async function handleAdminCurate(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Not allowed." }, 403);
+  if (!hasStore(env)) return json({ error: "Settings storage is not set up yet." }, 400);
+  const action = (body.action || "").toString();
+  const cfg = await getConfig(env); // full config (keeps ownerEmail, features, etc.)
+  let featured = Array.isArray(cfg.featured) ? cfg.featured.slice() : [];
+  let hidden = Array.isArray(cfg.hidden) ? cfg.hidden.slice() : [];
+  if (action === "clearfeatured" || action === "clearhidden") {
+    if (action === "clearfeatured") featured = []; else hidden = [];
+    cfg.featured = featured; cfg.hidden = hidden;
+    await saveConfig(env, cfg);
+    return json({ ok: true, featured, hidden });
+  }
+  const id = Number(body.id);
+  if (!(id > 0)) return json({ error: "Missing album id." }, 400);
+  const add = (arr, v) => (arr.indexOf(v) === -1 ? arr.concat([v]) : arr);
+  const del = (arr, v) => arr.filter((x) => x !== v);
+  if (action === "feature") { featured = add(featured, id).slice(0, 24); hidden = del(hidden, id); }
+  else if (action === "unfeature") { featured = del(featured, id); }
+  else if (action === "hide") { hidden = add(hidden, id).slice(0, 500); featured = del(featured, id); }
+  else if (action === "unhide") { hidden = del(hidden, id); }
+  else return json({ error: "Unknown action." }, 400);
+  cfg.featured = featured; cfg.hidden = hidden;
+  await saveConfig(env, cfg);
+  return json({ ok: true, featured, hidden });
 }
 
 // GET the list of access codes (admin only). Reports whether a store is set up.
@@ -2470,14 +2510,18 @@ const PAGE = `<!DOCTYPE html>
     // Admin-controlled site settings (shared for everyone; loaded from the server).
     var CFG_FEATURES=["banners","albums","popular","search","genres","categories","playlists","artists","stories","downloads","favorites"];
     var CFG_ACCENTS={purple:["#7c5cff","#ff4d8d"],blue:["#3b82f6","#06b6d4"],green:["#10b981","#34d399"],red:["#ef4444","#f97316"],gold:["#f59e0b","#fbbf24"],teal:["#14b8a6","#22d3ee"]};
-    var CFG={appName:"",announcement:"",theme:"",lang:"",accent:"",features:{}};
+    var CFG={appName:"",announcement:"",theme:"",lang:"",accent:"",features:{},featured:[],hidden:[]};
     CFG_FEATURES.forEach(function(k){ CFG.features[k]=true; });
     var _setSaved=false; try{ _setSaved=!!localStorage.getItem(SET_KEY); }catch(e){}
     function feat(k){ return CFG.features[k]!==false; }
+    function isHidden(id){ return CFG.hidden&&CFG.hidden.indexOf(Number(id))>=0; }
+    function isFeatured(id){ return CFG.featured&&CFG.featured.indexOf(Number(id))>=0; }
+    function dropHidden(list){ if(!CFG.hidden||!CFG.hidden.length) return list||[]; return (list||[]).filter(function(a){ return a&&!isHidden(a.id); }); }
     function applyConfig(c){
       c=c||{}; CFG.appName=(typeof c.appName==="string"?c.appName:""); CFG.announcement=(typeof c.announcement==="string"?c.announcement:"");
       CFG.theme=(c.theme==="dark"||c.theme==="light")?c.theme:""; CFG.lang=(c.lang==="en"||c.lang==="he")?c.lang:""; CFG.accent=(c.accent&&CFG_ACCENTS[c.accent])?c.accent:"";
       var f=(c.features&&typeof c.features==="object")?c.features:{}; CFG_FEATURES.forEach(function(k){ CFG.features[k]=f[k]!==false; });
+      CFG.featured=Array.isArray(c.featured)?c.featured.map(Number):[]; CFG.hidden=Array.isArray(c.hidden)?c.hidden.map(Number):[];
       // Accent color (whole app + gradients follow --accent / --accent-2).
       var rs=document.documentElement.style;
       if(CFG.accent){ rs.setProperty("--accent",CFG_ACCENTS[CFG.accent][0]); rs.setProperty("--accent-2",CFG_ACCENTS[CFG.accent][1]); }
@@ -2520,6 +2564,10 @@ const PAGE = `<!DOCTYPE html>
     function $(id){ return document.getElementById(id); }
     function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
     var ICONS={
+      star:"M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z",
+      star_border:"M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28z",
+      visibility:"M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
+      visibility_off:"M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78 3.15 3.15.02-.16c0-1.66-1.34-3-3-3z",
       music_note:"M12 3v10.55A4 4 0 1 0 14 17V7h4V3z",
       settings:"M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
       chevron_right:"M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
@@ -2715,14 +2763,21 @@ const PAGE = `<!DOCTYPE html>
       var pCat=gql("query { categories(take: 40) { id enName heName } }").then(function(d){return d.categories||[];}).catch(function(){return [];});
       var pPl=gql("query { playlists(take: 20) { id name enName heName image cdnImage } }").then(function(d){return d.playlists||[];}).catch(function(){return [];});
       var pStr=gql("query { stories(take: 15, orderBy: [{ releaseDate: desc }]) { id enName heName imageUrl } }").then(function(d){return d.stories||[];}).catch(function(){return [];});
-      Promise.all([pBan,pNew,pPop,pGen,pCat,pPl,pStr]).then(function(res){
+      var pFeat=(CFG.featured&&CFG.featured.length)?gql("query { albums(where:{ id:{ in:["+CFG.featured.join(",")+"] } }) { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } }").then(function(d){return d.albums||[];}).catch(function(){return [];}):Promise.resolve([]);
+      Promise.all([pBan,pNew,pPop,pGen,pCat,pPl,pStr,pFeat]).then(function(res){
         setStatus("");
-        var banners=res[0], albums=res[1], popular=res[2], genres=res[3], categories=res[4], playlists=res[5], stories=res[6];
+        var banners=res[0], albums=dropHidden(res[1]), popular=dropHidden(res[2]), genres=res[3], categories=res[4], playlists=res[5], stories=res[6], featured=res[7]||[];
+        // Keep featured in the admin-chosen order.
+        if(featured.length){ var fm={}; featured.forEach(function(a){fm[a.id]=a;}); featured=CFG.featured.map(function(id){return fm[id];}).filter(Boolean); }
         window._albums=window._albums||{};
         var html="";
         if(banners.length && feat("banners")){
           var bcards=banners.map(bannerCard).filter(Boolean).join("");
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
+        }
+        if(featured.length){
+          html+='<div class="sec">'+secHead("Featured")+'<div class="hrow">'+featured.map(function(al){ window._albums[al.id]=al;
+            return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
         }
         var hist=getHistory();
         if(hist.length){
@@ -2774,7 +2829,7 @@ const PAGE = `<!DOCTYPE html>
     // minute and update the New Releases row in place if anything changed.
     var _newIds="";
     function refreshNew(){ if(curTab!=="home") return; if(document.hidden) return; var row=$("newRow"); if(!row) return;
-      post("/api/new",{}).then(function(d){ var albums=d.albums||[]; if(!albums.length) return;
+      post("/api/new",{}).then(function(d){ var albums=dropHidden(d.albums||[]); if(!albums.length) return;
         var ids=albums.map(function(a){return a.id;}).join(",");
         if(ids!==_newIds){ row.innerHTML=newRowHtml(albums); hydrateIcons(); }
       }).catch(function(){}); }
@@ -2887,10 +2942,10 @@ const PAGE = `<!DOCTYPE html>
       if(_albPage.loading||_albPage.end) return; _albPage.loading=true;
       var more=$("albMore"); if(more) more.innerHTML='<span class="spinner"></span>Loading…';
       post("/api/albums",{skip:_albPage.skip,take:_albPage.take}).then(function(d){
-        var got=d.albums||[]; window._albums=window._albums||{};
+        var raw=d.albums||[]; var got=dropHidden(raw); window._albums=window._albums||{};
         got.forEach(function(al){ window._albums[al.id]=al; });
         var grid=$("albGrid"); if(grid){ if(_albPage.skip===0) grid.innerHTML=""; grid.insertAdjacentHTML("beforeend", got.map(function(al){ return albumTile(al, artNames(al.artists)); }).join("")); }
-        _albPage.skip+=got.length; _albPage.loading=false;
+        _albPage.skip+=raw.length; _albPage.loading=false;
         if(got.length<_albPage.take){ _albPage.end=true; if(more) more.innerHTML=(_albPage.skip?'<span class="muted">That\\'s everything ('+_albPage.skip+' albums).</span>':'<span class="empty">No albums.</span>'); }
         else if(more){ more.innerHTML='<button class="btn ghost" onclick="loadMoreAlbums()">Load more</button>'; }
       }).catch(function(e){ _albPage.loading=false; if(e.message==="login")return; var more=$("albMore"); if(more) more.innerHTML='<span class="err">'+esc(e.message)+'</span>'; });
@@ -2929,10 +2984,24 @@ const PAGE = `<!DOCTYPE html>
         '<div class="tk" onclick="playAlbum('+id+','+i+')">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
         dlBtn(t.id,t.file)+'<button class="np-btn" title="More" onclick="songMenuAlbum('+id+','+i+')">'+ic("more_vert")+'</button></div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(albName(al),{img:albImg(al)})+'<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2><div class="sub">'+tracks.length+' tracks</div>'+
-        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((dlAllowed()&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div></div></div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((dlAllowed()&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div>'+
+        (ME.admin?('<div class="chips" style="padding:0;margin-top:10px"><span class="muted" style="font-size:.74rem;align-self:center;margin-right:2px">Admin:</span>'+
+          '<button class="chip" id="curFeat" onclick="curate('+id+',\\''+(isFeatured(id)?'unfeature':'feature')+'\\')">'+ic(isFeatured(id)?"star":"star_border")+(isFeatured(id)?' Unpin from Home':' Pin to Home')+'</button>'+
+          '<button class="chip" id="curHide" onclick="curate('+id+',\\''+(isHidden(id)?'unhide':'hide')+'\\')">'+ic(isHidden(id)?"visibility":"visibility_off")+(isHidden(id)?' Unhide':' Hide from everyone')+'</button></div>'):'')+
+        '</div></div>'+
         (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
       highlightPlaying();
     }
+    function clearCurate(which){ if(!confirm("Clear all "+(which==="featured"?"pinned":"hidden")+" albums?")) return;
+      post("/api/admin/curate",{action:which==="featured"?"clearfeatured":"clearhidden"}).then(function(d){
+        CFG.featured=(d.featured||[]).map(Number); CFG.hidden=(d.hidden||[]).map(Number); toast("Cleared."); loadAccess();
+      }).catch(function(e){ toast(e.message||"Couldn’t clear."); }); }
+    function curate(id, action){ toast("Saving…");
+      post("/api/admin/curate",{id:id,action:action}).then(function(d){
+        CFG.featured=(d.featured||[]).map(Number); CFG.hidden=(d.hidden||[]).map(Number);
+        toast(action==="feature"?"Pinned to Home ★":action==="unfeature"?"Unpinned.":action==="hide"?"Hidden from everyone.":"Unhidden.");
+        if(window._albums&&window._albums[id]) renderAlbum(id, window._albums[id]);
+      }).catch(function(e){ toast(e.message||"Couldn’t save."); }); }
 
     // ---------- Track list (playlists) ----------
     function renderTrackList(title, subtitle, tracks, backFn, img, kicker){
@@ -3428,6 +3497,12 @@ const PAGE = `<!DOCTYPE html>
         CFG_FEATURES.map(function(k){ return toggleRow(k, FEAT_LABELS[k]||k); }).join("")+
         '</div></div>'+
         '<div style="margin:12px 0"><button class="btn" style="width:100%;justify-content:center" onclick="saveAdminConfig()">Save app settings</button><div id="cfgMsg" class="err" style="margin-top:8px;min-height:16px"></div></div>';
+      var nFeat=((cfg&&cfg.featured)||[]).length, nHid=((cfg&&cfg.hidden)||[]).length;
+      var contentCard='<div class="set-sec"><h3>Content — featured &amp; hidden</h3><div class="card" style="padding:15px">'+
+        '<p class="muted" style="margin:0 0 10px">Open any album and use the <b>Admin</b> buttons there to <b>Pin to Home</b> (shows in a “Featured” row) or <b>Hide</b> it from everyone.</p>'+
+        '<div style="display:flex;gap:8px;text-align:center">'+statTile(nFeat,"Pinned to Home",'var(--accent)')+statTile(nHid,"Hidden")+'</div>'+
+        ((nFeat||nHid)?('<div class="chips" style="padding:0;margin-top:10px">'+(nFeat?'<button class="chip" onclick="clearCurate(\\'featured\\')">Clear pinned</button>':'')+(nHid?'<button class="chip" onclick="clearCurate(\\'hidden\\')">Clear hidden</button>':'')+'</div>'):'')+
+        '</div></div>';
       var codes=d.codes||[];
       var list = codes.length
         ? '<div class="card">'+codes.map(function(c){ return '<div class="code-item"><div style="min-width:0"><div class="ci-name">'+esc(c.name||"Someone")+'</div><div class="ci-code">'+esc(c.code)+'</div></div>'+
@@ -3494,7 +3569,7 @@ const PAGE = `<!DOCTYPE html>
         '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
         '<div style="margin-top:6px;display:flex;gap:8px"><button class="chip" onclick="clearMusic()">Clear login</button><button class="chip" onclick="reconMusic()">Stream recon (dev)</button></div>'+
         '</div></div>';
-      ovlSet("Admin", back+statsCard+presCard+usersCards+musicCard+appCard+featCard+accCard);
+      ovlSet("Admin", back+statsCard+presCard+usersCards+musicCard+contentCard+appCard+featCard+accCard);
       loadMusicStatus();
       loadStats(); // auto-load the dashboard
       stopPresPoll(); _presTimer=setInterval(refreshPres, 10000);
