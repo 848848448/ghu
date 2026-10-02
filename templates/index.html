@@ -881,7 +881,11 @@
                 if(tr.createDeviceInput) info+="\n  UserDeviceCreateInput: "+(tr.createDeviceInput.fields?tr.createDeviceInput.fields.join(", "):JSON.stringify(tr.createDeviceInput)).slice(0,400);
                 if(tr.osEnum) info+="\n  OS enum: "+(Array.isArray(tr.osEnum)?tr.osEnum.join(", "):JSON.stringify(tr.osEnum));
                 if(tr.sessionAttempts) info+="\n  session attempts: "+JSON.stringify(tr.sessionAttempts).slice(0,400);
+                if(tr.streamQueries) info+="\n  stream queries: "+tr.streamQueries.join(", ");
+                if(tr.streamMutations) info+="\n  stream mutations: "+tr.streamMutations.join(", ");
+                if(tr.heartbeatArgs) info+="\n  updateSessionHeartbeat: "+(tr.heartbeatArgs.args?("args["+tr.heartbeatArgs.args.join(", ")+"] returns "+tr.heartbeatArgs.returns):JSON.stringify(tr.heartbeatArgs));
                 if(tr.openedWith!==undefined) info+="\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
+                if(tr.heartbeatCall) info+="\n  heartbeat: "+(tr.heartbeatErrors&&tr.heartbeatErrors.length?("ERR "+tr.heartbeatErrors.join(" | ")):("ok "+JSON.stringify(tr.heartbeatResult||{})));
                 if(tr.audioAfterSession) info+="\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
                 if(tr.error) info+="\n  error: "+tr.error; }
               if(dg.recon){ var rc=dg.recon; info+="\nrecon bundles: "+((rc.bundles||[]).length); if(rc.error) info+="\n  recon error: "+rc.error; if(rc.hits){ for(var kw in rc.hits){ info+="\n  ["+kw+"] "+rc.hits[kw].join("  ||  "); } } }
