@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b84-light403-2026-10-02";
+const BUILD = "b85-admin-dash-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -580,7 +580,13 @@ async function handleAdminUsers(request, env) {
   if (!env.DB) return json({ error: "Accounts need a D1 database.", d1: false }, 400);
   await ensureD1(env);
   const r = await env.DB.prepare("SELECT id, name, email, phone, photo, status, nodl, role, created FROM users ORDER BY created DESC").all();
-  return json({ users: r.results || [], ownerEmail: await ownerEmail(env) });
+  const users = r.results || [];
+  // Attach per-user play counts and last-seen, so the owner can see who is active.
+  const plays = {}, seen = {};
+  try { const p = await env.DB.prepare("SELECT uid, COUNT(*) AS c FROM plays GROUP BY uid").all(); (p.results || []).forEach((x) => { plays[String(x.uid)] = x.c; }); } catch (e) {}
+  try { const s = await env.DB.prepare("SELECT uid, seen FROM presence").all(); (s.results || []).forEach((x) => { seen[String(x.uid)] = x.seen; }); } catch (e) {}
+  users.forEach((u) => { const k = String(u.id); u.plays = plays[k] || 0; u.lastSeen = seen[k] || 0; });
+  return json({ users, ownerEmail: await ownerEmail(env) });
 }
 
 async function handleAdminUser(request, env) {
@@ -691,7 +697,7 @@ async function handleAdminStats(request, env) {
   if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
   if (!env.DB) return json({ error: "Statistics need a D1 database.", d1: false }, 400);
   await ensureD1(env);
-  const now = Date.now(), dayAgo = now - 86400000, weekAgo = now - 7 * 86400000;
+  const now = Date.now(), dayAgo = now - 86400000, weekAgo = now - 7 * 86400000, monthAgo = now - 30 * 86400000;
   // Build a uid -> display-name map from the users table.
   const names = {};
   try {
@@ -699,13 +705,21 @@ async function handleAdminStats(request, env) {
     (us.results || []).forEach((u) => { names[String(u.id)] = u.name || u.email || ("User " + u.id); });
   } catch (e) { /* ignore */ }
   const who = (uid) => uid === "admin" ? "Owner" : (uid === "guest" || uid === "" ? "Guest" : (names[uid] || ("User " + uid)));
-  const out = { total: 0, today: 0, week: 0, topTracks: [], topUsers: [], recent: [] };
+  const out = { total: 0, today: 0, week: 0, month: 0, listeners: 0, activeToday: 0, activeWeek: 0, topTracks: [], topArtists: [], topUsers: [], recent: [], daily: [] };
   try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays").first(); out.total = (t && t.n) || 0; } catch (e) {}
   try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(dayAgo).first(); out.today = (t && t.n) || 0; } catch (e) {}
   try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(weekAgo).first(); out.week = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(monthAgo).first(); out.month = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(DISTINCT uid) AS n FROM plays").first(); out.listeners = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(DISTINCT uid) AS n FROM plays WHERE at >= ?").bind(dayAgo).first(); out.activeToday = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(DISTINCT uid) AS n FROM plays WHERE at >= ?").bind(weekAgo).first(); out.activeWeek = (t && t.n) || 0; } catch (e) {}
   try {
     const r = await env.DB.prepare("SELECT track, title, artist, COUNT(*) AS c FROM plays GROUP BY track ORDER BY c DESC LIMIT 20").all();
     out.topTracks = (r.results || []).map((x) => ({ track: x.track, title: x.title, artist: x.artist, count: x.c }));
+  } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT artist, COUNT(*) AS c FROM plays WHERE artist IS NOT NULL AND artist <> '' GROUP BY artist ORDER BY c DESC LIMIT 12").all();
+    out.topArtists = (r.results || []).map((x) => ({ artist: x.artist, count: x.c }));
   } catch (e) {}
   try {
     const r = await env.DB.prepare("SELECT uid, COUNT(*) AS c FROM plays GROUP BY uid ORDER BY c DESC LIMIT 12").all();
@@ -714,6 +728,15 @@ async function handleAdminStats(request, env) {
   try {
     const r = await env.DB.prepare("SELECT uid, track, title, artist, at FROM plays ORDER BY at DESC LIMIT 40").all();
     out.recent = (r.results || []).map((x) => ({ name: who(x.uid), title: x.title, artist: x.artist, at: x.at }));
+  } catch (e) {}
+  // Plays per day for the last 7 days (oldest → newest), for a mini bar chart.
+  try {
+    const dayMid = now - (now % 86400000); // UTC midnight of today
+    const startDay = Math.floor((dayMid - 6 * 86400000) / 86400000);
+    const r = await env.DB.prepare("SELECT CAST(at/86400000 AS INTEGER) AS day, COUNT(*) AS c FROM plays WHERE at >= ? GROUP BY day").bind(dayMid - 6 * 86400000).all();
+    const byDay = {}; (r.results || []).forEach((x) => { byDay[x.day] = x.c; });
+    const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    for (let i = 0; i < 7; i++) { const d = startDay + i; const ms = d * 86400000; out.daily.push({ label: wd[new Date(ms).getUTCDay()], count: byDay[d] || 0 }); }
   } catch (e) {}
   return json(out);
 }
@@ -3434,16 +3457,18 @@ const PAGE = `<!DOCTYPE html>
               '<button class="trash" title="Reject" onclick="userAction('+u.id+',\\'reject\\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
         }
         var alist = others.length
-          ? others.map(function(u){ var susp=(u.status==="suspended"); var isOwner=(oemail&&(u.email||"").toLowerCase()===oemail); var isA=(u.role==="admin"||isOwner);
-              return '<div class="card" style="padding:12px;margin-bottom:8px">'+
-                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div></div>'+
+          ? '<input id="acctSearch" class="field" placeholder="Search accounts by name, email, phone…" autocomplete="off" oninput="filterAccounts()" style="margin-bottom:10px" /><div id="acctList">'+others.map(function(u){ var susp=(u.status==="suspended"); var isOwner=(oemail&&(u.email||"").toLowerCase()===oemail); var isA=(u.role==="admin"||isOwner);
+              var sk=esc(((u.name||"")+" "+(u.email||"")+" "+(u.phone||"")).toLowerCase());
+              var meta='<span>'+(u.plays||0)+' plays</span>'+(u.lastSeen?' · <span>seen '+timeAgo(u.lastSeen)+'</span>':'')+(u.created?' · <span>joined '+timeAgo(u.created)+'</span>':'');
+              return '<div class="card acct" data-search="'+sk+'" style="padding:12px;margin-bottom:8px">'+
+                '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div><div class="ci-code" style="color:var(--muted);margin-top:2px">'+meta+'</div></div></div>'+
                 '<div class="chips" style="padding:0;margin-top:10px">'+
                   (susp?'<button class="chip" onclick="userAction('+u.id+',\\'unsuspend\\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\\'suspend\\')">Suspend</button>')+
                   (isOwner?'':'<button class="chip" onclick="userAction('+u.id+',\\'setrole\\',{value:'+(u.role==="admin"?0:1)+'})">'+(u.role==="admin"?"Remove admin":"Make admin")+'</button>')+
                   '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
                   '<button class="chip" onclick="userAction('+u.id+',\\'nodl\\',{value:'+(u.nodl?0:1)+'})">'+(u.nodl?'Enable downloads':'Disable downloads')+'</button>'+
                   '<button class="chip" onclick="userAction('+u.id+',\\'remove\\')">Remove</button>'+
-                '</div></div>'; }).join("")
+                '</div></div>'; }).join("")+'<div id="acctNone" class="muted" style="display:none;padding:6px 2px">No accounts match.</div></div>'
           : '<p class="muted" style="margin:2px 0 10px">No accounts yet.</p>';
         usersCards+='<div class="set-sec"><h3>Accounts ('+others.length+')</h3>'+alist+
           '<div class="card" style="padding:15px;margin-top:2px">'+
@@ -3455,9 +3480,9 @@ const PAGE = `<!DOCTYPE html>
             '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
             '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
       }
-      var statsCard='<div class="set-sec"><h3>Listening statistics</h3><div class="card" style="padding:15px">'+
-        '<button class="btn ghost" style="width:100%;justify-content:center" onclick="loadStats()">'+ic("graphic_eq")+' Show statistics</button>'+
-        '<div id="statsBox" style="margin-top:12px"></div></div></div>';
+      var statsCard='<div class="set-sec"><h3>Dashboard</h3><div class="card" style="padding:15px">'+
+        '<div id="statsBox"></div>'+
+        '<button class="chip" style="margin-top:12px" onclick="loadStats()">'+ic("history")+' Refresh</button></div></div>';
       var musicCard='<div class="set-sec"><h3>Music server login</h3><div class="card" style="padding:15px">'+
         '<div id="musicStatus" class="muted" style="margin-bottom:12px"><span class="spinner"></span>Checking…</div>'+
         '<div style="font-weight:600;margin-bottom:6px">Sign in with your Zing account (keeps working — refreshes itself)</div>'+
@@ -3469,8 +3494,9 @@ const PAGE = `<!DOCTYPE html>
         '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
         '<div style="margin-top:6px;display:flex;gap:8px"><button class="chip" onclick="clearMusic()">Clear login</button><button class="chip" onclick="reconMusic()">Stream recon (dev)</button></div>'+
         '</div></div>';
-      ovlSet("Admin", back+musicCard+presCard+statsCard+usersCards+appCard+featCard+accCard);
+      ovlSet("Admin", back+statsCard+presCard+usersCards+musicCard+appCard+featCard+accCard);
       loadMusicStatus();
+      loadStats(); // auto-load the dashboard
       stopPresPoll(); _presTimer=setInterval(refreshPres, 10000);
     }
     function renderMusicStatus(h){ h=h||{}; var el=$("musicStatus"); if(!el) return; var parts=[];
@@ -3501,17 +3527,31 @@ const PAGE = `<!DOCTYPE html>
         if(rc.hits){ for(var kw in rc.hits){ info+="\\n\\n["+kw+"]\\n"+rc.hits[kw].join("\\n"); } }
         window._copy=info; var m=$("musicMsg"); if(m){ m.style.color="var(--text)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.75rem;max-height:50vh;overflow:auto">'+esc(info)+'</pre><button class="btn sm" style="margin-top:6px" onclick="copyText(this)">Copy</button>'; }
       }).catch(function(e){ musicMsg(e.message||"Recon failed.","var(--err)"); }); }
-    function statTile(n,label){ return '<div style="flex:1;background:var(--surface-2);border-radius:12px;padding:12px 6px"><div style="font-size:1.5rem;font-weight:800">'+(n||0)+'</div><div class="muted" style="font-size:.72rem">'+esc(label)+'</div></div>'; }
-    function timeAgo(at){ var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
+    function statTile(n,label,accent){ return '<div style="flex:1;min-width:0;background:var(--surface-2);border-radius:14px;padding:13px 6px"><div style="font-size:1.5rem;font-weight:800;color:'+(accent||'var(--text)')+'">'+(n||0)+'</div><div class="muted" style="font-size:.7rem;line-height:1.2">'+esc(label)+'</div></div>'; }
+    function timeAgo(at){ if(!at) return "—"; var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
+    function barChart(daily){ if(!daily||!daily.length) return "";
+      var max=1; daily.forEach(function(d){ if(d.count>max) max=d.count; });
+      var bars=daily.map(function(d){ var h=Math.round((d.count/max)*54); return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0">'+
+        '<div class="muted" style="font-size:.66rem">'+d.count+'</div>'+
+        '<div style="width:70%;max-width:26px;height:'+Math.max(h,3)+'px;background:linear-gradient(180deg,var(--accent),var(--accent2,var(--accent)));border-radius:5px 5px 2px 2px"></div>'+
+        '<div class="muted" style="font-size:.64rem">'+esc(d.label)+'</div></div>'; }).join("");
+      return '<div style="font-weight:700;margin:16px 0 8px">Plays — last 7 days</div><div style="display:flex;align-items:flex-end;gap:5px;background:var(--surface-2);border-radius:14px;padding:12px 10px;height:104px">'+bars+'</div>'; }
+    function rankRow(i,name,sub,count){ return '<div class="code-item"><div style="width:22px;color:var(--muted);font-weight:700;flex:none">'+(i+1)+'</div><div style="min-width:0;flex:1"><div class="ci-name">'+esc(name)+'</div>'+(sub?'<div class="ci-code">'+esc(sub)+'</div>':'')+'</div><div style="font-weight:800;color:var(--accent);flex:none">'+count+'</div></div>'; }
     function statsHtml(s){
       if(s.d1===false||s.error){ return '<div class="empty">'+esc(s.error||"Not available.")+'</div>'; }
       if(!s.total){ return '<div class="empty">No plays yet. Once people start listening, you\\'ll see what\\'s popular here.</div>'; }
-      var tiles='<div style="display:flex;gap:8px;text-align:center;margin-bottom:14px">'+statTile(s.total,"All time")+statTile(s.week,"This week")+statTile(s.today,"Today")+'</div>';
-      var top=(s.topTracks||[]).length?('<div style="font-weight:700;margin:6px 0">Top songs</div>'+(s.topTracks||[]).slice(0,12).map(function(t,i){ return '<div class="code-item"><div style="width:24px;color:var(--muted);font-weight:700;flex:none">'+(i+1)+'</div><div style="min-width:0;flex:1"><div class="ci-name">'+esc(t.title||("Track "+t.track))+'</div><div class="ci-code">'+esc(t.artist||"")+'</div></div><div style="font-weight:800;color:var(--accent);flex:none">'+t.count+'</div></div>'; }).join("")):'';
-      var users=(s.topUsers||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Most active</div>'+(s.topUsers||[]).map(function(u){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(u.name)+'</div></div><div style="font-weight:800;color:var(--accent);flex:none">'+u.count+'</div></div>'; }).join("")):'';
+      var tiles='<div style="display:flex;gap:7px;text-align:center;margin-bottom:9px">'+statTile(s.total,"All-time plays")+statTile(s.month,"This month")+statTile(s.week,"This week")+statTile(s.today,"Today")+'</div>'+
+        '<div style="display:flex;gap:7px;text-align:center;margin-bottom:6px">'+statTile(s.listeners,"Listeners",'var(--accent)')+statTile(s.activeWeek,"Active this week",'var(--accent)')+statTile(s.activeToday,"Active today",'var(--accent)')+'</div>';
+      var chart=barChart(s.daily);
+      var top=(s.topTracks||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Top songs</div>'+(s.topTracks||[]).slice(0,12).map(function(t,i){ return rankRow(i,t.title||("Track "+t.track),t.artist||"",t.count); }).join("")):'';
+      var arts=(s.topArtists||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Top artists</div>'+(s.topArtists||[]).slice(0,10).map(function(a,i){ return rankRow(i,a.artist,"",a.count); }).join("")):'';
+      var users=(s.topUsers||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Most active listeners</div>'+(s.topUsers||[]).map(function(u,i){ return rankRow(i,u.name,"",u.count); }).join("")):'';
       var recent=(s.recent||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Recent plays</div>'+(s.recent||[]).slice(0,25).map(function(r){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(r.title||"—")+'</div><div class="ci-code">'+esc(r.name)+(r.artist?' · '+esc(r.artist):'')+' · '+timeAgo(r.at)+'</div></div></div>'; }).join("")):'';
-      return tiles+top+users+recent;
+      return tiles+chart+top+arts+users+recent;
     }
+    function filterAccounts(){ var q=(($("acctSearch")||{}).value||"").trim().toLowerCase(); var list=$("acctList"); if(!list) return; var cards=list.querySelectorAll(".acct"); var shown=0;
+      cards.forEach(function(c){ var ok=!q||(c.getAttribute("data-search")||"").indexOf(q)>=0; c.style.display=ok?"":"none"; if(ok)shown++; });
+      var none=$("acctNone"); if(none) none.style.display=shown?"none":"block"; }
     function loadStats(){ var box=$("statsBox"); if(!box) return; box.innerHTML='<div class="empty" style="padding:16px"><span class="spinner"></span>Loading…</div>';
       post("/api/admin/stats",{admin:_admPw}).then(function(s){ box.innerHTML=statsHtml(s); }).catch(function(e){ if(e&&e.message==="login")return; box.innerHTML='<div class="empty">'+esc((e&&e.message)||"Could not load.")+'</div>'; }); }
     function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
