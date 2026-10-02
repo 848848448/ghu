@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b88-admin-more-2026-10-02";
+const BUILD = "b89-polish-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2509,6 +2509,36 @@ const PAGE = `<!DOCTYPE html>
     .trash:hover{ background:rgba(251,113,133,.14); color:var(--err); } .trash .ms{ font-size:20px; }
     .set-sec code, .card code{ background:var(--surface-3); padding:1px 6px; border-radius:6px; font-size:.86em; color:var(--text); }
     .steps{ margin:0; padding-left:20px; line-height:1.85; } .steps li{ margin-bottom:6px; }
+
+    /* ---------- Visual polish ---------- */
+    @keyframes fadeUp{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:none; } }
+    .sec, .hero, .grid, .tracks.solo{ animation:fadeUp .36s cubic-bezier(.2,.7,.3,1) both; }
+    .sec:nth-child(2){ animation-delay:.03s; } .sec:nth-child(3){ animation-delay:.06s; }
+    .sec:nth-child(4){ animation-delay:.09s; } .sec:nth-child(5){ animation-delay:.12s; } .sec:nth-child(6){ animation-delay:.15s; }
+    /* accent bar before section titles */
+    .sec-head h2{ position:relative; padding-left:13px; }
+    .sec-head h2::before{ content:""; position:absolute; left:0; top:51%; transform:translateY(-50%); width:4px; height:17px; border-radius:3px; background:var(--grad); }
+    /* cover art gently zooms on hover */
+    .hcard .cvimg, .tile .cvimg{ transition:opacity .4s ease, transform .55s cubic-bezier(.2,.7,.3,1); }
+    .hcard:hover .cvimg, .tile:hover .cvimg{ transform:scale(1.07); }
+    /* richer press / hover feedback */
+    .btn{ transition:transform .12s ease, box-shadow .2s ease, filter .2s ease; }
+    .btn:hover{ filter:brightness(1.06); } .btn:active{ transform:scale(.97); }
+    .chip{ transition:transform .12s ease, border-color .2s ease, background .2s ease, color .2s ease; }
+    .chip:hover{ border-color:var(--accent); } .chip:active{ transform:scale(.95); }
+    .iconbtn{ transition:background .18s ease, color .18s ease, transform .12s ease; } .iconbtn:active{ transform:scale(.9); }
+    .track:active, .arow:active, .row:active, .code-item:active{ background:var(--surface-2); }
+    .see:active{ transform:scale(.95); }
+    /* logo sheen */
+    .logo{ position:relative; overflow:hidden; }
+    .logo::after{ content:""; position:absolute; inset:0; background:linear-gradient(120deg,transparent 42%,rgba(255,255,255,.4) 50%,transparent 58%); transform:translateX(-130%); animation:sheen 6s ease-in-out infinite; }
+    @keyframes sheen{ 0%,72%{ transform:translateX(-130%); } 88%,100%{ transform:translateX(130%); } }
+    /* softer, deeper card shadows */
+    .card{ box-shadow:0 1px 2px rgba(0,0,0,.04); transition:border-color .2s ease, box-shadow .2s ease; }
+    .cover{ box-shadow:0 10px 24px rgba(0,0,0,.34), inset 0 0 40px rgba(0,0,0,.16); }
+    .empty{ font-size:.96rem; }
+    .greet{ margin:16px 18px 2px; font-size:1.4rem; font-weight:800; letter-spacing:.2px;
+      background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; animation:fadeUp .4s ease both; }
     @media (prefers-reduced-motion: reduce){ *{ transition:none !important; animation-duration:.01ms !important; } }
   </style>
 </head>
@@ -2818,6 +2848,7 @@ const PAGE = `<!DOCTYPE html>
       if((m=url.match(/artist[s]?[\\/=](\\d+)/i))){ openArtist(+m[1]); return; }
       if((m=url.match(/playlist[s]?[\\/=](\\d+)/i))){ openPlaylist(+m[1]); return; }
       if(/^https?:/i.test(url)){ window.open(url,"_blank"); } }
+    function greeting(){ var h=new Date().getHours(); var base=h<5?"Good night":h<12?"Good morning":h<17?"Good afternoon":h<21?"Good evening":"Good night"; return base+(ME.user&&ME.user.name?(", "+ME.user.name.split(" ")[0]):""); }
     function home(){
       setStatus(""); setView(skHome());
       var pBan=gql("query { banners(take: 15) { id enName heName enImage heImage url index platform } }").then(function(d){ var b=d.banners||[]; b.sort(function(x,y){return (x.index||0)-(y.index||0);}); return b; }).catch(function(){return [];});
@@ -2834,7 +2865,7 @@ const PAGE = `<!DOCTYPE html>
         // Keep featured in the admin-chosen order.
         if(featured.length){ var fm={}; featured.forEach(function(a){fm[a.id]=a;}); featured=CFG.featured.map(function(id){return fm[id];}).filter(Boolean); }
         window._albums=window._albums||{};
-        var html="";
+        var html='<div class="greet">'+esc(greeting())+'</div>';
         if(banners.length && feat("banners")){
           var bcards=banners.map(bannerCard).filter(Boolean).join("");
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
