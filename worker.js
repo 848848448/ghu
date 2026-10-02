@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b89-polish-2026-10-02";
+const BUILD = "b90-playback-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2447,6 +2447,12 @@ const PAGE = `<!DOCTYPE html>
     .np-c.play{ width:66px; height:66px; background:var(--grad); color:#fff; box-shadow:0 10px 24px rgba(124,92,255,.45); }
     .np-c.play .ms{ font-size:34px; }
     .np-c.on{ color:var(--accent); }
+    .np-controls2{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-6px 0 10px; }
+    .np-c2{ display:inline-flex; align-items:center; gap:3px; border:1px solid var(--line); background:var(--surface-2); color:var(--text);
+      font-family:inherit; font-weight:700; font-size:.85rem; padding:7px 13px; border-radius:999px; cursor:pointer; min-width:54px; justify-content:center; transition:transform .12s ease, border-color .2s ease; }
+    .np-c2:active{ transform:scale(.95); } .np-c2 .ms{ font-size:18px; }
+    .np-vol{ display:flex; align-items:center; gap:10px; margin:0 2px 12px; color:var(--muted); }
+    .np-vol .ms{ font-size:20px; flex:none; } .np-vol .np-seek{ flex:1; }
     .np-actions{ display:flex; justify-content:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
     .np-seg{ display:flex; width:100%; background:var(--surface-2); border-radius:12px; padding:4px; }
     .np-seg button{ flex:1; border:none; background:transparent; color:var(--muted); font-family:inherit; font-weight:700; font-size:.86rem; padding:9px 6px; border-radius:9px; cursor:pointer; }
@@ -2593,8 +2599,9 @@ const PAGE = `<!DOCTYPE html>
 
     // ---------- App settings (saved on this device) ----------
     var SET_KEY="zing_settings";
-    function loadSettings(){ var d={lang:"en",theme:"dark",autoplay:true,radio:true};
-      try{ var o=JSON.parse(localStorage.getItem(SET_KEY)||"null"); if(o){ if(o.lang==="he")d.lang="he"; if(o.theme==="light")d.theme="light"; if(o.autoplay===false)d.autoplay=false; if(o.radio===false)d.radio=false; } }catch(e){}
+    function loadSettings(){ var d={lang:"en",theme:"dark",autoplay:true,radio:true,speed:1,skip:15,resume:true,fade:false,vol:1};
+      try{ var o=JSON.parse(localStorage.getItem(SET_KEY)||"null"); if(o){ if(o.lang==="he")d.lang="he"; if(o.theme==="light")d.theme="light"; if(o.autoplay===false)d.autoplay=false; if(o.radio===false)d.radio=false;
+        if([0.75,1,1.25,1.5,1.75,2].indexOf(o.speed)>=0)d.speed=o.speed; if([10,15,30].indexOf(o.skip)>=0)d.skip=o.skip; if(o.resume===false)d.resume=false; if(o.fade===true)d.fade=true; if(typeof o.vol==="number"&&o.vol>=0&&o.vol<=1)d.vol=o.vol; } }catch(e){}
       return d; }
     var SET=loadSettings();
     function saveSettings(){ try{ localStorage.setItem(SET_KEY, JSON.stringify(SET)); }catch(e){} }
@@ -2661,6 +2668,10 @@ const PAGE = `<!DOCTYPE html>
       star:"M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z",
       star_border:"M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28z",
       visibility:"M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
+      volume_up:"M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z",
+      speed:"M20.38 8.57l-1.23 1.85a8 8 0 0 1-.22 7.58H5.07A8 8 0 0 1 15.58 6.85l1.85-1.23A10 10 0 0 0 3.35 19a2 2 0 0 0 1.72 1h13.85a2 2 0 0 0 1.74-1 10 10 0 0 0-.27-10.44zm-9.79 6.84a2 2 0 0 0 2.83 0l5.66-8.49-8.49 5.66a2 2 0 0 0 0 2.83z",
+      fast_rewind:"M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z",
+      fast_forward:"M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z",
       visibility_off:"M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78 3.15 3.15.02-.16c0-1.66-1.34-3-3-3z",
       music_note:"M12 3v10.55A4 4 0 1 0 14 17V7h4V3z",
       settings:"M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
@@ -3129,9 +3140,10 @@ const PAGE = `<!DOCTYPE html>
       startQueue(tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; }), index); }
     function playTracks(tracks, index, ctx){ startQueue(tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:(t.artists&&t.artists.length?artNames(t.artists):(ctx||"")), cover:ctx||trackName(t), coverImg:(t.album&&t.album.images)?(t.album.images.cdnSmall||t.album.images.cdnMedium||t.album.images.small):null}; }), index); }
     function trackSrc(t,bust){ return "/api/play?trackId="+encodeURIComponent(t.id)+"&file="+encodeURIComponent(t.file)+(bust?("&r="+Date.now()):""); }
-    function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i]; _retry=0; _dur=0;
+    function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i]; _retry=0; _dur=0; _resumed=false;
       setActivity("Playing: "+(t.title||""));
-      audio.src=trackSrc(t,false); audio.play().catch(function(){});
+      audio.src=trackSrc(t,false); try{ audio.playbackRate=SET.speed||1; }catch(e){} audio.volume=(SET.fade?0:(SET.vol==null?1:SET.vol));
+      audio.play().catch(function(){});
       $("player").hidden=false; $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
       var cu=imgUrl(t.coverImg);
       if(cu){ $("npCover").style.background=""; $("npCover").style.backgroundImage="url('"+cu+"')"; $("npCover").style.backgroundSize="cover"; $("npCover").style.backgroundPosition="center"; $("npCover").innerHTML=""; }
@@ -3160,15 +3172,47 @@ const PAGE = `<!DOCTYPE html>
       var pos=_order.indexOf(qi); var pp=pos-1; if(pp<0){ if(_repeat==="all") pp=_order.length-1; else { audio.currentTime=0; return; } } playIndex(_order[pp]); }
     function toggleShuffle(){ _shuffle=!_shuffle; try{ localStorage.setItem("zing_shuffle",_shuffle?"1":"0"); }catch(e){} if(queue.length) buildOrder(qi); syncSheet(); toast(_shuffle?"Shuffle on":"Shuffle off"); }
     function cycleRepeat(){ _repeat=(_repeat==="off"?"all":(_repeat==="all"?"one":"off")); try{ localStorage.setItem("zing_repeat",_repeat); }catch(e){} syncSheet(); toast(_repeat==="off"?"Repeat off":(_repeat==="all"?"Repeat all":"Repeat one")); }
-    audio.addEventListener("play", function(){ setPlayIcon(true); });
-    audio.addEventListener("pause", function(){ setPlayIcon(false); });
-    audio.addEventListener("playing", function(){ _fails=0; var t=queue[qi]; pushHistory(t); reportPlay(t); }); // played fine → clear failures, record history + stats
+    audio.addEventListener("play", function(){ setPlayIcon(true); try{ if("mediaSession" in navigator) navigator.mediaSession.playbackState="playing"; }catch(e){} });
+    audio.addEventListener("pause", function(){ setPlayIcon(false); savePos(); try{ if("mediaSession" in navigator) navigator.mediaSession.playbackState="paused"; }catch(e){} });
+    var _resumed=false, _fadeTimer=null;
+    audio.addEventListener("playing", function(){ _fails=0; var t=queue[qi]; pushHistory(t); reportPlay(t); setMediaMeta(t); // played fine → clear failures, record history + stats
+      try{ audio.playbackRate=SET.speed||1; }catch(e){}
+      if(SET.fade){ if(_fadeTimer) clearInterval(_fadeTimer); var target=(SET.vol==null?1:SET.vol); audio.volume=0; var step=target/16; _fadeTimer=setInterval(function(){ var v=audio.volume+step; if(v>=target){ v=target; clearInterval(_fadeTimer); _fadeTimer=null; } audio.volume=v; },40); }
+    });
     var _lastReport=0;
     function reportPlay(t){ if(!t) return; var now=Date.now(); if(now-_lastReport<3000) return; _lastReport=now;
       post("/api/played",{track:t.id,title:t.title||"",artist:t.artist||""}).catch(function(){}); }
-    audio.addEventListener("ended", function(){ if(_sleepEnd){ _sleepEnd=false; toast("Sleep timer — paused"); syncSheet(); return; } nextTrack(); }); // keep playing one after another
-    audio.addEventListener("loadedmetadata", function(){ _dur=audio.duration||0; var d=$("shDur"); if(d) d.textContent=fmt(_dur); });
-    audio.addEventListener("timeupdate", function(){ if(audio.duration){ var pct=Math.round(audio.currentTime/audio.duration*1000); $("seek").value=String(pct); var s=$("shSeek"); if(s) s.value=String(pct); var c=$("shCur"); if(c) c.textContent=fmt(audio.currentTime); } });
+    audio.addEventListener("ended", function(){ var t=queue[qi]; if(t) clearPos(t.id); if(_sleepEnd){ _sleepEnd=false; toast("Sleep timer — paused"); syncSheet(); return; } nextTrack(); }); // keep playing one after another
+    audio.addEventListener("loadedmetadata", function(){ _dur=audio.duration||0; var d=$("shDur"); if(d) d.textContent=fmt(_dur);
+      // Resume long tracks (shiurim/stories) where you left off.
+      if(SET.resume && !_resumed){ _resumed=true; var t=queue[qi]; if(t && _dur>600){ var p=getPos(t.id); if(p>30 && p<_dur-30){ try{ audio.currentTime=p; toast("Resumed where you left off"); }catch(e){} } } } });
+    var _lastPosSave=0;
+    audio.addEventListener("timeupdate", function(){ if(audio.duration){ var pct=Math.round(audio.currentTime/audio.duration*1000); $("seek").value=String(pct); var s=$("shSeek"); if(s) s.value=String(pct); var c=$("shCur"); if(c) c.textContent=fmt(audio.currentTime);
+      var now=Date.now(); if(now-_lastPosSave>4000){ _lastPosSave=now; savePos(); } } });
+    // Remember position for long tracks only, so you can resume.
+    function posMap(){ try{ return JSON.parse(localStorage.getItem("zing_pos")||"{}")||{}; }catch(e){ return {}; } }
+    function getPos(id){ return posMap()[String(id)]||0; }
+    function savePos(){ var t=queue[qi]; if(!t||!audio.duration||audio.duration<=600) return; try{ var m=posMap(); if(audio.currentTime>30 && audio.currentTime<audio.duration-30){ m[String(t.id)]=Math.floor(audio.currentTime); } else { delete m[String(t.id)]; } var ks=Object.keys(m); if(ks.length>60){ ks.slice(0,ks.length-60).forEach(function(k){ delete m[k]; }); } localStorage.setItem("zing_pos",JSON.stringify(m)); }catch(e){} }
+    function clearPos(id){ try{ var m=posMap(); delete m[String(id)]; localStorage.setItem("zing_pos",JSON.stringify(m)); }catch(e){} }
+    // Skip forward / back by the chosen interval.
+    function skipBy(sec){ if(!audio.duration) return; audio.currentTime=Math.max(0,Math.min(audio.duration,audio.currentTime+sec)); }
+    function cycleSpeed(){ var opts=[1,1.25,1.5,1.75,2,0.75]; var i=opts.indexOf(SET.speed); SET.speed=opts[(i+1)%opts.length]; saveSettings(); try{ audio.playbackRate=SET.speed; }catch(e){} var b=$("shSpeed"); if(b) b.innerHTML=speedLabel(); toast("Speed "+SET.speed+"×"); }
+    function speedLabel(){ return (SET.speed||1)+"×"; }
+    function setVol(v){ SET.vol=Math.max(0,Math.min(1,v/100)); saveSettings(); if(!(_fadeTimer)) audio.volume=SET.vol; }
+    // Media Session: show controls + artwork on the phone lock screen / notification.
+    function setMediaMeta(t){ if(!("mediaSession" in navigator)||!t) return; try{
+        var art=imgUrl(t.coverImg); var meta={ title:t.title||"", artist:t.artist||"", album:(CFG.appName||"Zing") };
+        if(art) meta.artwork=[{src:art,sizes:"512x512",type:"image/jpeg"}];
+        navigator.mediaSession.metadata=new MediaMetadata(meta);
+      }catch(e){} }
+    if("mediaSession" in navigator){ try{
+      navigator.mediaSession.setActionHandler("play", function(){ audio.play(); });
+      navigator.mediaSession.setActionHandler("pause", function(){ audio.pause(); });
+      navigator.mediaSession.setActionHandler("previoustrack", function(){ prevTrack(); });
+      navigator.mediaSession.setActionHandler("nexttrack", function(){ nextTrack(); });
+      navigator.mediaSession.setActionHandler("seekbackward", function(){ skipBy(-(SET.skip||15)); });
+      navigator.mediaSession.setActionHandler("seekforward", function(){ skipBy(SET.skip||15); });
+    }catch(e){} }
     // If a track won't load: retry once, then skip past a single bad track. But
     // if several in a row fail, it's the music-server login — stop churning and
     // show one clear message (pointing the owner to the setup).
@@ -3346,6 +3390,12 @@ const PAGE = `<!DOCTYPE html>
           '<button class="np-c" title="Next" onclick="nextTrack()">'+ic("skip_next")+'</button>'+
           '<button class="np-c" id="shRepeat" title="Repeat" onclick="cycleRepeat()">'+ic("repeat")+'</button>'+
         '</div>'+
+        '<div class="np-controls2">'+
+          '<button class="np-c2" id="shSpeed" title="Playback speed" onclick="cycleSpeed()">'+speedLabel()+'</button>'+
+          '<button class="np-c2" title="Back '+SET.skip+' seconds" onclick="skipBy(-(SET.skip||15))">'+ic("fast_rewind")+SET.skip+'s</button>'+
+          '<button class="np-c2" title="Forward '+SET.skip+' seconds" onclick="skipBy(SET.skip||15)">'+SET.skip+'s'+ic("fast_forward")+'</button>'+
+        '</div>'+
+        '<div class="np-vol">'+ic("volume_up")+'<input type="range" min="0" max="100" value="'+Math.round((SET.vol==null?1:SET.vol)*100)+'" oninput="setVol(this.value)" class="np-seek" aria-label="Volume" /></div>'+
         '<div class="np-actions"><button class="chip" id="shLike" onclick="likeCurrent()">'+ic(isLiked(t.id)?"favorite":"favorite_border")+' Like</button><button class="chip" onclick="choosePlaylist(queue[qi])">'+ic("playlist_add")+' Playlist</button><button class="chip" onclick="openSleep()">'+ic("bedtime")+' Sleep</button><button class="chip" onclick="dlCurrent()">'+ic("download")+' Download</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'+
         '<div class="seg np-seg" style="margin:4px 0 12px"><button id="npTQ" onclick="npTab(\\'queue\\')">Up next</button><button id="npTL" onclick="npTab(\\'lyrics\\')">Lyrics</button><button id="npTS" onclick="npTab(\\'similar\\')">Similar</button></div>'+
         '<div id="npExtra"></div>');
@@ -3428,6 +3478,10 @@ const PAGE = `<!DOCTYPE html>
     function setLang(v){ SET.lang=(v==="he"?"he":"en"); saveSettings(); segMark("segLang",SET.lang); _dirtyView=true; }
     function setTheme(v){ SET.theme=(v==="light"?"light":"dark"); saveSettings(); applyTheme(); segMark("segTheme",SET.theme); }
     function setAutoplay(v){ SET.autoplay=(v==="on"); saveSettings(); segMark("segAuto",v); }
+    function setSpeed(v){ var n=parseFloat(v); if([0.75,1,1.25,1.5,1.75,2].indexOf(n)<0) n=1; SET.speed=n; saveSettings(); try{ audio.playbackRate=n; }catch(e){} segMark("segSpeed",v); var b=$("shSpeed"); if(b) b.innerHTML=speedLabel(); }
+    function setSkip(v){ var n=parseInt(v,10); if([10,15,30].indexOf(n)<0) n=15; SET.skip=n; saveSettings(); segMark("segSkip",v); }
+    function setResume(v){ SET.resume=(v==="on"); saveSettings(); segMark("segResume",v); }
+    function setFade(v){ SET.fade=(v==="on"); saveSettings(); segMark("segFade",v); if(!SET.fade && !_fadeTimer){ audio.volume=(SET.vol==null?1:SET.vol); } }
     function setRadio(v){ SET.radio=(v==="on"); saveSettings(); segMark("segRadio",v); }
     function clearData(key,label){ if(!confirm("Clear "+label+"?")) return; try{ localStorage.removeItem(key); }catch(e){} toast(label+" cleared"); }
     function signOut(){ location.href="/api/logout"; }
@@ -3439,6 +3493,12 @@ const PAGE = `<!DOCTYPE html>
           row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
           row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
           row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Playback</h3><div class="card">'+
+          row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75×"],["1","1×"],["1.25","1.25×"],["1.5","1.5×"],["2","2×"]],String(SET.speed),"setSpeed"))+
+          row("Skip buttons","How far the skip buttons jump", segEl("segSkip",[["10","10s"],["15","15s"],["30","30s"]],String(SET.skip),"setSkip"))+
+          row("Resume long tracks","Continue shiurim & stories where you stopped", segEl("segResume",[["on","On"],["off","Off"]],SET.resume?"on":"off","setResume"))+
+          row("Fade in","Ease each track in gently", segEl("segFade",[["on","On"],["off","Off"]],SET.fade?"on":"off","setFade"))+
         '</div></div>'+
         '<div class="set-sec"><h3>Your library</h3><div class="card">'+
           row("Your playlists","Playlists you\\'ve made", ic("chevron_right"), "openMyPlaylists()")+
