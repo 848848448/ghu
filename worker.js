@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b75-device-2026-10-02";
+const BUILD = "b76-devicelist-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1035,6 +1035,31 @@ async function zingAuthed(env, token, query) {
 
 // Attempt to open a streaming session for a track and report what comes back
 // (or the GraphQL errors, which usually name any required args we're missing).
+// Introspect a GraphQL INPUT type's fields (for building create inputs).
+async function introspectInputType(env, name) {
+  const q = "query($n:String!){ __type(name:$n){ name kind inputFields { name type { kind name ofType { kind name ofType { kind name } } } } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, variables: { n: name } }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const t = (d.data || {}).__type;
+    if (!t) return { found: false };
+    const tn = (x) => { let req = ""; if (x && x.kind === "NON_NULL") req = "!"; while (x && !x.name && x.ofType) x = x.ofType; return (x ? (x.kind + " " + x.name) : "?") + req; };
+    return { found: true, fields: (t.inputFields || []).map((f) => f.name + ": " + tn(f.type)) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
+// Introspect an ENUM type's values.
+async function introspectEnum(env, name) {
+  const q = "query($n:String!){ __type(name:$n){ name enumValues { name } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, variables: { n: name } }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const t = (d.data || {}).__type;
+    if (!t) return { found: false };
+    return (t.enumValues || []).map((e) => e.name);
+  } catch (e) { return [String((e && e.message) || e)]; }
+}
+
 // List root query/mutation field names matching a pattern (to discover how to
 // get userId, deviceId, etc.).
 async function introspectRootNames(env, which, re) {
@@ -1070,9 +1095,9 @@ async function tryStartSession(env, token, trackId) {
     // ways; the phone app should already have registered one.
     out.devices = { tried: [] };
     const devShapes = [
-      "query { userDevices(where:{ user:{ id:{ equals: " + Number(userId) + " } } }) { id enabled platform name } }",
-      "query { userDevices { id enabled platform name } }",
-      "query { userDevices(take: 10) { id platform name } }",
+      "query { userDevices(where:{ user:{ id:{ equals: " + Number(userId) + " } } }) { id udid name model os active isZingPlayer } }",
+      "query { userDevices { id udid name model os active isZingPlayer } }",
+      "query { userDevices(take: 10) { id udid name os active } }",
     ];
     let deviceId = null, deviceList = [];
     for (const dq of devShapes) {
@@ -1084,11 +1109,10 @@ async function tryStartSession(env, token, trackId) {
     }
     out.devices.list = deviceList.slice(0, 5);
     if (deviceList[0] && deviceList[0].id != null) deviceId = deviceList[0].id;
-    // Learn how to create a device if the user has none we can use.
-    if (deviceId == null) {
-      out.userDeviceType = await introspectType(env, "UserDevice");
-      out.createDeviceArgs = await introspectMutation(env, "createOneUserDevice");
-    }
+    // Always learn the create-device schema so we can register a dedicated web
+    // device if needed (the phone's device may not authorize web streaming).
+    out.createDeviceInput = await introspectInputType(env, "UserDeviceCreateInput");
+    out.osEnum = await introspectEnum(env, "OS");
     out.deviceId = deviceId;
 
     // Attempt startStreamingSession with each known device id (first that works).
@@ -2877,8 +2901,8 @@ const PAGE = `<!DOCTYPE html>
               if(dg.sessionTry){ var tr=dg.sessionTry;
                 info+="\\nsession try: userId="+tr.userId+" profileId="+tr.profileId+" deviceId="+tr.deviceId;
                 if(tr.devices){ if(tr.devices.list) info+="\\n  devices: "+JSON.stringify(tr.devices.list).slice(0,300); if(tr.devices.tried&&tr.devices.tried.length) info+="\\n  device-query errs: "+JSON.stringify(tr.devices.tried).slice(0,300); }
-                if(tr.userDeviceType) info+="\\n  UserDevice fields: "+(tr.userDeviceType.fields?tr.userDeviceType.fields.join(", "):JSON.stringify(tr.userDeviceType)).slice(0,300);
-                if(tr.createDeviceArgs) info+="\\n  createOneUserDevice: "+(tr.createDeviceArgs.args?("args["+tr.createDeviceArgs.args.join(", ")+"]"):JSON.stringify(tr.createDeviceArgs)).slice(0,300);
+                if(tr.createDeviceInput) info+="\\n  UserDeviceCreateInput: "+(tr.createDeviceInput.fields?tr.createDeviceInput.fields.join(", "):JSON.stringify(tr.createDeviceInput)).slice(0,400);
+                if(tr.osEnum) info+="\\n  OS enum: "+(Array.isArray(tr.osEnum)?tr.osEnum.join(", "):JSON.stringify(tr.osEnum));
                 if(tr.sessionAttempts) info+="\\n  session attempts: "+JSON.stringify(tr.sessionAttempts).slice(0,400);
                 if(tr.openedWith!==undefined) info+="\\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
                 if(tr.audioAfterSession) info+="\\n  audio after session: "+JSON.stringify(tr.audioAfterSession);

@@ -878,8 +878,8 @@
               if(dg.sessionTry){ var tr=dg.sessionTry;
                 info+="\nsession try: userId="+tr.userId+" profileId="+tr.profileId+" deviceId="+tr.deviceId;
                 if(tr.devices){ if(tr.devices.list) info+="\n  devices: "+JSON.stringify(tr.devices.list).slice(0,300); if(tr.devices.tried&&tr.devices.tried.length) info+="\n  device-query errs: "+JSON.stringify(tr.devices.tried).slice(0,300); }
-                if(tr.userDeviceType) info+="\n  UserDevice fields: "+(tr.userDeviceType.fields?tr.userDeviceType.fields.join(", "):JSON.stringify(tr.userDeviceType)).slice(0,300);
-                if(tr.createDeviceArgs) info+="\n  createOneUserDevice: "+(tr.createDeviceArgs.args?("args["+tr.createDeviceArgs.args.join(", ")+"]"):JSON.stringify(tr.createDeviceArgs)).slice(0,300);
+                if(tr.createDeviceInput) info+="\n  UserDeviceCreateInput: "+(tr.createDeviceInput.fields?tr.createDeviceInput.fields.join(", "):JSON.stringify(tr.createDeviceInput)).slice(0,400);
+                if(tr.osEnum) info+="\n  OS enum: "+(Array.isArray(tr.osEnum)?tr.osEnum.join(", "):JSON.stringify(tr.osEnum));
                 if(tr.sessionAttempts) info+="\n  session attempts: "+JSON.stringify(tr.sessionAttempts).slice(0,400);
                 if(tr.openedWith!==undefined) info+="\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
                 if(tr.audioAfterSession) info+="\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
