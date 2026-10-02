@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b87-admin-sections-2026-10-02";
+const BUILD = "b88-admin-more-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -107,6 +107,12 @@ export default {
       }
       if (path === "/api/admin/user" && request.method === "POST") {
         return await handleAdminUser(request, env);
+      }
+      if (path === "/api/admin/userplays" && request.method === "POST") {
+        return await handleAdminUserPlays(request, env);
+      }
+      if (path === "/api/admin/export" && request.method === "POST") {
+        return await handleAdminExport(request, env);
       }
       if (path === "/api/played" && request.method === "POST") {
         return await handlePlayed(request, env);
@@ -738,6 +744,11 @@ async function handleAdminStats(request, env) {
   if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
   if (!env.DB) return json({ error: "Statistics need a D1 database.", d1: false }, 400);
   await ensureD1(env);
+  // Maintenance: clear all listening history.
+  if ((b.action || "") === "reset") {
+    try { await env.DB.prepare("DELETE FROM plays").run(); } catch (e) { return json({ error: "Could not reset." }, 500); }
+    return json({ ok: true, reset: true });
+  }
   const now = Date.now(), dayAgo = now - 86400000, weekAgo = now - 7 * 86400000, monthAgo = now - 30 * 86400000;
   // Build a uid -> display-name map from the users table.
   const names = {};
@@ -780,6 +791,52 @@ async function handleAdminStats(request, env) {
     for (let i = 0; i < 7; i++) { const d = startDay + i; const ms = d * 86400000; out.daily.push({ label: wd[new Date(ms).getUTCDay()], count: byDay[d] || 0 }); }
   } catch (e) {}
   return json(out);
+}
+
+// Admin: one person's listening — their recent plays, totals, and top tracks.
+async function handleAdminUserPlays(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Needs a D1 database." }, 400);
+  await ensureD1(env);
+  const uid = String(b.id == null ? "" : b.id);
+  if (!uid) return json({ error: "Missing id." }, 400);
+  const out = { total: 0, week: 0, recent: [], top: [] };
+  const weekAgo = Date.now() - 7 * 86400000;
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE uid = ?").bind(uid).first(); out.total = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE uid = ? AND at >= ?").bind(uid, weekAgo).first(); out.week = (t && t.n) || 0; } catch (e) {}
+  try { const r = await env.DB.prepare("SELECT track, title, artist, at FROM plays WHERE uid = ? ORDER BY at DESC LIMIT 50").bind(uid).all(); out.recent = (r.results || []).map((x) => ({ track: x.track, title: x.title, artist: x.artist, at: x.at })); } catch (e) {}
+  try { const r = await env.DB.prepare("SELECT track, title, artist, COUNT(*) AS c FROM plays WHERE uid = ? GROUP BY track ORDER BY c DESC LIMIT 10").bind(uid).all(); out.top = (r.results || []).map((x) => ({ track: x.track, title: x.title, artist: x.artist, count: x.c })); } catch (e) {}
+  return json(out);
+}
+
+// Admin: export plays or accounts as CSV for download.
+async function handleAdminExport(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Needs a D1 database." }, 400);
+  await ensureD1(env);
+  const what = (b.what || "plays").toString();
+  const q = (s) => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+  const iso = (ms) => { try { return new Date(Number(ms)).toISOString(); } catch (e) { return ""; } };
+  let csv = "", filename = "export.csv";
+  if (what === "accounts") {
+    const r = await env.DB.prepare("SELECT id, name, email, phone, status, role, created FROM users ORDER BY created DESC").all();
+    const plays = {};
+    try { const p = await env.DB.prepare("SELECT uid, COUNT(*) AS c FROM plays GROUP BY uid").all(); (p.results || []).forEach((x) => { plays[String(x.uid)] = x.c; }); } catch (e) {}
+    csv = "id,name,email,phone,status,role,joined,plays\n" + (r.results || []).map((u) =>
+      [u.id, q(u.name), q(u.email), q(u.phone), u.status || "", u.role || "", iso(u.created), plays[String(u.id)] || 0].join(",")).join("\n");
+    filename = "accounts.csv";
+  } else {
+    const names = {};
+    try { const us = await env.DB.prepare("SELECT id, name, email FROM users").all(); (us.results || []).forEach((u) => { names[String(u.id)] = u.name || u.email || ("User " + u.id); }); } catch (e) {}
+    const who = (uid) => uid === "admin" ? "Owner" : (uid === "guest" || uid === "" ? "Guest" : (names[uid] || ("User " + uid)));
+    const r = await env.DB.prepare("SELECT uid, track, title, artist, at FROM plays ORDER BY at DESC LIMIT 5000").all();
+    csv = "when,listener,track,title,artist\n" + (r.results || []).map((x) =>
+      [iso(x.at), q(who(String(x.uid))), x.track, q(x.title), q(x.artist)].join(",")).join("\n");
+    filename = "plays.csv";
+  }
+  return new Response(csv, { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="' + filename + '"', "Cache-Control": "no-store" } });
 }
 
 // Admin: set the music-server login from inside the app (stored in D1), so
@@ -3519,7 +3576,7 @@ const PAGE = `<!DOCTYPE html>
       stopPresPoll();
       var back='<div class="back" onclick="adminHub()">'+ic("arrow_back_ios_new")+'Admin center</div>';
       var html="", after=null;
-      if(key==="dashboard"){ html=secWrap("Dashboard",'<div id="statsBox"></div><button class="chip" style="margin-top:12px" onclick="loadStats()">'+ic("history")+' Refresh</button>'); after=loadStats; }
+      if(key==="dashboard"){ html=secWrap("Dashboard",'<div id="statsBox"></div><div class="chips" style="padding:0;margin-top:12px"><button class="chip" onclick="loadStats()">'+ic("history")+' Refresh</button><button class="chip" onclick="exportCsv(\\'plays\\')">'+ic("download")+' Export plays</button><button class="chip" onclick="resetStats()">'+ic("delete")+' Reset history</button></div>'); after=loadStats; }
       else if(key==="online"){ html=secWrap("Who’s online (<span id=\\"presCount\\">"+(((_adm.pres&&_adm.pres.online)||[]).length)+"</span>)",'<div id="presList">'+presenceListHtml(_adm.pres)+'</div>'); after=function(){ _presTimer=setInterval(refreshPres,10000); }; }
       else if(key==="accounts"){ html=accountsSection(); }
       else if(key==="content"){ html=contentSection(); }
@@ -3552,6 +3609,7 @@ const PAGE = `<!DOCTYPE html>
             return '<div class="card acct" data-search="'+sk+'" style="padding:12px;margin-bottom:8px">'+
               '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div><div class="ci-code" style="color:var(--muted);margin-top:2px">'+meta+'</div></div></div>'+
               '<div class="chips" style="padding:0;margin-top:10px">'+
+                '<button class="chip" onclick="openUserDetail('+u.id+')">'+ic("graphic_eq")+' Listening</button>'+
                 (susp?'<button class="chip" onclick="userAction('+u.id+',\\'unsuspend\\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\\'suspend\\')">Suspend</button>')+
                 (isOwner?'':'<button class="chip" onclick="userAction('+u.id+',\\'setrole\\',{value:'+(u.role==="admin"?0:1)+'})">'+(u.role==="admin"?"Remove admin":"Make admin")+'</button>')+
                 '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
@@ -3559,7 +3617,8 @@ const PAGE = `<!DOCTYPE html>
                 '<button class="chip" onclick="userAction('+u.id+',\\'remove\\')">Remove</button>'+
               '</div></div>'; }).join("")+'<div id="acctNone" class="muted" style="display:none;padding:6px 2px">No accounts match.</div></div>'
         : '<p class="muted" style="margin:2px 0 10px">No accounts yet.</p>';
-      out+='<div class="set-sec"><h3>Accounts ('+others.length+')</h3>'+alist+
+      out+='<div class="set-sec"><h3>Accounts ('+others.length+')</h3>'+
+        (others.length?'<div class="chips" style="padding:0;margin-bottom:10px"><button class="chip" onclick="exportCsv(\\'accounts\\')">'+ic("download")+' Export accounts (CSV)</button></div>':'')+alist+
         '<div class="card" style="padding:15px;margin-top:2px">'+
           '<div style="font-weight:600;margin-bottom:8px">Create an account</div>'+
           '<input id="nu_n" class="field" placeholder="Full name" autocomplete="off" />'+
@@ -3689,6 +3748,24 @@ const PAGE = `<!DOCTYPE html>
     function filterAccounts(){ var q=(($("acctSearch")||{}).value||"").trim().toLowerCase(); var list=$("acctList"); if(!list) return; var cards=list.querySelectorAll(".acct"); var shown=0;
       cards.forEach(function(c){ var ok=!q||(c.getAttribute("data-search")||"").indexOf(q)>=0; c.style.display=ok?"":"none"; if(ok)shown++; });
       var none=$("acctNone"); if(none) none.style.display=shown?"none":"block"; }
+    function exportCsv(what){ toast("Preparing…");
+      fetch("/api/admin/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin:_admPw,what:what})}).then(function(r){ if(!r.ok) throw new Error("Export failed ("+r.status+")"); return r.blob(); }).then(function(blob){
+        var url=URL.createObjectURL(blob); var a=document.createElement("a"); a.href=url; a.download=(what==="accounts"?"accounts.csv":"plays.csv"); document.body.appendChild(a); a.click();
+        setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); },1500); toast("Downloaded ✓");
+      }).catch(function(e){ toast(e.message||"Export failed"); }); }
+    function resetStats(){ if(!confirm("Clear ALL listening history? This cannot be undone.")) return;
+      post("/api/admin/stats",{admin:_admPw,action:"reset"}).then(function(){ toast("History cleared."); loadStats(); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function openUserDetail(id){
+      var users=(_adm.users&&_adm.users.users)||[]; var u=null; for(var i=0;i<users.length;i++){ if(users[i].id===id){ u=users[i]; break; } }
+      var back='<div class="back" onclick="adminSection(\\'accounts\\')">'+ic("arrow_back_ios_new")+'Accounts</div>';
+      ovlSet("Admin", back+secWrap(u?esc(u.name||u.email):"Account",'<div id="udBox"><span class="spinner"></span>Loading…</div>'));
+      post("/api/admin/userplays",{admin:_admPw,id:id}).then(function(d){ var box=$("udBox"); if(!box) return;
+        var head=u?('<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">'+userAvatar(u)+'<div style="min-width:0"><div class="ci-name">'+esc(u.name||u.email)+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div>'+(u.lastSeen?'<div class="ci-code" style="color:var(--muted)">Last seen '+timeAgo(u.lastSeen)+'</div>':'')+'</div></div>'):'';
+        var tiles='<div style="display:flex;gap:8px;text-align:center;margin-bottom:6px">'+statTile(d.total,"Total plays")+statTile(d.week,"This week")+'</div>';
+        var top=(d.top||[]).length?('<div style="font-weight:700;margin:14px 0 6px">Their top songs</div>'+(d.top||[]).map(function(t,i){ return rankRow(i,t.title||("Track "+t.track),t.artist||"",t.count); }).join("")):'';
+        var rec=(d.recent||[]).length?('<div style="font-weight:700;margin:14px 0 6px">Recent plays</div>'+(d.recent||[]).map(function(r){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(r.title||"—")+'</div><div class="ci-code">'+esc(r.artist||"")+' · '+timeAgo(r.at)+'</div></div></div>'; }).join("")):'<div class="empty">No plays yet.</div>';
+        box.innerHTML=head+tiles+top+rec;
+      }).catch(function(e){ var box=$("udBox"); if(box) box.innerHTML='<div class="empty">'+esc(e.message||"Could not load.")+'</div>'; }); }
     function loadStats(){ var box=$("statsBox"); if(!box) return; box.innerHTML='<div class="empty" style="padding:16px"><span class="spinner"></span>Loading…</div>';
       post("/api/admin/stats",{admin:_admPw}).then(function(s){ box.innerHTML=statsHtml(s); }).catch(function(e){ if(e&&e.message==="login")return; box.innerHTML='<div class="empty">'+esc((e&&e.message)||"Could not load.")+'</div>'; }); }
     function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
