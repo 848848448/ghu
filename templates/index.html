@@ -396,8 +396,14 @@
       if(ME.user&&ME.user.photo&&/^data:image/.test(ME.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=ME.user.photo; if(a) a.hidden=false; }
       updateCfgBanner(); if(ME.admin) loadPending();
       var np=$("npDl"); if(np) np.style.display=dlAllowed()?"":"none";
-      if(ME.user&&ME.user.nodl){ go(curTab||"home"); } // re-render so per-account download control applies
+      // Re-render the current view only when the download permission actually
+      // changes — never on every poll (that would bounce you off your page) and
+      // never away from where you are (we re-apply the saved route in place).
+      var dl=dlAllowed();
+      if(_dlState!==null && _dlState!==dl){ try{ restoreRoute(); }catch(e){} }
+      _dlState=dl;
     }).catch(function(){}); }
+    var _dlState=null;
     function loadPending(){ fetch("/api/pending").then(function(r){return r.json();}).then(function(d){ var n=(d&&d.pending)||0;
       var g=document.querySelector('.iconbtn[title="Settings"]'); if(!g) return; g.style.position="relative"; var b=$("pendBadge");
       if(n>0){ if(!b){ b=document.createElement("span"); b.id="pendBadge"; b.style.cssText="position:absolute;top:3px;right:3px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--err);color:#fff;font-size:.62rem;font-weight:800;display:grid;place-items:center"; g.appendChild(b); } b.textContent=n; b.hidden=false; }
@@ -1761,7 +1767,10 @@
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
-    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000); loadConfig().then(function(){ restoreRoute(); });
+    hydrateIcons(); checkStatus(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000);
+    // Load who-I-am and the shared config BEFORE rendering, so download controls
+    // and features are right, then restore the page you were on (refresh stays put).
+    Promise.all([loadMe(), loadConfig()]).then(function(){ if(!$("takeover")||$("takeover").hidden){ restoreRoute(); } });
   </script>
 </body>
 </html>

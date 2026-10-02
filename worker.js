@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b91-nogreet-2026-10-02";
+const BUILD = "b92-hardening-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -135,20 +135,17 @@ export default {
       if (path === "/api/albums" && request.method === "POST") {
         return await handleAlbumsPage(request, env);
       }
-      if (path === "/api/check") {
-        return await handleCheck(env);
-      }
-      if (path === "/api/schema") {
-        return await handleSchema(env);
-      }
-      if (path === "/api/schema/full") {
-        return await handleFullSchema(env);
-      }
-      if (path === "/api/probe/new" && request.method === "POST") {
-        return await handleProbeNew(request, env);
-      }
-      if (path === "/api/probe/audio" && request.method === "POST") {
-        return await handleProbeAudio(request, env);
+      // Diagnostic / introspection endpoints — admins only (they reveal the
+      // upstream API's structure and are only used from the admin panel).
+      if (path === "/api/check" || path === "/api/schema" || path === "/api/schema/full" ||
+          path === "/api/probe/new" || path === "/api/probe/audio") {
+        if (!(await isAdminReq(env, request, {}))) return json({ error: "Admins only." }, 403);
+        if (path === "/api/check") return await handleCheck(env);
+        if (path === "/api/schema") return await handleSchema(env);
+        if (path === "/api/schema/full") return await handleFullSchema(env);
+        if (path === "/api/probe/new" && request.method === "POST") return await handleProbeNew(request, env);
+        if (path === "/api/probe/audio" && request.method === "POST") return await handleProbeAudio(request, env);
+        return new Response("Not found", { status: 404 });
       }
       if (path === "/api/query" && request.method === "POST") {
         return await handleRawQuery(request, env);
@@ -177,6 +174,15 @@ async function sha256hex(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+// Constant-time string compare (for tokens, signatures, password hashes), so a
+// comparison can't leak information through timing.
+function ctEq(a, b) {
+  a = String(a == null ? "" : a); b = String(b == null ? "" : b);
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
 
 async function authToken(env) {
   // A non-reversible token derived from the password; safe to store in a cookie.
@@ -196,7 +202,7 @@ function parseCookies(request) {
 async function isAuthed(request, env) {
   if (!env.SITE_PASSWORD) return true;
   const c = parseCookies(request).auth;
-  return !!c && c === (await authToken(env));
+  return !!c && ctEq(c, await authToken(env));
 }
 
 async function handleLogin(request, env) {
@@ -208,7 +214,7 @@ async function handleLogin(request, env) {
   // Email + password login (a user account).
   if (email) {
     const u = await getUserByEmail(env, email);
-    if (!u || u.pass !== (await passHash(env, email, pw))) {
+    if (!u || !ctEq(u.pass, await passHash(env, email, pw))) {
       return json({ error: "Wrong email or password." }, 401);
     }
     if (u.status === "suspended") return json({ error: "This account has been suspended." }, 403);
@@ -224,8 +230,8 @@ async function handleLogin(request, env) {
   }
 
   // Master password or an access code.
-  if (pw && (pw === env.SITE_PASSWORD || (await codeMatches(env, pw)))) {
-    return await loginResponse(env, pw === env.SITE_PASSWORD ? "admin" : "");
+  if (pw && (ctEq(pw, env.SITE_PASSWORD) || (await codeMatches(env, pw)))) {
+    return await loginResponse(env, ctEq(pw, env.SITE_PASSWORD) ? "admin" : "");
   }
   return json({ error: "Wrong password." }, 401);
 }
@@ -310,11 +316,11 @@ async function saveCodes(env, list) {
 async function codeMatches(env, pw) {
   const codes = await getCodes(env);
   if (!codes) return false;
-  return codes.some((c) => c && typeof c.code === "string" && c.code === pw);
+  return codes.some((c) => c && typeof c.code === "string" && ctEq(c.code, pw));
 }
 
 function isAdmin(env, body) {
-  return !!env.SITE_PASSWORD && (body.admin || "").toString() === env.SITE_PASSWORD;
+  return !!env.SITE_PASSWORD && ctEq((body.admin || "").toString(), env.SITE_PASSWORD);
 }
 
 // --------------------------------------------------------------------------- //
@@ -486,8 +492,8 @@ async function uidSig(env, id, session) {
 async function verifyUidFull(env, val) {
   if (!val) return null;
   const p = val.split(".");
-  if (p.length === 2) { if (p[1] === (await uidSig(env, p[0], ""))) return { id: p[0], session: "" }; return null; }
-  if (p.length === 3) { if (p[2] === (await uidSig(env, p[0], p[1]))) return { id: p[0], session: p[1] }; return null; }
+  if (p.length === 2) { if (ctEq(p[1], await uidSig(env, p[0], ""))) return { id: p[0], session: "" }; return null; }
+  if (p.length === 3) { if (ctEq(p[2], await uidSig(env, p[0], p[1]))) return { id: p[0], session: p[1] }; return null; }
   return null;
 }
 async function verifyUid(env, val) { const v = await verifyUidFull(env, val); return v ? v.id : null; }
@@ -512,7 +518,7 @@ async function isUserAdmin(env, u) {
 }
 // True for the master password, the owner-email account, or a role=admin user.
 async function isAdminReq(env, request, body) {
-  if (env.SITE_PASSWORD && ((body && body.admin) || "").toString() === env.SITE_PASSWORD) return true;
+  if (env.SITE_PASSWORD && ctEq(((body && body.admin) || "").toString(), env.SITE_PASSWORD)) return true;
   const id = await verifyUid(env, parseCookies(request).uid);
   if (id === "admin") return true;
   if (id) { const u = await getUserById(env, id); if (await isUserAdmin(env, u)) return true; }
@@ -588,7 +594,7 @@ async function handleMePassword(request, env) {
   const b = await request.json().catch(() => ({}));
   const u = await getUserById(env, id);
   if (!u) return json({ error: "Account not found." }, 404);
-  if (u.pass !== (await passHash(env, u.email, (b.old || "").toString()))) return json({ error: "Current password is wrong." }, 403);
+  if (!ctEq(u.pass, await passHash(env, u.email, (b.old || "").toString()))) return json({ error: "Current password is wrong." }, 403);
   const np = (b.new || "").toString();
   if (np.length < 4) return json({ error: "New password must be at least 4 characters." }, 400);
   await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHash(env, u.email, np), Number(id)).run();
@@ -1583,10 +1589,59 @@ async function handleFullSchema(env) {
 // Authenticated GraphQL passthrough: same as /api/query but attaches the
 // user's login token, so per-account operations (favorites, my playlists,
 // history) work. Retries once with a fresh token on an auth error.
+// --- GraphQL request guard ---------------------------------------------------
+// The /api/query and /api/authquery endpoints proxy GraphQL to Zing. authquery
+// runs with the shared account token, so a logged-in user must not be able to
+// run arbitrary (especially destructive) mutations through it. We parse the
+// operation and, for mutations, require every root field to be allow-listed.
+function gqlStrip(q) {
+  return String(q || "")
+    .replace(/"""[\s\S]*?"""/g, " ")       // block strings
+    .replace(/"(?:\\.|[^"\\])*"/g, " ")      // normal strings
+    .replace(/#[^\n]*/g, " ");               // comments
+}
+function gqlIsMutation(q) { return /^\s*mutation\b/i.test(gqlStrip(q).replace(/^\uFEFF/, "")); }
+function gqlRootFields(q) {
+  const s = gqlStrip(q);
+  // find the selection set: first '{' at paren-depth 0
+  let p = 0, start = -1;
+  for (let i = 0; i < s.length; i++) { const c = s[i]; if (c === "(") p++; else if (c === ")") p--; else if (c === "{" && p === 0) { start = i; break; } }
+  if (start < 0) return [];
+  const roots = []; let b = 0, pp = 0;
+  for (let j = start; j < s.length; j++) {
+    const c = s[j];
+    if (c === "(") { pp++; continue; }
+    if (c === ")") { pp--; continue; }
+    if (c === "{") { b++; continue; }
+    if (c === "}") { b--; if (b === 0) break; continue; }
+    if (b === 1 && pp === 0 && /[A-Za-z_]/.test(c)) {
+      const m = s.slice(j).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*([({:])/);
+      if (m) { if (m[2] !== ":") roots.push(m[1]); j += m[1].length - 1; }
+    }
+  }
+  return roots;
+}
+const AUTHQUERY_ALLOWED_MUTATIONS = {
+  saveMyArtistToProfile: 1, createOneMyArtist: 1,
+  saveMyAlbumToProfile: 1, createOneMyAlbum: 1,
+  deleteMyArtist: 1, deleteMyAlbum: 1,
+  deleteOneMyArtist: 1, deleteOneMyAlbum: 1,
+};
+function guardGraphQL(q, allowedMutations) {
+  if (!gqlIsMutation(q)) return { ok: true };               // reads are allowed
+  if (!allowedMutations) return { ok: false };               // mutations not allowed here at all
+  const roots = gqlRootFields(q);
+  if (!roots.length) return { ok: false };
+  for (const f of roots) { if (!allowedMutations[f]) return { ok: false, field: f }; }
+  return { ok: true };
+}
+
 async function handleAuthQuery(request, env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
   const body = await request.json().catch(() => ({}));
   if (!body.query) return json({ error: "Missing query." }, 400);
+  const guard = guardGraphQL(body.query, AUTHQUERY_ALLOWED_MUTATIONS);
+  if (!guard.ok) return json({ error: "This action isn’t allowed." }, 403);
   const payload = JSON.stringify({ query: body.query, variables: body.variables || {} });
   const call = async (tok) =>
     fetch(env.API_URL, {
@@ -1619,6 +1674,8 @@ async function handleRawQuery(request, env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
   const body = await request.json().catch(() => ({}));
   if (!body.query) return json({ error: "Missing query." }, 400);
+  // Read-only: no mutations through the unauthenticated proxy.
+  if (!guardGraphQL(body.query, null).ok) return json({ error: "Only read queries are allowed here." }, 403);
   try {
     const r = await fetch(env.API_URL, {
       method: "POST",
@@ -2648,8 +2705,14 @@ const PAGE = `<!DOCTYPE html>
       if(ME.user&&ME.user.photo&&/^data:image/.test(ME.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=ME.user.photo; if(a) a.hidden=false; }
       updateCfgBanner(); if(ME.admin) loadPending();
       var np=$("npDl"); if(np) np.style.display=dlAllowed()?"":"none";
-      if(ME.user&&ME.user.nodl){ go(curTab||"home"); } // re-render so per-account download control applies
+      // Re-render the current view only when the download permission actually
+      // changes — never on every poll (that would bounce you off your page) and
+      // never away from where you are (we re-apply the saved route in place).
+      var dl=dlAllowed();
+      if(_dlState!==null && _dlState!==dl){ try{ restoreRoute(); }catch(e){} }
+      _dlState=dl;
     }).catch(function(){}); }
+    var _dlState=null;
     function loadPending(){ fetch("/api/pending").then(function(r){return r.json();}).then(function(d){ var n=(d&&d.pending)||0;
       var g=document.querySelector('.iconbtn[title="Settings"]'); if(!g) return; g.style.position="relative"; var b=$("pendBadge");
       if(n>0){ if(!b){ b=document.createElement("span"); b.id="pendBadge"; b.style.cssText="position:absolute;top:3px;right:3px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--err);color:#fff;font-size:.62rem;font-weight:800;display:grid;place-items:center"; g.appendChild(b); } b.textContent=n; b.hidden=false; }
@@ -4013,7 +4076,10 @@ const PAGE = `<!DOCTYPE html>
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
-    hydrateIcons(); checkStatus(); loadMe(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000); loadConfig().then(function(){ restoreRoute(); });
+    hydrateIcons(); checkStatus(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000);
+    // Load who-I-am and the shared config BEFORE rendering, so download controls
+    // and features are right, then restore the page you were on (refresh stays put).
+    Promise.all([loadMe(), loadConfig()]).then(function(){ if(!$("takeover")||$("takeover").hidden){ restoreRoute(); } });
   </script>
 </body>
 </html>`;
