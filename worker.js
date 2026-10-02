@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b74-session-ids-2026-10-02";
+const BUILD = "b75-device-2026-10-02";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1064,20 +1064,56 @@ async function tryStartSession(env, token, trackId) {
       try { const r = await zingAuthed(env, token, q); const key = q.match(/\{\s*(\w+)/)[1]; const v = (r.data || {})[key]; if (v && v.id != null) { userId = v.id; out.userFrom = key; } } catch (e) {}
     }
     out.userId = userId; out.profileId = profileId;
-    // Attempt startStreamingSession with a deviceId guess.
-    const deviceId = 1;
-    const args = ["trackId: " + Number(trackId), "deviceId: " + deviceId];
-    if (userId != null) args.push("userId: " + Number(userId));
-    if (profileId != null) args.push("profileId: " + Number(profileId));
-    args.push('royaltyMode: "FREE"', 'platform: "WEB"', 'version: "1.0.0"');
-    const q = "mutation { startStreamingSession(" + args.join(", ") + ") { sessionId allowed reason royaltyMode } }";
-    out.query = q;
-    const r = await zingAuthed(env, token, q);
-    out.result = (r.data && r.data.startStreamingSession) || null;
-    out.errors = (r.errors || []).map((e) => e.message).slice(0, 4);
+
+    // Find a real deviceId owned by this user (deviceId=1 gave
+    // "Not authorized for this device"). Try listing the user's devices a few
+    // ways; the phone app should already have registered one.
+    out.devices = { tried: [] };
+    const devShapes = [
+      "query { userDevices(where:{ user:{ id:{ equals: " + Number(userId) + " } } }) { id enabled platform name } }",
+      "query { userDevices { id enabled platform name } }",
+      "query { userDevices(take: 10) { id platform name } }",
+    ];
+    let deviceId = null, deviceList = [];
+    for (const dq of devShapes) {
+      try {
+        const r = await zingAuthed(env, token, dq);
+        if (r.data && Array.isArray(r.data.userDevices)) { deviceList = r.data.userDevices; out.devices.query = dq; break; }
+        out.devices.tried.push({ q: dq.slice(0, 60), err: (r.errors || []).map((e) => e.message)[0] });
+      } catch (e) { out.devices.tried.push({ q: dq.slice(0, 60), err: String(e) }); }
+    }
+    out.devices.list = deviceList.slice(0, 5);
+    if (deviceList[0] && deviceList[0].id != null) deviceId = deviceList[0].id;
+    // Learn how to create a device if the user has none we can use.
+    if (deviceId == null) {
+      out.userDeviceType = await introspectType(env, "UserDevice");
+      out.createDeviceArgs = await introspectMutation(env, "createOneUserDevice");
+    }
+    out.deviceId = deviceId;
+
+    // Attempt startStreamingSession with each known device id (first that works).
+    const runSession = async (did) => {
+      const args = ["trackId: " + Number(trackId), "deviceId: " + Number(did)];
+      if (userId != null) args.push("userId: " + Number(userId));
+      if (profileId != null) args.push("profileId: " + Number(profileId));
+      args.push('royaltyMode: "FREE"', 'platform: "WEB"', 'version: "1.0.0"');
+      const q = "mutation { startStreamingSession(" + args.join(", ") + ") { sessionId allowed reason royaltyMode } }";
+      const r = await zingAuthed(env, token, q);
+      return { query: q, result: (r.data && r.data.startStreamingSession) || null, errors: (r.errors || []).map((e) => e.message).slice(0, 3) };
+    };
+    const ids = deviceList.map((d) => d.id).filter((x) => x != null).slice(0, 3);
+    if (!ids.length) ids.push(1); // fall back to the old guess just to record the error
+    out.sessionAttempts = [];
+    let good = null;
+    for (const did of ids) {
+      const a = await runSession(did);
+      out.sessionAttempts.push({ deviceId: did, result: a.result, errors: a.errors });
+      if (a.result && a.result.allowed) { good = { deviceId: did, result: a.result }; break; }
+    }
     // If a session opened, see whether the audio server now serves the track.
-    if (out.result && out.result.allowed) {
-      const base = env.AUDIO_API_BASE, sid = encodeURIComponent(out.result.sessionId || "");
+    if (good) {
+      out.openedWith = good.deviceId; out.session = good.result;
+      const base = env.AUDIO_API_BASE, sid = encodeURIComponent(good.result.sessionId || "");
       const tk = encodeURIComponent(token);
       const urls = {
         plain: base + "?trackId=" + trackId + "&token=" + tk,
@@ -2839,14 +2875,13 @@ const PAGE = `<!DOCTYPE html>
               if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
               if(dg.sessionResult){ var sr=dg.sessionResult; info+="\\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }
               if(dg.sessionTry){ var tr=dg.sessionTry;
-                info+="\\nsession try: userId="+tr.userId+(tr.userFrom?(" (from "+tr.userFrom+")"):"")+" profileId="+tr.profileId;
-                if(tr.userQueries) info+="\\n  user queries: "+tr.userQueries.join(", ");
-                if(tr.deviceQueries) info+="\\n  device queries: "+tr.deviceQueries.join(", ");
-                if(tr.deviceMutations) info+="\\n  device/session mutations: "+tr.deviceMutations.join(", ");
-                if(tr.profiles) info+="\\n  profiles: "+JSON.stringify(tr.profiles).slice(0,200);
-                if(tr.result) info+="\\n  session result: "+JSON.stringify(tr.result).slice(0,300);
+                info+="\\nsession try: userId="+tr.userId+" profileId="+tr.profileId+" deviceId="+tr.deviceId;
+                if(tr.devices){ if(tr.devices.list) info+="\\n  devices: "+JSON.stringify(tr.devices.list).slice(0,300); if(tr.devices.tried&&tr.devices.tried.length) info+="\\n  device-query errs: "+JSON.stringify(tr.devices.tried).slice(0,300); }
+                if(tr.userDeviceType) info+="\\n  UserDevice fields: "+(tr.userDeviceType.fields?tr.userDeviceType.fields.join(", "):JSON.stringify(tr.userDeviceType)).slice(0,300);
+                if(tr.createDeviceArgs) info+="\\n  createOneUserDevice: "+(tr.createDeviceArgs.args?("args["+tr.createDeviceArgs.args.join(", ")+"]"):JSON.stringify(tr.createDeviceArgs)).slice(0,300);
+                if(tr.sessionAttempts) info+="\\n  session attempts: "+JSON.stringify(tr.sessionAttempts).slice(0,400);
+                if(tr.openedWith!==undefined) info+="\\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
                 if(tr.audioAfterSession) info+="\\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
-                if(tr.errors&&tr.errors.length) info+="\\n  errors: "+tr.errors.join(" | ");
                 if(tr.error) info+="\\n  error: "+tr.error; }
               if(dg.note) info+="\\nnote: "+dg.note; }
           }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
