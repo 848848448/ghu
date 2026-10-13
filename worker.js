@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b92-hardening-2026-10-02";
+const BUILD = "b93-newmusic-2026-10-13";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -1835,31 +1835,29 @@ async function handleArtist(request, env) {
 
 async function handleNew(env) {
   if (!env.API_URL) return json({ error: "Server not configured." }, 400);
-  const fields =
+  const base =
     "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
-  // Ask the API for the newest albums directly. Prefer createdAt (most
-  // recently ADDED to the catalog — what "new music coming in" means), then
-  // the release date, then id, then an unordered page sorted here — so this
-  // keeps working even if the API rejects an orderBy field.
-  // "New music" means most recently ADDED to the catalog. On this API that is
-  // createdAt desc; the album id increases with each addition, so id desc gives
-  // the same order and is a reliable fallback. We deliberately do NOT sort by
-  // releasedAt — that surfaces future-dated releases and daily podcasts, not
-  // the newest singles/albums.
+  const fieldsC = base + " createdAt";
+  // "New music" = most recently ADDED to the catalog, i.e. createdAt desc. We
+  // fetch createdAt and order by it (the true signal), rather than assuming the
+  // album id increases with every addition — if ids aren't monotonic, an
+  // id-sort buries genuinely new releases behind stale high-id albums. We avoid
+  // releasedAt (it surfaces future-dated items and daily podcasts). Each attempt
+  // falls back to the next if the API rejects a field/orderBy.
   const attempts = [
-    "query { albums(take: 20, orderBy: [{ createdAt: desc }]) { " + fields + " } }",
-    "query { albums(take: 20, orderBy: [{ id: desc }]) { " + fields + " } }",
-    "query { albums(take: 50) { " + fields + " } }",
+    { q: "query { albums(take: 40, orderBy: [{ createdAt: desc }]) { " + fieldsC + " } }", by: "createdAt" },
+    { q: "query { albums(take: 40, orderBy: [{ id: desc }]) { " + base + " } }", by: "id" },
+    { q: "query { albums(take: 50) { " + base + " } }", by: "id" },
   ];
   let albums = [];
   for (let i = 0; i < attempts.length; i++) {
-    const data = await graphql(env, attempts[i]);
+    const data = await graphql(env, attempts[i].q);
     if (data && !data.errors && ((data.data || {}).albums || []).length) {
       albums = data.data.albums;
       break;
     }
   }
-  // Guarantee newest-added-first regardless of what the server returned.
+  // Newest-added first: by createdAt when we have it, else by id.
   albums = sortNewest(albums);
   return json({ albums: albums.slice(0, 12) });
 }
@@ -1935,11 +1933,17 @@ async function handleProbeAudio(request, env) {
   });
 }
 
-// Newest-added first: by id descending. On this catalog the album id increases
-// with every addition, so the highest ids are the most recently added music.
-// (We avoid releasedAt here — it surfaces future-dated items and podcasts.)
+// Newest-added first. Prefer createdAt (the real "added to catalog" time) when
+// the items carry it; otherwise fall back to id descending. We avoid releasedAt
+// here — it surfaces future-dated items and daily podcasts.
 function sortNewest(list) {
-  return (list || []).slice().sort((a, b) => Number((b && b.id) || 0) - Number((a && a.id) || 0));
+  const arr = (list || []).slice();
+  const hasCreated = arr.some((a) => a && a.createdAt);
+  const cv = (a) => { const t = Date.parse((a && a.createdAt) || ""); return isNaN(t) ? -1 : t; };
+  if (hasCreated) {
+    return arr.sort((a, b) => { const d = cv(b) - cv(a); return d !== 0 ? d : (Number((b && b.id) || 0) - Number((a && a.id) || 0)); });
+  }
+  return arr.sort((a, b) => Number((b && b.id) || 0) - Number((a && a.id) || 0));
 }
 
 // A page of ALL albums, newest first (old + new together), for the Albums
@@ -1949,12 +1953,13 @@ async function handleAlbumsPage(request, env) {
   const body = await request.json().catch(() => ({}));
   const take = Math.min(Math.max(parseInt(body.take, 10) || 30, 1), 60);
   const skip = Math.max(parseInt(body.skip, 10) || 0, 0);
-  const fields =
+  const base =
     "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
+  const fieldsC = base + " createdAt";
   const attempts = [
-    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ createdAt: desc }]) { " + fields + " } }",
-    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ id: desc }]) { " + fields + " } }",
-    "query { albums(take: " + take + ", skip: " + skip + ") { " + fields + " } }",
+    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ createdAt: desc }]) { " + fieldsC + " } }",
+    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ id: desc }]) { " + base + " } }",
+    "query { albums(take: " + take + ", skip: " + skip + ") { " + base + " } }",
   ];
   for (let i = 0; i < attempts.length; i++) {
     const data = await graphql(env, attempts[i]);
