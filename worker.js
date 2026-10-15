@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b95-hardening-2026-10-15";
+const BUILD = "b96-player-polish-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3099,7 +3099,7 @@ const PAGE = `<!DOCTYPE html>
     function nameFilter(){ return "OR:[{enName:{contains:$t,mode:insensitive}},{heName:{contains:$t,mode:insensitive}}]"; }
     function doSearch(v){
       var q=(v||"").trim(); var box=$("sres"); if(!box) return;
-      if(!q){ box.innerHTML='<div class="empty">Type to search songs, albums and artists.</div>'; return; }
+      if(!q){ var rs=getRecentQ(); box.innerHTML='<div class="empty">Type to search songs, albums and artists.</div>'+(rs.length?'<div style="padding:0 18px"><div class="muted" style="font-size:.78rem;margin:6px 0">Recent searches <a href="#" onclick="clearRecentQ();return false" style="margin-left:8px">Clear</a></div>'+rs.map(function(x,i){ return '<span class="chip" style="display:inline-block;margin:0 8px 8px 0;padding:7px 13px;border-radius:999px;background:var(--surface-2);cursor:pointer" onclick="pickRecentQ('+i+')">'+esc(x)+'</span>'; }).join("")+'</div>':''); return; }
       box.innerHTML='<div class="empty"><span class="spinner"></span>Searching…</div>';
       var seq=++_searchSeq;
       var query="query($t:String!){"+
@@ -3112,6 +3112,7 @@ const PAGE = `<!DOCTYPE html>
         var arts=d.artists||[], albs=d.albums||[], trks=d.tracks||[];
         window._albums=window._albums||{}; albs.forEach(function(al){ window._albums[al.id]=al; });
         _searchTracks=trks;
+        if(arts.length||albs.length||trks.length) saveRecentQ(q);
         if(!arts.length&&!albs.length&&!trks.length){ box.innerHTML='<div class="empty">Nothing found for “'+esc(q)+'”.</div>'; return; }
         var html="";
         if(trks.length){
@@ -3550,8 +3551,15 @@ const PAGE = `<!DOCTYPE html>
       if(items.length<=1){ e.innerHTML='<div class="empty">Nothing else in the queue.</div>'; return; }
       e.innerHTML='<div class="tracks">'+items.map(function(qidx){ var t=queue[qidx]; var now=(qidx===qi);
         return '<div class="track'+(now?" playing":"")+'" onclick="jumpQueue('+qidx+')"><div class="np-mini" style="background:'+(imgUrl(t.coverImg)?("center/cover url('"+esc(imgUrl(t.coverImg))+"')"):grad(t.cover||t.title))+'"></div>'+
-          '<div class="tk">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div>'+(now?'<div class="np-eq">'+ic("graphic_eq")+'</div>':'')+'</div>'; }).join("")+'</div>';
+          '<div class="tk">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div>'+(now?'<div class="np-eq">'+ic("graphic_eq")+'</div>':'<button class="iconbtn" title="Remove from queue" onclick="event.stopPropagation();removeFromQ('+qidx+')">'+ic("close")+'</button>')+'</div>'; }).join("")+
+        '<div style="padding:10px 0;text-align:center"><button class="btn" onclick="clearUpcoming()">Clear upcoming</button></div></div>';
     }
+    function removeFromQ(idx){ if(idx===qi||idx<0||idx>=queue.length) return; queue.splice(idx,1); if(idx<qi) qi--;
+      _order=_order.filter(function(x){ return x!==idx; }).map(function(x){ return x>idx?x-1:x; }); npQueue(); }
+    function clearUpcoming(){ var pos=_order.indexOf(qi); var keep=_order.slice(0,pos+1); var cur=queue[qi];
+      var keepSet={}; keep.forEach(function(x){ keepSet[x]=1; }); var map={}; var nq=[];
+      queue.forEach(function(t,i){ if(keepSet[i]){ map[i]=nq.length; nq.push(t); } });
+      queue=nq; _order=keep.map(function(x){ return map[x]; }); qi=map[qi]; npQueue(); toast("Cleared upcoming songs."); }
     function jumpQueue(qidx){ playIndex(qidx); }
     function npBox(h){ var e=$("npExtra"); if(e) e.innerHTML=h; }
     function npLyrics(){ var t=queue[qi]; if(!t) return; npBox('<div class="empty"><span class="spinner"></span>Loading lyrics…</div>');
@@ -4143,6 +4151,37 @@ const PAGE = `<!DOCTYPE html>
     window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw; window.loadStats=loadStats;
     window.saveMusic=saveMusic; window.testMusic=testMusic; window.clearMusic=clearMusic; window.loadMusicStatus=loadMusicStatus;
     window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
+
+
+    // ---------- Recent searches, keyboard shortcuts, lock-screen seek ----------
+    function getRecentQ(){ try{ var a=JSON.parse(localStorage.getItem("zing_recentq")||"[]"); return Array.isArray(a)?a.slice(0,8):[]; }catch(e){ return []; } }
+    function saveRecentQ(q){ try{ var a=getRecentQ().filter(function(x){ return x.toLowerCase()!==q.toLowerCase(); }); a.unshift(q); localStorage.setItem("zing_recentq",JSON.stringify(a.slice(0,8))); }catch(e){} }
+    function clearRecentQ(){ try{ localStorage.removeItem("zing_recentq"); }catch(e){} doSearch(""); }
+    function pickRecentQ(i){ var v=getRecentQ()[i]; if(!v) return; var q=$("q"); if(q) q.value=v; doSearch(v); }
+    window.removeFromQ=removeFromQ; window.clearUpcoming=clearUpcoming; window.clearRecentQ=clearRecentQ; window.pickRecentQ=pickRecentQ;
+    document.addEventListener("keydown", function(e){
+      var tg=e.target&&e.target.tagName; if(tg==="INPUT"||tg==="TEXTAREA"||tg==="SELECT"||(e.target&&e.target.isContentEditable)) return;
+      if(e.ctrlKey||e.metaKey||e.altKey) return;
+      var k=e.key;
+      if(k===" "||k==="k"){ if(queue.length){ e.preventDefault(); togglePlay(); } }
+      else if(k==="ArrowRight"){ if(queue.length){ e.preventDefault(); if(e.shiftKey) nextTrack(); else skipBy(SET.skip||15); } }
+      else if(k==="ArrowLeft"){ if(queue.length){ e.preventDefault(); if(e.shiftKey) prevTrack(); else skipBy(-(SET.skip||15)); } }
+      else if(k==="ArrowUp"){ if(queue.length){ e.preventDefault(); setVol(Math.min(100,(audio.volume*100)+5)); } }
+      else if(k==="ArrowDown"){ if(queue.length){ e.preventDefault(); setVol(Math.max(0,(audio.volume*100)-5)); } }
+      else if(k==="s"){ toggleShuffle(); }
+      else if(k==="r"){ cycleRepeat(); }
+      else if(k==="l"){ if(queue.length) likeCurrent(); }
+      else if(k==="m"){ audio.muted=!audio.muted; toast(audio.muted?"Muted":"Unmuted"); }
+      else if(k==="/"){ e.preventDefault(); go("search"); }
+    });
+    if("mediaSession" in navigator){ try{
+      navigator.mediaSession.setActionHandler("seekto", function(d){ if(d&&d.seekTime!=null&&audio.duration){ audio.currentTime=Math.max(0,Math.min(audio.duration,d.seekTime)); } });
+      navigator.mediaSession.setActionHandler("stop", function(){ audio.pause(); });
+    }catch(e){} }
+    var _lastPS=0;
+    audio.addEventListener("timeupdate", function(){ var n=Date.now(); if(n-_lastPS<1500) return; _lastPS=n;
+      try{ if("mediaSession" in navigator&&navigator.mediaSession.setPositionState&&audio.duration&&isFinite(audio.duration)){
+        navigator.mediaSession.setPositionState({duration:audio.duration,playbackRate:audio.playbackRate||1,position:Math.min(audio.currentTime,audio.duration)}); } }catch(e){} });
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
     hydrateIcons(); checkStatus(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000);
