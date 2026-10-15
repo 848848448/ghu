@@ -2231,7 +2231,7 @@ function json(obj, status = 200) {
   });
 }
 
-function maybeZip(request, body, headers) { const ae = request.headers.get("Accept-Encoding") || ""; if (ae.indexOf("gzip") < 0) return new Response(body, { headers: headers }); headers["Content-Encoding"] = "gzip"; headers["Vary"] = "Accept-Encoding"; return new Response(new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")), { headers: headers }); } function html(body, request) { return maybeZip(request, body, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store, must-revalidate" }); }
+function maybeZip(request, body, headers) { headers["Vary"] = "Accept-Encoding"; return new Response(body, { headers: headers }); } function html(body, request) { return maybeZip(request, body, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store, must-revalidate" }); }
 
 // --------------------------------------------------------------------------- //
 // Login page — shown when the site is password-protected and you're not in yet.
