@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b104-mobile-settings-layout-2026-10-15";
+const BUILD = "b105-home-card-to-settings-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3031,7 +3031,7 @@ const PAGE = `<!DOCTYPE html>
         // Keep featured in the admin-chosen order.
         if(featured.length){ var fm={}; featured.forEach(function(a){fm[a.id]=a;}); featured=CFG.featured.map(function(id){return fm[id];}).filter(Boolean); }
         window._albums=window._albums||{};
-        var html=libraryHub()+personalMixesHtml();
+        var html=personalMixesHtml();
         if(banners.length && feat("banners")){
           var bcards=banners.map(bannerCard).filter(Boolean).join("");
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
@@ -4285,7 +4285,7 @@ const PAGE = `<!DOCTYPE html>
     function sharePage(){var url=location.origin+location.pathname+location.hash;if(navigator.share){navigator.share({title:document.title,url:url}).catch(function(){});}else if(navigator.clipboard){navigator.clipboard.writeText(url).then(function(){toast("Link copied");}).catch(function(){prompt("Copy this link:",url);});}else prompt("Copy this link:",url);}
     function exportLibrary(){var keys=["zing_liked","zing_playlists","zing_hist","zing_saved_albums","zing_followed_artists","zing_settings",UXKEY],data={app:"Zing",version:1,exportedAt:new Date().toISOString(),data:{}};keys.forEach(function(k){try{var s=localStorage.getItem(k);if(s)data.data[k]=JSON.parse(s);}catch(e){}});var blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="zing-library-backup.json";a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},3000);toast("Library backup downloaded. Keep it private.");}
     var baseSettingsHtml=settingsHtml;
-    settingsHtml=function(){return '<div class="workspace-banner"><div class="kicker">MAKE IT YOURS</div><h2>Settings & listening tools</h2><p class="muted">Personal preferences are saved on this browser.</p><div class="chips"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openPersonalMixes()">Personal mixes</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="keyboardHelp()">Keyboard shortcuts</button><button class="chip" onclick="sharePage()">Share page</button></div></div><div class="set-sec"><h3>Appearance</h3><div class="card">'+
+    settingsHtml=function(){return '<div class="workspace-banner"><div class="kicker">MAKE IT YOURS</div><h2>Settings & listening tools</h2><p class="muted">Personal preferences are saved on this browser.</p><div class="chips"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openPersonalMixes()">Personal mixes</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="keyboardHelp()">Keyboard shortcuts</button><button class="chip" onclick="sharePage()">Share page</button></div></div><div class="set-sec"><h3>Your space</h3><div class="chips" style="margin:0 18px 12px"><button class="chip" onclick="browseLibrary()">Library</button><button class="chip" onclick="openMyPlaylists()">Playlists</button><button class="chip" onclick="openHistory()">History</button></div></div><div class="set-sec"><h3>Appearance</h3><div class="card">'+
       row("Accent","Your personal color; does not change the site for others",segEl("uxAccent",[["site","Site"],["purple","Purple"],["green","Green"],["blue","Blue"],["rose","Rose"]],UX.accent,"setAccent"))+
       row("Density","Roomy or compact song lists",segEl("uxDensity",[["comfortable","Roomy"],["compact","Compact"]],UX.density,"setDensity"))+
       row("Motion","Use your device preference or turn animations off",segEl("uxMotion",[["system","System"],["reduced","Reduced"]],UX.motion,"setMotion"))+'</div></div>'+baseSettingsHtml()+'<div class="set-sec"><h3>Audio & downloads</h3><div class="card">'+
