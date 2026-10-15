@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b93-newmusic-2026-10-13";
+const BUILD = "b94-premprobe-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -908,6 +908,46 @@ async function handleAdminMusic(request, env) {
     } catch (e) {
       return json({ ok: false, error: String((e && e.message) || e), detail });
     }
+  }
+  if (action === "premprobe") {
+    // Temporary diagnostic: try every token source against one premium track
+    // and one free track, and report which source (if any) the audio server
+    // accepts for each. Returns statuses + public JWT claims only, no secrets.
+    const tid = Number(b.trackId) || 0;
+    const fid = Number(b.freeId) || 0;
+    if (!tid) return json({ error: "Missing trackId." }, 400);
+    const base = env.AUDIO_API_BASE;
+    const savedTok = CACHED_TOKEN, savedExp = CACHED_EXP;
+    const out = { build: BUILD, premiumTrack: tid, freeTrack: fid, sources: {} };
+    const probe = async (label, token, extra) => {
+      const e = { hasToken: !!token };
+      if (extra) e.note = extra;
+      if (token) e.claims = decodeJwtClaims(token);
+      if (!token) { out.sources[label] = e; return; }
+      const enc = encodeURIComponent;
+      const test = async (id) => {
+        if (!id) return null;
+        try { const r = await fetchT(base + "?trackId=" + enc(id) + "&token=" + enc(token), { headers: { Range: "bytes=0-0" } }, 12000); return r.status; }
+        catch (err) { return "err"; }
+      };
+      e.premium = await test(tid);
+      e.free = await test(fid);
+      out.sources[label] = e;
+    };
+    try {
+      const c = await getMusicCreds(env);
+      await probe("d1Cached", c.idToken || null, "tokenVer=" + (c.tokenVer || 0));
+      if (canFirebase(env)) { try { const r = await firebaseRefresh(env); await probe("firebaseRefresh", r.ok ? r.token : null, r.ok ? "" : r.error); } catch (e) { await probe("firebaseRefresh", null, String(e)); } }
+      const cr = await musicCreds(env);
+      if (cr.email && cr.password) {
+        try { const r = await firebaseSignIn(env, cr.email, cr.password); await probe("firebaseSignIn", r.ok ? r.token : null, r.ok ? "" : r.error); } catch (e) { await probe("firebaseSignIn", null, String(e)); }
+        try { const r = await zingLogin(env); await probe("zingLogin", r.ok ? r.token : null, r.ok ? "" : r.error); } catch (e) { await probe("zingLogin", null, String(e)); }
+      }
+      await probe("manualToken", (cr.token || ""), "from D1/USER_TOKEN");
+    } finally {
+      CACHED_TOKEN = savedTok; CACHED_EXP = savedExp;
+    }
+    return json(out);
   }
   if (action === "recon") {
     // Read the real jewishmusic.fm player JS. Needs no login or audio server,
@@ -4088,3 +4128,4 @@ const PAGE = `<!DOCTYPE html>
   </script>
 </body>
 </html>`;
+
