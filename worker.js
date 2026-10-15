@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b97-shuffle-title-2026-10-15";
+const BUILD = "b98-installable-offline-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -37,6 +37,24 @@ export default {
 
       if (path === "/" || path === "/index.html") {
         return html(authed ? PAGE : LOGIN);
+      }
+      if (path === "/manifest.webmanifest") {
+        return new Response(JSON.stringify({
+          name: "Zing Music", short_name: "Zing", start_url: "/", scope: "/", display: "standalone",
+          background_color: "#0a0a12", theme_color: "#0a0a12",
+          icons: [{ src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }],
+        }), { headers: { "Content-Type": "application/manifest+json", "Cache-Control": "public, max-age=3600" } });
+      }
+      if (path === "/icon.svg") {
+        return new Response('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#ff4d8d"/></linearGradient></defs><rect width="512" height="512" rx="112" fill="url(#g)"/><path fill="#fff" d="M300 120v200a60 60 0 1 1-30-52V170l-90 22v168a60 60 0 1 1-30-52V150z"/></svg>',
+          { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" } });
+      }
+      if (path === "/sw.js") {
+        const sw = "var OFF='<!DOCTYPE html><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Offline</title><body style=\"font-family:system-ui;background:#0a0a12;color:#f4f4fb;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center\"><div><h2>You are offline</h2><p style=\"color:#9aa0c0\">Zing needs a connection to stream. Reconnect and reload.</p></div>';\n" +
+          "self.addEventListener('install',function(){self.skipWaiting();});\n" +
+          "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});\n" +
+          "self.addEventListener('fetch',function(e){if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(function(){return new Response(OFF,{headers:{'Content-Type':'text/html; charset=utf-8'}});}));}});\n";
+        return new Response(sw, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-cache", "Service-Worker-Allowed": "/" } });
       }
       if (path === "/api/status") {
         const auth = await hasAuthNow(env);
@@ -2381,6 +2399,10 @@ const PAGE = `<!DOCTYPE html>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Zing — Jewish Music</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <meta name="theme-color" content="#0a0a12" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -4190,6 +4212,7 @@ const PAGE = `<!DOCTYPE html>
       if(!n) return; _shuffle=true; try{ localStorage.setItem("zing_shuffle","1"); }catch(e){}
       var i=Math.floor(Math.random()*n); if(kind==="album") playAlbum(id,i); else playList(i); syncSheet(); }
     function shuffleAlbum(id){ shufflePlay('album',id); } function shuffleList(){ shufflePlay('list'); }
+    try{ if("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function(){}); }catch(e){}
     window.shuffleAlbum=shuffleAlbum; window.shuffleList=shuffleList;
     var _baseTitle=document.title;
     audio.addEventListener("playing", function(){ var t=queue[qi]; if(t) document.title="\u25B6 "+(t.title||"")+(t.artist?" \u2014 "+t.artist:""); });
