@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b94-premprobe-2026-10-15";
+const BUILD = "b95-hardening-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -64,6 +64,22 @@ export default {
       // Everything below requires a login when the site is locked.
       if (!authed) {
         return json({ error: "Please log in.", needLogin: true }, 401);
+      }
+
+      // Single-device session: a non-admin whose stored session no longer
+      // matches this device's cookie was signed in elsewhere. Streaming and
+      // the claim-device flow stay reachable so the player can recover.
+      if (locked && env.DB && path.startsWith("/api/") &&
+          path !== "/api/me" && path !== "/api/me/password" && path !== "/api/me/photo" &&
+          path !== "/api/claim-device" && path !== "/api/play" && path !== "/api/download" &&
+          path !== "/api/status" && path !== "/api/config") {
+        const sv = await verifyUidFull(env, parseCookies(request).uid);
+        if (sv && sv.id && sv.id !== "admin" && sv.session) {
+          const su = await getUserById(env, sv.id);
+          if (su && !(await isUserAdmin(env, su)) && su.session && su.session !== sv.session) {
+            return json({ error: "Signed in on another device.", otherDevice: true }, 401);
+          }
+        }
       }
 
       if (path === "/api/admin/list" && request.method === "POST") {
@@ -214,8 +230,12 @@ async function handleLogin(request, env) {
   // Email + password login (a user account).
   if (email) {
     const u = await getUserByEmail(env, email);
-    if (!u || !ctEq(u.pass, await passHash(env, email, pw))) {
+    if (!u || !(await passVerify(env, email, pw, u.pass))) {
       return json({ error: "Wrong email or password." }, 401);
+    }
+    // Transparent upgrade: re-hash legacy SHA-256 passwords as PBKDF2 on login.
+    if (!String(u.pass || "").startsWith("pbkdf2$")) {
+      try { await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHashNew(env, pw), u.id).run(); } catch (e) { /* ignore */ }
     }
     if (u.status === "suspended") return json({ error: "This account has been suspended." }, 403);
     if (u.status !== "approved") {
@@ -477,7 +497,32 @@ async function handleAdminRemove(request, env) {
 // Password hash, peppered with the master secret so stolen hashes can't be
 // cracked without SITE_PASSWORD.
 async function passHash(env, email, password) {
+  // Legacy SHA-256 hash, kept only to verify accounts created before the
+  // PBKDF2 upgrade. New passwords always use passHashNew.
   return await sha256hex("u2:" + email + ":" + password + ":" + (env.SITE_PASSWORD || ""));
+}
+async function passHashNew(env, password) {
+  const salt = new Uint8Array(16);
+  crypto.getRandomValues(salt);
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 100000 }, key, 256);
+  const hex = (a) => [...new Uint8Array(a)].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return "pbkdf2$100000$" + hex(salt) + "$" + hex(bits);
+}
+async function passVerify(env, email, password, stored) {
+  stored = String(stored || "");
+  if (stored.startsWith("pbkdf2$")) {
+    const p = stored.split("$");
+    if (p.length !== 4) return false;
+    const iter = parseInt(p[1], 10) || 100000;
+    const m = p[2].match(/.{2}/g) || [];
+    const salt = new Uint8Array(m.map((h) => parseInt(h, 16)));
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: iter }, key, 256);
+    const hex = [...new Uint8Array(bits)].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return ctEq(hex, p[3]);
+  }
+  return ctEq(stored, await passHash(env, email, password));
 }
 function randToken() {
   const a = new Uint8Array(16);
@@ -548,13 +593,13 @@ async function handleSignup(request, env) {
   if (name.length < 2) return json({ error: "Enter your full name." }, 400);
   if (!validEmail(email)) return json({ error: "Enter a valid email address." }, 400);
   if (phone.replace(/\D/g, "").length < 6) return json({ error: "Enter a valid phone number." }, 400);
-  if (password.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
+  if (password.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
   if (!/^data:image\/(png|jpe?g|webp);base64,/.test(photo)) return json({ error: "A selfie photo is required." }, 400);
   if (photo.length > 400000) return json({ error: "Photo is too large — please try again." }, 400);
   if (await getUserByEmail(env, email)) return json({ error: "An account with this email already exists." }, 400);
   try {
     await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, email, phone, await passHash(env, email, password), photo, "pending", Date.now()).run();
+      .bind(name, email, phone, await passHashNew(env, password), photo, "pending", Date.now()).run();
   } catch (e) { return json({ error: "Could not send the request." }, 500); }
   return json({ ok: true });
 }
@@ -594,10 +639,10 @@ async function handleMePassword(request, env) {
   const b = await request.json().catch(() => ({}));
   const u = await getUserById(env, id);
   if (!u) return json({ error: "Account not found." }, 404);
-  if (!ctEq(u.pass, await passHash(env, u.email, (b.old || "").toString()))) return json({ error: "Current password is wrong." }, 403);
+  if (!(await passVerify(env, u.email, (b.old || "").toString(), u.pass))) return json({ error: "Current password is wrong." }, 403);
   const np = (b.new || "").toString();
-  if (np.length < 4) return json({ error: "New password must be at least 4 characters." }, 400);
-  await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHash(env, u.email, np), Number(id)).run();
+  if (np.length < 8) return json({ error: "New password must be at least 8 characters." }, 400);
+  await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHashNew(env, np), Number(id)).run();
   return json({ ok: true });
 }
 
@@ -666,10 +711,10 @@ async function handleAdminUser(request, env) {
   if (action === "setrole") { await env.DB.prepare("UPDATE users SET role=? WHERE id=?").bind(b.value ? "admin" : "", id).run(); return json({ ok: true }); }
   if (action === "resetpw") {
     const np = (b.password || "").toString();
-    if (np.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
+    if (np.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
     const u = await getUserById(env, id);
     if (!u) return json({ error: "Account not found." }, 404);
-    await env.DB.prepare("UPDATE users SET pass=? WHERE id=?").bind(await passHash(env, u.email, np), id).run();
+    await env.DB.prepare("UPDATE users SET pass=? WHERE id=?").bind(await passHashNew(env, np), id).run();
     return json({ ok: true });
   }
   if (action === "create") {
@@ -678,10 +723,10 @@ async function handleAdminUser(request, env) {
     const phone = (b.phone || "").toString().trim();
     const password = (b.password || "").toString();
     if (!validEmail(email)) return json({ error: "Enter a valid email." }, 400);
-    if (password.length < 4) return json({ error: "Password must be at least 4 characters." }, 400);
+    if (password.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
     if (await getUserByEmail(env, email)) return json({ error: "That email already exists." }, 400);
     await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, email, phone, await passHash(env, email, password), "", "approved", Date.now()).run();
+      .bind(name, email, phone, await passHashNew(env, password), "", "approved", Date.now()).run();
     return json({ ok: true });
   }
   return json({ error: "Unknown action." }, 400);
@@ -908,46 +953,6 @@ async function handleAdminMusic(request, env) {
     } catch (e) {
       return json({ ok: false, error: String((e && e.message) || e), detail });
     }
-  }
-  if (action === "premprobe") {
-    // Temporary diagnostic: try every token source against one premium track
-    // and one free track, and report which source (if any) the audio server
-    // accepts for each. Returns statuses + public JWT claims only, no secrets.
-    const tid = Number(b.trackId) || 0;
-    const fid = Number(b.freeId) || 0;
-    if (!tid) return json({ error: "Missing trackId." }, 400);
-    const base = env.AUDIO_API_BASE;
-    const savedTok = CACHED_TOKEN, savedExp = CACHED_EXP;
-    const out = { build: BUILD, premiumTrack: tid, freeTrack: fid, sources: {} };
-    const probe = async (label, token, extra) => {
-      const e = { hasToken: !!token };
-      if (extra) e.note = extra;
-      if (token) e.claims = decodeJwtClaims(token);
-      if (!token) { out.sources[label] = e; return; }
-      const enc = encodeURIComponent;
-      const test = async (id) => {
-        if (!id) return null;
-        try { const r = await fetchT(base + "?trackId=" + enc(id) + "&token=" + enc(token), { headers: { Range: "bytes=0-0" } }, 12000); return r.status; }
-        catch (err) { return "err"; }
-      };
-      e.premium = await test(tid);
-      e.free = await test(fid);
-      out.sources[label] = e;
-    };
-    try {
-      const c = await getMusicCreds(env);
-      await probe("d1Cached", c.idToken || null, "tokenVer=" + (c.tokenVer || 0));
-      if (canFirebase(env)) { try { const r = await firebaseRefresh(env); await probe("firebaseRefresh", r.ok ? r.token : null, r.ok ? "" : r.error); } catch (e) { await probe("firebaseRefresh", null, String(e)); } }
-      const cr = await musicCreds(env);
-      if (cr.email && cr.password) {
-        try { const r = await firebaseSignIn(env, cr.email, cr.password); await probe("firebaseSignIn", r.ok ? r.token : null, r.ok ? "" : r.error); } catch (e) { await probe("firebaseSignIn", null, String(e)); }
-        try { const r = await zingLogin(env); await probe("zingLogin", r.ok ? r.token : null, r.ok ? "" : r.error); } catch (e) { await probe("zingLogin", null, String(e)); }
-      }
-      await probe("manualToken", (cr.token || ""), "from D1/USER_TOKEN");
-    } finally {
-      CACHED_TOKEN = savedTok; CACHED_EXP = savedExp;
-    }
-    return json(out);
   }
   if (action === "recon") {
     // Read the real jewishmusic.fm player JS. Needs no login or audio server,
@@ -2098,6 +2103,19 @@ async function handleCheck(env) {
   return json(out);
 }
 
+const PREMIUM_CACHE = new Map(); // trackId -> { premium, at } (per-isolate, 1h)
+async function isPremiumTrack(env, trackId) {
+  const c = PREMIUM_CACHE.get(trackId);
+  if (c && Date.now() - c.at < 3600000) return c.premium;
+  let premium = false;
+  try {
+    const d = await graphql(env, "query { track(where: { id: " + Number(trackId) + " }) { album { premium } } }");
+    premium = !!(d && d.data && d.data.track && d.data.track.album && d.data.track.album.premium);
+  } catch (e) { /* treat unknown as not premium */ }
+  PREMIUM_CACHE.set(trackId, { premium, at: Date.now() });
+  return premium;
+}
+
 async function handlePlay(url, request, env) {
   // Stream a track for in-browser playback (inline, with Range support for seeking).
   if (!env.AUDIO_API_BASE) {
@@ -2115,10 +2133,15 @@ async function handlePlay(url, request, env) {
     return json({ error: "Playback error: " + (exc && exc.message) }, 502);
   }
   if (upstream.status === 403) {
-    // This track is locked/unavailable on Zing's audio server. Return a light,
-    // cheap response — no heavy sign-in/session probing here (that was tripping
-    // rate limits). Deep diagnosis lives behind the Admin "Stream recon" button.
-    return json({ error: "This track isn’t available to stream.", locked: true, status: 403 }, 403);
+    // Locked on Zing's audio server. Premium albums get a clear reason so the
+    // listener knows it is a subscription matter, not a broken player.
+    const premium = await isPremiumTrack(env, trackId);
+    return json({
+      error: premium
+        ? "This is a premium album — premium access isn’t active on our music account right now."
+        : "This track isn’t available to stream.",
+      locked: true, premium: premium, status: 403,
+    }, 403);
   }
   if (!upstream.ok && upstream.status !== 206) {
     const msg = upstream.status === 429
@@ -2332,7 +2355,7 @@ const LOGIN = `<!DOCTYPE html>
       if(name.length < 2){ m.textContent = "Enter your full name."; return; }
       if(email.indexOf("@") < 1){ m.textContent = "Enter a valid email address."; return; }
       if(phone.replace(/[^0-9]/g, "").length < 6){ m.textContent = "Enter a valid phone number."; return; }
-      if(pw.length < 4){ m.textContent = "Password must be at least 4 characters."; return; }
+      if(pw.length < 8){ m.textContent = "Password must be at least 8 characters."; return; }
       if(!photo){ m.textContent = "Please take your selfie photo first."; return; }
       $("su_go").disabled = true;
       fetch("/api/signup", { method:"POST", headers:{"Content-Type":"application/json"},
@@ -3366,12 +3389,13 @@ const PAGE = `<!DOCTYPE html>
       if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
       // Find out *why* it failed: a 403 means this one track is locked/unavailable
       // (most of the catalog still plays), not that the whole player is down.
-      fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){return r.status;}).catch(function(){return 0;}).then(function(st){
-        var locked=(st===403);
+      fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ return r.json().catch(function(){ return {}; }).then(function(j){ return {st:r.status, msg:(j && j.error) || ""}; }); }).catch(function(){ return {st:0, msg:""}; }).then(function(res){
+        var locked=(res.st===403);
+        var msg=res.msg || "This song isn’t available to stream right now.";
         _fails++; var n=nextInOrder();
-        if(n>=0 && _fails<3){ if(locked) toast("This song isn’t available — skipping."); else toast("Skipping a track that won’t play…"); playIndex(n); return; }
+        if(n>=0 && _fails<3){ if(locked) toast(msg + " — skipping."); else toast("Skipping a track that won’t play…"); playIndex(n); return; }
         // Nothing else to try.
-        if(locked){ toast("This song isn’t available to stream right now."); }
+        if(locked){ toast(msg); }
         else { playbackDown(); } // real outage (login/server) ⇒ alert
       });
     });
@@ -3710,7 +3734,7 @@ const PAGE = `<!DOCTYPE html>
       : '<div style="width:46px;height:46px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((u.email||"?").slice(0,1).toUpperCase())+'</div>'; }
     function userAction(id, action, extra){ var body={admin:_admPw,action:action,id:id}; if(extra){ for(var k in extra) body[k]=extra[k]; }
       post("/api/admin/user",body).then(function(){ toast(action==="approve"?"Approved ✓":"Done."); loadAccess(); }).catch(function(e){ toast(e.message||"Failed."); }); }
-    function userReset(id){ var p=prompt("Enter a new password for this account:"); if(p===null) return; if(p.length<4){ toast("Password must be at least 4 characters."); return; }
+    function userReset(id){ var p=prompt("Enter a new password for this account:"); if(p===null) return; if(p.length<8){ toast("Password must be at least 8 characters."); return; }
       post("/api/admin/user",{admin:_admPw,action:"resetpw",id:id,password:p}).then(function(){ toast("Password reset ✓"); }).catch(function(e){ toast(e.message||"Failed."); }); }
     function userCreate(){ var nm=$("nu_n"),e=$("nu_e"),p=$("nu_p"),w=$("nu_w"),m=$("nu_msg"); if(m) m.textContent="";
       post("/api/admin/user",{admin:_admPw,action:"create",name:(nm||{}).value||"",email:(e||{}).value||"",phone:(p||{}).value||"",password:(w||{}).value||""}).then(function(){ toast("Account created."); loadAccess(); }).catch(function(err){ if(m) m.textContent=err.message||"Could not create."; }); }
@@ -3757,7 +3781,7 @@ const PAGE = `<!DOCTYPE html>
       var nFeat=((cfg.featured)||[]).length, nHid=((cfg.hidden)||[]).length;
       var rows='<div class="set-sec"><h3>Admin center</h3><div class="card" style="padding:6px">'+
         sectRow('dashboard','graphic_eq','Dashboard','Plays, listeners & charts')+
-        sectRow('online','home','Who’s online',online?(online+' listening now'):'Nobody right now',online||"")+
+        sectRow('online','home','Who’s online',online?(online+' online now'):'Nobody right now',online||"")+
         sectRow('accounts','artist','Accounts',active+' active'+(pending?(' · '+pending+' waiting'):''),pending||"")+
         sectRow('content','star','Content',(nFeat||nHid)?(nFeat+' pinned · '+nHid+' hidden'):'Feature or hide albums')+
         sectRow('music','music_note','Music server login','Zing account for playback')+
