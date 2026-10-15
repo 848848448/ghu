@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b99-history-routing-2026-10-15";
+const BUILD = "b100-artist-songs-filter-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3209,10 +3209,29 @@ const PAGE = `<!DOCTYPE html>
     }
 
     // ---------- Artists ----------
+    function artGridHtml(q){ q=(q||"").trim().toLowerCase();
+      var list=artists.slice().sort(function(a,b){ return (a.enName||"").localeCompare(b.enName||""); });
+      if(q) list=list.filter(function(a){ return (a.enName||"").toLowerCase().indexOf(q)>=0||(a.heName||"").toLowerCase().indexOf(q)>=0; });
+      var shown=list.slice(0,600);
+      return (shown.length?'<div class="grid artists">'+shown.map(artistTile).join("")+'</div>':'<div class="empty">No artists match.</div>')+(list.length>600?'<div class="empty">Showing 600 of '+list.length+'. Type in the box above to narrow it down.</div>':''); }
+    function filterArtists(v){ var g=$("artGrid"); if(g) g.innerHTML=artGridHtml(v); }
     function browseArtists(){ ensureArtists().then(function(ok){ if(!ok) return;
-      var sorted=artists.slice().sort(function(a,b){ return (a.enName||"").localeCompare(b.enName||""); }).slice(0,600);
-      setView(secHead("Artists")+'<div class="grid artists">'+sorted.map(artistTile).join("")+'</div>'+(artists.length>600?'<div class="empty">Showing 600 of '+artists.length+'. Use Search for a specific artist.</div>':''));
+      setView(secHead("Artists")+'<div class="searchbar" style="margin:0 18px 12px"><span class="ms">'+ic("search")+'</span><input id="artQ" type="text" placeholder="Find an artist…" autocomplete="off" oninput="filterArtists(this.value)"></div><div id="artGrid">'+artGridHtml("")+'</div>');
     }); }
+    var _artistTracks=[], _artistSongsFor=0;
+    function playArtistTrack(i){ playTracks(_artistTracks||[], i, ""); }
+    function loadArtistSongs(id, more){ var box=$("artSongs"); if(!box) return; if(!more){ _artistTracks=[]; _artistSongsFor=id; box.innerHTML='<div class="empty"><span class="spinner"></span>Loading songs…</div>'; }
+      var skip=_artistTracks.length;
+      gql("query { tracks(take:60, skip:"+skip+", where:{artists:{some:{id:{equals:"+Number(id)+"}}}}) { id enName heName file duration album { images { cdnSmall cdnMedium medium small } } artists { enName heName } } }").then(function(d){
+        if(_artistSongsFor!==id||!$("artSongs")) return; var got=d.tracks||[]; _artistTracks=_artistTracks.concat(got); var b=$("artSongs");
+        if(!_artistTracks.length){ b.innerHTML=''; return; }
+        b.innerHTML=secHead("Songs")+'<div class="tracks" style="margin:0 18px">'+_artistTracks.map(function(t,i){
+          return '<div class="track" onclick="playArtistTrack('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
+            '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
+            (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+dlBtn(t.id,t.file)+'</div>'; }).join("")+'</div>'+
+          (got.length>=60?'<div style="text-align:center;margin:12px"><button class="btn ghost" onclick="loadArtistSongs('+Number(id)+',true)">Load more songs</button></div>':'');
+      }).catch(function(e){ if(e.message==="login")return; var b=$("artSongs"); if(b&&!more) b.innerHTML=''; });
+    }
 
     function openArtist(id){ saveRoute("artist",id); setStatus(""); setView(skDetail());
       post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; setStatus(""); var anm=a?(pick(a.enName,a.heName)||"Artist"):"Artist"; var aalt=a?((SET.lang==="he")?(a.enName||""):(a.heName||"")):""; window._curArtist=anm;
@@ -3222,8 +3241,8 @@ const PAGE = `<!DOCTYPE html>
             (feat("favorites")?'<div class="actions"><button class="btn ghost sm" onclick="saveArtist('+Number(id)+')">'+ic("favorite_border")+' Save</button></div>':'')+'</div></div>'+
           (abio?'<p class="muted" style="margin:-6px 18px 18px;line-height:1.7;font-size:.92rem">'+esc(abio)+'</p>':'');
         window._albumBack=function(){ openArtist(id); };
-        if(!albums.length){ setView(head+'<div class="empty">No albums available.</div>'); return; }
-        window._albums=window._albums||{}; setView(head+secHead("Albums")+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al,(al.tracks||[]).length+" tracks"); }).join("")+'</div>');
+        if(!albums.length){ setView(head+'<div id="artSongs"></div>'); loadArtistSongs(id); return; }
+        window._albums=window._albums||{}; setView(head+secHead("Albums")+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al,(al.tracks||[]).length+" tracks"); }).join("")+'</div><div id="artSongs"></div>'); loadArtistSongs(id);
       }).catch(function(e){ setStatus("Error: "+esc(e.message),"err"); });
     }
 
