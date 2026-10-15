@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b96-player-polish-2026-10-15";
+const BUILD = "b97-shuffle-title-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3219,7 +3219,7 @@ const PAGE = `<!DOCTYPE html>
         '<div class="tk" onclick="playAlbum('+id+','+i+')">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
         dlBtn(t.id,t.file)+'<button class="np-btn" title="More" onclick="songMenuAlbum('+id+','+i+')">'+ic("more_vert")+'</button></div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(albName(al),{img:albImg(al)})+'<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2><div class="sub">'+tracks.length+' tracks</div>'+
-        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((dlAllowed()&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button><button class="btn ghost" onclick="shuffleAlbum('+id+')">'+ic("shuffle")+' Shuffle</button>':'')+(feat("favorites")?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save</button>':'')+((dlAllowed()&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div>'+
         (ME.admin?('<div class="chips" style="padding:0;margin-top:10px"><span class="muted" style="font-size:.74rem;align-self:center;margin-right:2px">Admin:</span>'+
           '<button class="chip" id="curFeat" onclick="curate('+id+',\\''+(isFeatured(id)?'unfeature':'feature')+'\\')">'+ic(isFeatured(id)?"star":"star_border")+(isFeatured(id)?' Unpin from Home':' Pin to Home')+'</button>'+
           '<button class="chip" id="curHide" onclick="curate('+id+',\\''+(isHidden(id)?'unhide':'hide')+'\\')">'+ic(isHidden(id)?"visibility":"visibility_off")+(isHidden(id)?' Unhide':' Hide from everyone')+'</button></div>'):'')+
@@ -3247,7 +3247,7 @@ const PAGE = `<!DOCTYPE html>
         (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
         dlBtn(t.id,t.file)+'</div>'; }).join("");
       setView(back+'<div class="hero">'+coverHtml(title,{img:img})+'<div><div class="kicker">'+esc(kicker||"Collection")+'</div><h2>'+esc(title)+'</h2><div class="sub">'+esc(subtitle)+'</div>'+
-        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playList(0)">'+ic("play_arrow")+' Play all</button>':'')+'</div></div></div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playList(0)">'+ic("play_arrow")+' Play all</button><button class="btn ghost" onclick="shuffleList()">'+ic("shuffle")+' Shuffle</button>':'')+'</div></div></div>'+
         (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
       highlightPlaying();
     }
@@ -4182,6 +4182,20 @@ const PAGE = `<!DOCTYPE html>
     audio.addEventListener("timeupdate", function(){ var n=Date.now(); if(n-_lastPS<1500) return; _lastPS=n;
       try{ if("mediaSession" in navigator&&navigator.mediaSession.setPositionState&&audio.duration&&isFinite(audio.duration)){
         navigator.mediaSession.setPositionState({duration:audio.duration,playbackRate:audio.playbackRate||1,position:Math.min(audio.currentTime,audio.duration)}); } }catch(e){} });
+
+
+    // ---------- Shuffle button, page title, offline notice ----------
+    function shufflePlay(kind,id){
+      var n=0; if(kind==="album"){ var al=(window._albums||{})[id]; n=al&&al.tracks?al.tracks.length:0; } else { n=(window._listTracks||[]).length; }
+      if(!n) return; _shuffle=true; try{ localStorage.setItem("zing_shuffle","1"); }catch(e){}
+      var i=Math.floor(Math.random()*n); if(kind==="album") playAlbum(id,i); else playList(i); syncSheet(); }
+    function shuffleAlbum(id){ shufflePlay('album',id); } function shuffleList(){ shufflePlay('list'); }
+    window.shuffleAlbum=shuffleAlbum; window.shuffleList=shuffleList;
+    var _baseTitle=document.title;
+    audio.addEventListener("playing", function(){ var t=queue[qi]; if(t) document.title="\u25B6 "+(t.title||"")+(t.artist?" \u2014 "+t.artist:""); });
+    audio.addEventListener("pause", function(){ document.title=_baseTitle; });
+    window.addEventListener("offline", function(){ toast("You're offline. Playback will resume when you're back online."); });
+    window.addEventListener("online", function(){ toast("Back online."); });
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
     hydrateIcons(); checkStatus(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000);
