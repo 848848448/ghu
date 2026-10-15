@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b105-home-card-to-settings-2026-10-15";
+const BUILD = "b106-perf-caching-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -36,7 +36,7 @@ export default {
       const authed = !locked || (await isAuthed(request, env));
 
       if (path === "/" || path === "/index.html") {
-        return html(authed ? PAGE : LOGIN);
+        return html(authed ? PAGE_SHELL : LOGIN, request);
       }
       if (path === "/manifest.webmanifest") {
         return new Response(JSON.stringify({
@@ -82,7 +82,7 @@ export default {
       // Everything below requires a login when the site is locked.
       if (!authed) {
         return json({ error: "Please log in.", needLogin: true }, 401);
-      }
+      }      if (path === "/app.js") { return jsResponse(request); }
 
       // Single-device session: a non-admin whose stored session no longer
       // matches this device's cookie was signed in elsewhere. Streaming and
@@ -2231,16 +2231,7 @@ function json(obj, status = 200) {
   });
 }
 
-function html(body) {
-  return new Response(body, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      // Never let the phone/browser serve a stale copy of the app after a
-      // new deploy — always fetch the latest page.
-      "Cache-Control": "no-store, must-revalidate",
-    },
-  });
-}
+function maybeZip(request, body, headers) { const ae = request.headers.get("Accept-Encoding") || ""; if (ae.indexOf("gzip") < 0) return new Response(body, { headers: headers }); headers["Content-Encoding"] = "gzip"; headers["Vary"] = "Accept-Encoding"; return new Response(new Blob([body]).stream().pipeThrough(new CompressionStream("gzip")), { headers: headers }); } function html(body, request) { return maybeZip(request, body, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store, must-revalidate" }); }
 
 // --------------------------------------------------------------------------- //
 // Login page — shown when the site is password-protected and you're not in yet.
@@ -2695,7 +2686,7 @@ const PAGE = `<!DOCTYPE html>
 .workspace-banner{margin:20px 18px;padding:24px;border:1px solid var(--line);border-radius:22px;background:linear-gradient(135deg,var(--surface-2),var(--surface))}.workspace-banner h2{font-size:clamp(1.5rem,4vw,2.2rem);margin:6px 0 10px;letter-spacing:-.04em}.workspace-banner p{line-height:1.6;margin:0 0 12px}.workspace-banner .chips{padding:0}.library-tools{margin:12px 18px}.library-tile{text-align:left;color:var(--text);background:none;border:0;font:inherit;cursor:pointer;padding:0}.library-tile .kicker{margin-top:6px;font-size:.65rem}.tab{min-width:0;padding:0 2px}.tab .lbl{font-size:.63rem}button:disabled{opacity:.3;cursor:default}html[data-density="compact"] .track{min-height:46px;padding-top:5px;padding-bottom:5px}html[data-motion="reduced"] *,html[data-motion="reduced"] *::before{animation:none!important;transition:none!important;scroll-behavior:auto!important}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}@media(max-width:480px){.workspace-banner{padding:18px}.track .iconbtn{width:30px;min-width:30px}.seg{flex-wrap:wrap}.row{flex-wrap:wrap;gap:10px}.row .rlabel{min-width:160px}.row .seg{max-width:100%;box-sizing:border-box}}
 
 .eq-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:18px 0}.eq-band{padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}.eq-band label,.eq-band output{display:block;font-size:.85rem}.eq-band input{width:100%;accent-color:var(--accent);margin:16px 0}.mix-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 18px 22px}.mix-card{padding:22px;text-align:left;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,var(--surface-3),var(--surface));color:var(--text);font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:10px;min-height:180px}.mix-card strong{font-size:1.4rem}.mix-card span:not(.kicker),.mix-card small{color:var(--muted);line-height:1.5}.track[hidden]{display:none!important}@media(min-width:700px){.eq-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:480px){.mix-grid{gap:10px}.mix-card{padding:16px}.mix-card strong{font-size:1.1rem}}
-  </style>
+    /* Touch devices: the blur on the fixed bars is a top scroll-jank source on phones, and the bars are nearly opaque anyway. */ @media (pointer:coarse){ :root{ --bar:rgba(10,10,18,.96); --bar-player:rgba(20,20,34,.98); --bar-tabs:rgba(14,14,24,.98); } :root[data-theme="light"]{ --bar:rgba(255,255,255,.97); --bar-player:rgba(255,255,255,.98); --bar-tabs:rgba(255,255,255,.98); } .top,.player,.tabs,.ovl{ backdrop-filter:none; -webkit-backdrop-filter:none; } }  </style>
 </head>
 <body>
   <div class="top">
@@ -4507,5 +4498,5 @@ const PAGE = `<!DOCTYPE html>
     Promise.all([loadMe(), loadConfig()]).then(function(){ applyUX(); if(!$("takeover")||$("takeover").hidden){ restoreRoute(); } });
   </script>
 </body>
-</html>`;
+</html>`; /* Perf split: serve the app script at /app.js?v=BUILD with an immutable per-build cache instead of 204KB inline on every load. */ const _jsTagOpen = PAGE.indexOf("<script>"); const _jsTagClose = PAGE.lastIndexOf("</" + "script>"); const PAGE_SHELL = PAGE.slice(0, _jsTagOpen) + '<script src="/app.js?v=' + BUILD + '"></' + 'script></body></html>'; const PAGE_JS = PAGE.slice(_jsTagOpen + 8, _jsTagClose); function jsResponse(request) { return maybeZip(request, PAGE_JS, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "private, max-age=31536000, immutable" }); }
 
