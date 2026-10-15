@@ -1,0 +1,4511 @@
+/**
+ * Jewish Music Downloader — Cloudflare Worker edition.
+ *
+ * A web version of the original command-line Python downloader, running on
+ * Cloudflare Workers. The Worker talks to the GraphQL music API and proxies
+ * downloads.
+ *
+ * Your private values are read from Cloudflare SECRETS (env.API_URL,
+ * env.AUDIO_API_BASE, env.USER_TOKEN), set with `wrangler secret put`.
+ * They are encrypted at Cloudflare, never stored in this repo, and the
+ * token is never sent to the browser (downloads are signed here).
+ */
+
+const BUILD = "b103-listening-tools-polish-2026-10-15";
+const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Password protection is ON when the SITE_PASSWORD secret is set.
+    const locked = !!env.SITE_PASSWORD;
+
+    try {
+      // Login / logout are always reachable.
+      if (path === "/api/login" && request.method === "POST") {
+        return await handleLogin(request, env);
+      }
+      if (path === "/api/logout") {
+        return logout();
+      }
+      if (path === "/api/signup" && request.method === "POST") {
+        return await handleSignup(request, env);
+      }
+
+      const authed = !locked || (await isAuthed(request, env));
+
+      if (path === "/" || path === "/index.html") {
+        return html(authed ? PAGE : LOGIN);
+      }
+      if (path === "/manifest.webmanifest") {
+        return new Response(JSON.stringify({
+          name: "Zing Music", short_name: "Zing", start_url: "/", scope: "/", display: "standalone",
+          background_color: "#0a0a12", theme_color: "#0a0a12",
+          icons: [{ src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }],
+        }), { headers: { "Content-Type": "application/manifest+json", "Cache-Control": "public, max-age=3600" } });
+      }
+      if (path === "/icon.svg") {
+        return new Response('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#ff4d8d"/></linearGradient></defs><rect width="512" height="512" rx="112" fill="url(#g)"/><path fill="#fff" d="M300 120v200a60 60 0 1 1-30-52V170l-90 22v168a60 60 0 1 1-30-52V150z"/></svg>',
+          { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" } });
+      }
+      if (path === "/sw.js") {
+        const sw = "var OFF='<!DOCTYPE html><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Offline</title><body style=\"font-family:system-ui;background:#0a0a12;color:#f4f4fb;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center\"><div><h2>You are offline</h2><p style=\"color:#9aa0c0\">Zing needs a connection to stream. Reconnect and reload.</p></div>';\n" +
+          "self.addEventListener('install',function(){self.skipWaiting();});\n" +
+          "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});\n" +
+          "self.addEventListener('fetch',function(e){if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(function(){return new Response(OFF,{headers:{'Content-Type':'text/html; charset=utf-8'}});}));}});\n";
+        return new Response(sw, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-cache", "Service-Worker-Allowed": "/" } });
+      }
+      if (path === "/api/status") {
+        const auth = await hasAuthNow(env);
+        return json({
+          apiUrl: !!env.API_URL,
+          audioBase: !!env.AUDIO_API_BASE,
+          token: auth,
+          autoLogin: canFirebase(env) || canAutoLogin(env),
+          firebase: canFirebase(env),
+          configured: !!(env.API_URL && env.AUDIO_API_BASE && auth),
+          locked: locked,
+          authed: authed,
+          kv: hasStore(env),
+          d1: !!env.DB,
+          build: BUILD,
+        });
+      }
+      if (path === "/api/config") {
+        // Public: never expose the owner email here.
+        const c = await getConfig(env);
+        delete c.ownerEmail;
+        return json(c);
+      }
+
+      // Everything below requires a login when the site is locked.
+      if (!authed) {
+        return json({ error: "Please log in.", needLogin: true }, 401);
+      }
+
+      // Single-device session: a non-admin whose stored session no longer
+      // matches this device's cookie was signed in elsewhere. Streaming and
+      // the claim-device flow stay reachable so the player can recover.
+      if (locked && env.DB && path.startsWith("/api/") &&
+          path !== "/api/me" && path !== "/api/me/password" && path !== "/api/me/photo" &&
+          path !== "/api/claim-device" && path !== "/api/play" && path !== "/api/download" &&
+          path !== "/api/status" && path !== "/api/config") {
+        const sv = await verifyUidFull(env, parseCookies(request).uid);
+        if (sv && sv.id && sv.id !== "admin" && sv.session) {
+          const su = await getUserById(env, sv.id);
+          if (su && !(await isUserAdmin(env, su)) && su.session && su.session !== sv.session) {
+            return json({ error: "Signed in on another device.", otherDevice: true }, 401);
+          }
+        }
+      }
+
+      if (path === "/api/admin/list" && request.method === "POST") {
+        return await handleAdminList(request, env);
+      }
+      if (path === "/api/admin/add" && request.method === "POST") {
+        return await handleAdminAdd(request, env);
+      }
+      if (path === "/api/admin/remove" && request.method === "POST") {
+        return await handleAdminRemove(request, env);
+      }
+      if (path === "/api/admin/config" && request.method === "POST") {
+        return await handleAdminConfig(request, env);
+      }
+      if (path === "/api/admin/curate" && request.method === "POST") {
+        return await handleAdminCurate(request, env);
+      }
+      if (path === "/api/me") {
+        return await handleMe(request, env);
+      }
+      if (path === "/api/me/password" && request.method === "POST") {
+        return await handleMePassword(request, env);
+      }
+      if (path === "/api/me/photo" && request.method === "POST") {
+        return await handleMePhoto(request, env);
+      }
+      if (path === "/api/claim-device" && request.method === "POST") {
+        return await handleClaimDevice(request, env);
+      }
+      if (path === "/api/pending") {
+        return await handlePending(request, env);
+      }
+      if (path === "/api/presence" && request.method === "POST") {
+        return await handlePresence(request, env);
+      }
+      if (path === "/api/admin/presence" && request.method === "POST") {
+        return await handleAdminPresence(request, env);
+      }
+      if (path === "/api/admin/users" && request.method === "POST") {
+        return await handleAdminUsers(request, env);
+      }
+      if (path === "/api/admin/user" && request.method === "POST") {
+        return await handleAdminUser(request, env);
+      }
+      if (path === "/api/admin/userplays" && request.method === "POST") {
+        return await handleAdminUserPlays(request, env);
+      }
+      if (path === "/api/admin/export" && request.method === "POST") {
+        return await handleAdminExport(request, env);
+      }
+      if (path === "/api/played" && request.method === "POST") {
+        return await handlePlayed(request, env);
+      }
+      if (path === "/api/admin/stats" && request.method === "POST") {
+        return await handleAdminStats(request, env);
+      }
+      if (path === "/api/admin/music" && request.method === "POST") {
+        return await handleAdminMusic(request, env);
+      }
+      if (path === "/api/artists" && request.method === "POST") {
+        return await handleArtists(env);
+      }
+      if (path === "/api/artist" && request.method === "POST") {
+        return await handleArtist(request, env);
+      }
+      if (path === "/api/new" && request.method === "POST") {
+        return await handleNew(env);
+      }
+      if (path === "/api/albums" && request.method === "POST") {
+        return await handleAlbumsPage(request, env);
+      }
+      // Diagnostic / introspection endpoints — admins only (they reveal the
+      // upstream API's structure and are only used from the admin panel).
+      if (path === "/api/check" || path === "/api/schema" || path === "/api/schema/full" ||
+          path === "/api/probe/new" || path === "/api/probe/audio") {
+        if (!(await isAdminReq(env, request, {}))) return json({ error: "Admins only." }, 403);
+        if (path === "/api/check") return await handleCheck(env);
+        if (path === "/api/schema") return await handleSchema(env);
+        if (path === "/api/schema/full") return await handleFullSchema(env);
+        if (path === "/api/probe/new" && request.method === "POST") return await handleProbeNew(request, env);
+        if (path === "/api/probe/audio" && request.method === "POST") return await handleProbeAudio(request, env);
+        return new Response("Not found", { status: 404 });
+      }
+      if (path === "/api/query" && request.method === "POST") {
+        return await handleRawQuery(request, env);
+      }
+      if (path === "/api/authquery" && request.method === "POST") {
+        return await handleAuthQuery(request, env);
+      }
+      if (path === "/api/play") {
+        return await handlePlay(url, request, env);
+      }
+      if (path === "/api/download") {
+        return await handleDownload(url, env);
+      }
+      return new Response("Not found", { status: 404 });
+    } catch (err) {
+      return json({ error: "Server error." }, 500);
+    }
+  },
+};
+
+// --------------------------------------------------------------------------- //
+// Access control (optional): active only when the SITE_PASSWORD secret is set.
+// Only people you give the password to can open the site.
+// --------------------------------------------------------------------------- //
+async function sha256hex(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+// Constant-time string compare (for tokens, signatures, password hashes), so a
+// comparison can't leak information through timing.
+function ctEq(a, b) {
+  a = String(a == null ? "" : a); b = String(b == null ? "" : b);
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
+async function authToken(env) {
+  // A non-reversible token derived from the password; safe to store in a cookie.
+  return await sha256hex("zing-auth-v1:" + (env.SITE_PASSWORD || ""));
+}
+
+function parseCookies(request) {
+  const out = {};
+  const h = request.headers.get("Cookie") || "";
+  h.split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > -1) out[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return out;
+}
+
+async function isAuthed(request, env) {
+  if (!env.SITE_PASSWORD) return true;
+  const c = parseCookies(request).auth;
+  return !!c && ctEq(c, await authToken(env));
+}
+
+async function handleLogin(request, env) {
+  if (!env.SITE_PASSWORD) return json({ ok: true });
+  const body = await request.json().catch(() => ({}));
+  const email = (body.email || "").toString().trim().toLowerCase();
+  const pw = (body.password || "").toString();
+
+  // Email + password login (a user account).
+  if (email) {
+    const u = await getUserByEmail(env, email);
+    if (!u || !(await passVerify(env, email, pw, u.pass))) {
+      return json({ error: "Wrong email or password." }, 401);
+    }
+    // Transparent upgrade: re-hash legacy SHA-256 passwords as PBKDF2 on login.
+    if (!String(u.pass || "").startsWith("pbkdf2$")) {
+      try { await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHashNew(env, pw), u.id).run(); } catch (e) { /* ignore */ }
+    }
+    if (u.status === "suspended") return json({ error: "This account has been suspended." }, 403);
+    if (u.status !== "approved") {
+      return json({ error: u.status === "rejected" ? "This account was not approved." : "Your account is waiting for approval." }, 403);
+    }
+    // Admins may be on many devices; everyone else is limited to one device,
+    // enforced by a session token that a new login replaces.
+    if (await isUserAdmin(env, u)) return await loginResponse(env, String(u.id), "");
+    const session = randToken();
+    try { await env.DB.prepare("UPDATE users SET session = ? WHERE id = ?").bind(session, u.id).run(); } catch (e) { /* ignore */ }
+    return await loginResponse(env, String(u.id), session);
+  }
+
+  // Master password or an access code.
+  if (pw && (ctEq(pw, env.SITE_PASSWORD) || (await codeMatches(env, pw)))) {
+    return await loginResponse(env, ctEq(pw, env.SITE_PASSWORD) ? "admin" : "");
+  }
+  return json({ error: "Wrong password." }, 401);
+}
+
+function logout() {
+  const h = new Headers({ Location: "/" });
+  h.append("Set-Cookie", "auth=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+  h.append("Set-Cookie", "uid=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+  return new Response(null, { status: 302, headers: h });
+}
+
+// --------------------------------------------------------------------------- //
+// Storage for accounts + site settings. Uses a Cloudflare D1 SQL database
+// (binding DB) when one is bound, otherwise a KV namespace (binding ZING_KV).
+// With either bound, the owner can manage access codes and app settings from
+// the in-app admin screen. Any stored code — or the master SITE_PASSWORD —
+// can sign in. Managing anything requires the master password.
+// --------------------------------------------------------------------------- //
+const CODES_KEY = "access_codes";
+const CONFIG_KEY = "site_config";
+const CONFIG_FEATURES = ["banners", "albums", "popular", "search", "genres", "categories", "playlists", "artists", "stories", "downloads", "favorites"];
+const CONFIG_ACCENTS = ["", "purple", "blue", "green", "red", "gold", "teal"];
+
+function hasStore(env) {
+  return !!(env.DB || env.ZING_KV);
+}
+
+let D1_READY = false;
+async function ensureD1(env) {
+  if (!env.DB || D1_READY) return;
+  try {
+    await env.DB.batch([
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS accounts (code TEXT PRIMARY KEY, name TEXT, added INTEGER)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, phone TEXT, pass TEXT, photo TEXT, status TEXT, created INTEGER)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS presence (uid TEXT PRIMARY KEY, name TEXT, view TEXT, seen INTEGER)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS plays (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, track INTEGER, title TEXT, artist TEXT, at INTEGER)"),
+    ]);
+    // Best-effort migrations for columns added later (ignored if they exist).
+    for (const a of ["ALTER TABLE users ADD COLUMN name TEXT", "ALTER TABLE users ADD COLUMN nodl INTEGER",
+                     "ALTER TABLE users ADD COLUMN role TEXT", "ALTER TABLE users ADD COLUMN session TEXT"]) {
+      try { await env.DB.prepare(a).run(); } catch (e) { /* column already exists */ }
+    }
+    D1_READY = true;
+  } catch (e) { /* ignore; calls below will surface errors */ }
+}
+
+async function getCodes(env) {
+  if (env.DB) {
+    await ensureD1(env);
+    try {
+      const r = await env.DB.prepare("SELECT code, name, added FROM accounts ORDER BY added").all();
+      return (r.results || []).map((x) => ({ code: x.code, name: x.name, added: x.added }));
+    } catch (e) { return []; }
+  }
+  if (env.ZING_KV) {
+    try {
+      const raw = await env.ZING_KV.get(CODES_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (e) { return []; }
+  }
+  return null; // no store bound → feature unavailable
+}
+
+async function saveCodes(env, list) {
+  if (env.DB) {
+    await ensureD1(env);
+    const stmts = [env.DB.prepare("DELETE FROM accounts")];
+    list.forEach((c) => {
+      stmts.push(env.DB.prepare("INSERT OR REPLACE INTO accounts (code, name, added) VALUES (?, ?, ?)")
+        .bind(c.code, c.name || "", c.added || Date.now()));
+    });
+    await env.DB.batch(stmts);
+    return;
+  }
+  if (env.ZING_KV) {
+    await env.ZING_KV.put(CODES_KEY, JSON.stringify(list));
+  }
+}
+
+async function codeMatches(env, pw) {
+  const codes = await getCodes(env);
+  if (!codes) return false;
+  return codes.some((c) => c && typeof c.code === "string" && ctEq(c.code, pw));
+}
+
+function isAdmin(env, body) {
+  return !!env.SITE_PASSWORD && ctEq((body.admin || "").toString(), env.SITE_PASSWORD);
+}
+
+// --------------------------------------------------------------------------- //
+// Site settings (admin-controlled, shared for everyone): app name, an
+// announcement, and feature on/off toggles. Stored in D1 or KV so the whole
+// site picks them up. Reads are public (no secrets); writes need the master
+// password.
+// --------------------------------------------------------------------------- //
+async function getConfig(env) {
+  const out = { appName: "", announcement: "", theme: "", lang: "", accent: "", ownerEmail: "", features: {}, featured: [], hidden: [] };
+  let raw = null;
+  if (env.DB) {
+    await ensureD1(env);
+    try {
+      const r = await env.DB.prepare("SELECT v FROM settings WHERE k = ?").bind(CONFIG_KEY).first();
+      raw = r ? r.v : null;
+    } catch (e) { /* ignore */ }
+  } else if (env.ZING_KV) {
+    try { raw = await env.ZING_KV.get(CONFIG_KEY); } catch (e) { /* ignore */ }
+  }
+  try {
+    const c = raw ? JSON.parse(raw) : {};
+    if (c && typeof c === "object") {
+      out.appName = typeof c.appName === "string" ? c.appName : "";
+      out.announcement = typeof c.announcement === "string" ? c.announcement : "";
+      out.theme = (c.theme === "dark" || c.theme === "light") ? c.theme : "";
+      out.lang = (c.lang === "en" || c.lang === "he") ? c.lang : "";
+      out.accent = CONFIG_ACCENTS.indexOf(c.accent) > 0 ? c.accent : "";
+      out.ownerEmail = typeof c.ownerEmail === "string" ? c.ownerEmail : "";
+      if (c.features && typeof c.features === "object") out.features = c.features;
+      out.featured = Array.isArray(c.featured) ? c.featured.map(Number).filter((n) => n > 0).slice(0, 24) : [];
+      out.hidden = Array.isArray(c.hidden) ? c.hidden.map(Number).filter((n) => n > 0).slice(0, 500) : [];
+    }
+  } catch (e) { /* ignore */ }
+  return out;
+}
+
+async function saveConfig(env, cfg) {
+  const s = JSON.stringify(cfg);
+  if (env.DB) {
+    await ensureD1(env);
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (k, v) VALUES (?, ?)").bind(CONFIG_KEY, s).run();
+    return;
+  }
+  if (env.ZING_KV) await env.ZING_KV.put(CONFIG_KEY, s);
+}
+
+async function handleAdminConfig(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
+  // No config in the body → read the full config (owner email included).
+  if (!body.config) return json({ config: await getConfig(env) });
+  if (!hasStore(env)) return json({ error: "Settings storage is not set up yet." }, 400);
+  const inC = (body.config && typeof body.config === "object") ? body.config : {};
+  const oe = (inC.ownerEmail || "").toString().trim().toLowerCase();
+  const clean = {
+    appName: (inC.appName || "").toString().trim().slice(0, 60),
+    announcement: (inC.announcement || "").toString().trim().slice(0, 500),
+    theme: (inC.theme === "dark" || inC.theme === "light") ? inC.theme : "",
+    lang: (inC.lang === "en" || inC.lang === "he") ? inC.lang : "",
+    accent: CONFIG_ACCENTS.indexOf(inC.accent) > 0 ? inC.accent : "",
+    ownerEmail: validEmail(oe) ? oe : "",
+    features: {},
+  };
+  const inF = (inC.features && typeof inC.features === "object") ? inC.features : {};
+  CONFIG_FEATURES.forEach((k) => { clean.features[k] = inF[k] !== false; });
+  // Preserve the curated featured/hidden album lists. Accept them if sent,
+  // otherwise keep whatever is already stored (this form doesn't edit them).
+  const prev = await getConfig(env);
+  clean.featured = Array.isArray(inC.featured) ? inC.featured.map(Number).filter((n) => n > 0).slice(0, 24) : (prev.featured || []);
+  clean.hidden = Array.isArray(inC.hidden) ? inC.hidden.map(Number).filter((n) => n > 0).slice(0, 500) : (prev.hidden || []);
+  await saveConfig(env, clean);
+  return json({ ok: true, config: clean });
+}
+
+// Admin: pin/unpin an album to the Home "Featured" row, or hide/unhide an
+// album everywhere. Toggled from the album page by a logged-in admin.
+async function handleAdminCurate(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Not allowed." }, 403);
+  if (!hasStore(env)) return json({ error: "Settings storage is not set up yet." }, 400);
+  const action = (body.action || "").toString();
+  const cfg = await getConfig(env); // full config (keeps ownerEmail, features, etc.)
+  let featured = Array.isArray(cfg.featured) ? cfg.featured.slice() : [];
+  let hidden = Array.isArray(cfg.hidden) ? cfg.hidden.slice() : [];
+  if (action === "clearfeatured" || action === "clearhidden") {
+    if (action === "clearfeatured") featured = []; else hidden = [];
+    cfg.featured = featured; cfg.hidden = hidden;
+    await saveConfig(env, cfg);
+    return json({ ok: true, featured, hidden });
+  }
+  const id = Number(body.id);
+  if (!(id > 0)) return json({ error: "Missing album id." }, 400);
+  const add = (arr, v) => (arr.indexOf(v) === -1 ? arr.concat([v]) : arr);
+  const del = (arr, v) => arr.filter((x) => x !== v);
+  if (action === "feature") { featured = add(featured, id).slice(0, 24); hidden = del(hidden, id); }
+  else if (action === "unfeature") { featured = del(featured, id); }
+  else if (action === "hide") { hidden = add(hidden, id).slice(0, 500); featured = del(featured, id); }
+  else if (action === "unhide") { hidden = del(hidden, id); }
+  else return json({ error: "Unknown action." }, 400);
+  cfg.featured = featured; cfg.hidden = hidden;
+  await saveConfig(env, cfg);
+  return json({ ok: true, featured, hidden });
+}
+
+// GET the list of access codes (admin only). Reports whether a store is set up.
+async function handleAdminList(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
+  if (!hasStore(env)) return json({ kv: false, codes: [] });
+  const codes = await getCodes(env);
+  return json({ kv: true, codes: codes || [] });
+}
+
+// Add (or update) a named access code (admin only).
+async function handleAdminAdd(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
+  if (!hasStore(env)) return json({ error: "Account storage is not set up yet." }, 400);
+  const name = (body.name || "").toString().trim().slice(0, 60);
+  const code = (body.code || "").toString().trim();
+  if (!code) return json({ error: "Enter a code." }, 400);
+  if (code.length < 3) return json({ error: "Use at least 3 characters." }, 400);
+  if (code === env.SITE_PASSWORD) return json({ error: "That is the main password. Pick a different code." }, 400);
+  const codes = (await getCodes(env)) || [];
+  const existing = codes.find((c) => c && c.code === code);
+  if (existing) {
+    existing.name = name || existing.name;
+  } else {
+    codes.push({ name: name || "Someone", code: code, added: Date.now() });
+  }
+  await saveCodes(env, codes);
+  return json({ ok: true, codes });
+}
+
+// Remove an access code by its value (admin only).
+async function handleAdminRemove(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
+  if (!hasStore(env)) return json({ error: "Account storage is not set up yet." }, 400);
+  const code = (body.code || "").toString();
+  const codes = (await getCodes(env)) || [];
+  const next = codes.filter((c) => !(c && c.code === code));
+  await saveCodes(env, next);
+  return json({ ok: true, codes: next });
+}
+
+// --------------------------------------------------------------------------- //
+// User accounts (D1 only): people request access by signing up with an email,
+// phone, password and a selfie photo; the owner approves them from the Admin
+// panel. Approved users sign in with email + password. The owner can also
+// create approved accounts directly (no photo). Passwords are stored hashed.
+// --------------------------------------------------------------------------- //
+// Password hash, peppered with the master secret so stolen hashes can't be
+// cracked without SITE_PASSWORD.
+async function passHash(env, email, password) {
+  // Legacy SHA-256 hash, kept only to verify accounts created before the
+  // PBKDF2 upgrade. New passwords always use passHashNew.
+  return await sha256hex("u2:" + email + ":" + password + ":" + (env.SITE_PASSWORD || ""));
+}
+async function passHashNew(env, password) {
+  const salt = new Uint8Array(16);
+  crypto.getRandomValues(salt);
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 100000 }, key, 256);
+  const hex = (a) => [...new Uint8Array(a)].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return "pbkdf2$100000$" + hex(salt) + "$" + hex(bits);
+}
+async function passVerify(env, email, password, stored) {
+  stored = String(stored || "");
+  if (stored.startsWith("pbkdf2$")) {
+    const p = stored.split("$");
+    if (p.length !== 4) return false;
+    const iter = parseInt(p[1], 10) || 100000;
+    const m = p[2].match(/.{2}/g) || [];
+    const salt = new Uint8Array(m.map((h) => parseInt(h, 16)));
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: iter }, key, 256);
+    const hex = [...new Uint8Array(bits)].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return ctEq(hex, p[3]);
+  }
+  return ctEq(stored, await passHash(env, email, password));
+}
+function randToken() {
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+// The uid cookie is a signed value: "<id>.<session>.<sig>" (session empty for
+// admins). The signature uses SITE_PASSWORD, so it cannot be forged.
+async function uidSig(env, id, session) {
+  return await sha256hex("uid2:" + id + ":" + (session || "") + ":" + (env.SITE_PASSWORD || ""));
+}
+async function verifyUidFull(env, val) {
+  if (!val) return null;
+  const p = val.split(".");
+  if (p.length === 2) { if (ctEq(p[1], await uidSig(env, p[0], ""))) return { id: p[0], session: "" }; return null; }
+  if (p.length === 3) { if (ctEq(p[2], await uidSig(env, p[0], p[1]))) return { id: p[0], session: p[1] }; return null; }
+  return null;
+}
+async function verifyUid(env, val) { const v = await verifyUidFull(env, val); return v ? v.id : null; }
+async function loginResponse(env, uid, session) {
+  const val = uid ? (uid + (session ? ("." + session) : "") + "." + (await uidSig(env, uid, session || ""))) : "";
+  const h = new Headers({ "Content-Type": "application/json; charset=utf-8" });
+  h.append("Set-Cookie", "auth=" + (await authToken(env)) + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000");
+  h.append("Set-Cookie", "uid=" + val + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000");
+  return new Response(JSON.stringify({ ok: true }), { status: 200, headers: h });
+}
+// Owner email (from admin settings, or the OWNER_EMAIL secret). That account
+// — and any account you mark as admin — can see the admin settings.
+async function ownerEmail(env) {
+  const c = await getConfig(env);
+  return ((c.ownerEmail || env.OWNER_EMAIL || "").toString().trim().toLowerCase());
+}
+async function isUserAdmin(env, u) {
+  if (!u) return false;
+  if (u.role === "admin") return true;
+  const oe = await ownerEmail(env);
+  return !!(oe && (u.email || "").toLowerCase() === oe);
+}
+// True for the master password, the owner-email account, or a role=admin user.
+async function isAdminReq(env, request, body) {
+  if (env.SITE_PASSWORD && ctEq(((body && body.admin) || "").toString(), env.SITE_PASSWORD)) return true;
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (id === "admin") return true;
+  if (id) { const u = await getUserById(env, id); if (await isUserAdmin(env, u)) return true; }
+  return false;
+}
+async function getUserByEmail(env, email) {
+  if (!env.DB) return null;
+  await ensureD1(env);
+  try { return await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(email).first(); } catch (e) { return null; }
+}
+async function getUserById(env, id) {
+  if (!env.DB) return null;
+  await ensureD1(env);
+  try { return await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(Number(id)).first(); } catch (e) { return null; }
+}
+function validEmail(e) { return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e); }
+
+async function handleSignup(request, env) {
+  if (!env.DB) return json({ error: "Sign-up is not set up yet (needs a D1 database)." }, 400);
+  await ensureD1(env);
+  const b = await request.json().catch(() => ({}));
+  const name = (b.name || "").toString().trim().slice(0, 80);
+  const email = (b.email || "").toString().trim().toLowerCase();
+  const phone = (b.phone || "").toString().trim();
+  const password = (b.password || "").toString();
+  const photo = (b.photo || "").toString();
+  if (name.length < 2) return json({ error: "Enter your full name." }, 400);
+  if (!validEmail(email)) return json({ error: "Enter a valid email address." }, 400);
+  if (phone.replace(/\D/g, "").length < 6) return json({ error: "Enter a valid phone number." }, 400);
+  if (password.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
+  if (!/^data:image\/(png|jpe?g|webp);base64,/.test(photo)) return json({ error: "A selfie photo is required." }, 400);
+  if (photo.length > 400000) return json({ error: "Photo is too large — please try again." }, 400);
+  if (await getUserByEmail(env, email)) return json({ error: "An account with this email already exists." }, 400);
+  try {
+    await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(name, email, phone, await passHashNew(env, password), photo, "pending", Date.now()).run();
+  } catch (e) { return json({ error: "Could not send the request." }, 500); }
+  return json({ ok: true });
+}
+
+async function handleMe(request, env) {
+  const v = await verifyUidFull(env, parseCookies(request).uid);
+  if (!v) return json({ user: null });
+  if (v.id === "admin") return json({ admin: true, name: "Owner" });
+  const u = await getUserById(env, v.id);
+  if (!u) return json({ user: null });
+  const admin = await isUserAdmin(env, u);
+  // Single device: a non-admin whose stored session no longer matches this
+  // device's cookie has been signed in elsewhere.
+  if (!admin && u.session && v.session && u.session !== v.session) {
+    return json({ user: null, otherDevice: true });
+  }
+  return json({ admin: admin, user: { id: u.id, email: u.email, phone: u.phone, photo: u.photo, name: u.name || (u.email || "").split("@")[0], nodl: !!u.nodl, role: u.role || "" } });
+}
+
+// Re-claim this account on THIS device (kicks the other device), using the
+// existing signed cookie — no password needed.
+async function handleClaimDevice(request, env) {
+  if (!env.DB) return json({ ok: false });
+  const v = await verifyUidFull(env, parseCookies(request).uid);
+  if (!v || v.id === "admin" || !v.id) return json({ ok: false }, 400);
+  const u = await getUserById(env, v.id);
+  if (!u) return json({ ok: false }, 400);
+  const session = randToken();
+  await env.DB.prepare("UPDATE users SET session = ? WHERE id = ?").bind(session, u.id).run();
+  return await loginResponse(env, String(u.id), session);
+}
+
+// Change your own password (must be signed in as a user account).
+async function handleMePassword(request, env) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (!id || id === "admin" || !env.DB) return json({ error: "Not available for this login." }, 400);
+  const b = await request.json().catch(() => ({}));
+  const u = await getUserById(env, id);
+  if (!u) return json({ error: "Account not found." }, 404);
+  if (!(await passVerify(env, u.email, (b.old || "").toString(), u.pass))) return json({ error: "Current password is wrong." }, 403);
+  const np = (b.new || "").toString();
+  if (np.length < 8) return json({ error: "New password must be at least 8 characters." }, 400);
+  await env.DB.prepare("UPDATE users SET pass = ? WHERE id = ?").bind(await passHashNew(env, np), Number(id)).run();
+  return json({ ok: true });
+}
+
+// Change your own profile photo (a new selfie).
+async function handleMePhoto(request, env) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (!id || id === "admin" || !env.DB) return json({ error: "Not available for this login." }, 400);
+  const b = await request.json().catch(() => ({}));
+  const photo = (b.photo || "").toString();
+  if (!/^data:image\/(png|jpe?g|webp);base64,/.test(photo)) return json({ error: "A photo is required." }, 400);
+  if (photo.length > 400000) return json({ error: "Photo is too large — please try again." }, 400);
+  await env.DB.prepare("UPDATE users SET photo = ? WHERE id = ?").bind(photo, Number(id)).run();
+  return json({ ok: true });
+}
+
+// Pending-request count, for the owner's badge.
+async function handlePending(request, env) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (!id || !env.DB) return json({ pending: 0, admin: false });
+  let admin = (id === "admin");
+  if (!admin) { const u = await getUserById(env, id); admin = u ? await isUserAdmin(env, u) : false; }
+  if (!admin) return json({ pending: 0, admin: false });
+  await ensureD1(env);
+  try {
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE status = 'pending'").first();
+    return json({ pending: (r && r.n) || 0, admin: true });
+  } catch (e) { return json({ pending: 0, admin: true }); }
+}
+
+async function handleAdminUsers(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Accounts need a D1 database.", d1: false }, 400);
+  await ensureD1(env);
+  const r = await env.DB.prepare("SELECT id, name, email, phone, photo, status, nodl, role, created FROM users ORDER BY created DESC").all();
+  const users = r.results || [];
+  // Attach per-user play counts and last-seen, so the owner can see who is active.
+  const plays = {}, seen = {};
+  try { const p = await env.DB.prepare("SELECT uid, COUNT(*) AS c FROM plays GROUP BY uid").all(); (p.results || []).forEach((x) => { plays[String(x.uid)] = x.c; }); } catch (e) {}
+  try { const s = await env.DB.prepare("SELECT uid, seen FROM presence").all(); (s.results || []).forEach((x) => { seen[String(x.uid)] = x.seen; }); } catch (e) {}
+  users.forEach((u) => { const k = String(u.id); u.plays = plays[k] || 0; u.lastSeen = seen[k] || 0; });
+  return json({ users, ownerEmail: await ownerEmail(env) });
+}
+
+async function handleAdminUser(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Accounts need a D1 database." }, 400);
+  await ensureD1(env);
+  const action = (b.action || "").toString();
+  const id = Number(b.id);
+  // The owner account can never be suspended, removed, demoted, or reset by
+  // anyone — it is protected so nobody can lock the owner out.
+  const target = await getUserById(env, id);
+  const oe = await ownerEmail(env);
+  const targetIsOwner = !!(target && oe && (target.email || "").toLowerCase() === oe);
+  if (targetIsOwner && ["reject", "suspend", "remove", "nodl", "setrole", "resetpw"].indexOf(action) !== -1) {
+    return json({ error: "The owner account is protected." }, 403);
+  }
+  if (action === "approve") { await env.DB.prepare("UPDATE users SET status='approved' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "reject") { await env.DB.prepare("UPDATE users SET status='rejected' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "suspend") { await env.DB.prepare("UPDATE users SET status='suspended' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "unsuspend") { await env.DB.prepare("UPDATE users SET status='approved' WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "remove") { await env.DB.prepare("DELETE FROM users WHERE id=?").bind(id).run(); return json({ ok: true }); }
+  if (action === "nodl") { await env.DB.prepare("UPDATE users SET nodl=? WHERE id=?").bind(b.value ? 1 : 0, id).run(); return json({ ok: true }); }
+  if (action === "setrole") { await env.DB.prepare("UPDATE users SET role=? WHERE id=?").bind(b.value ? "admin" : "", id).run(); return json({ ok: true }); }
+  if (action === "resetpw") {
+    const np = (b.password || "").toString();
+    if (np.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
+    const u = await getUserById(env, id);
+    if (!u) return json({ error: "Account not found." }, 404);
+    await env.DB.prepare("UPDATE users SET pass=? WHERE id=?").bind(await passHashNew(env, np), id).run();
+    return json({ ok: true });
+  }
+  if (action === "create") {
+    const name = (b.name || "").toString().trim().slice(0, 80);
+    const email = (b.email || "").toString().trim().toLowerCase();
+    const phone = (b.phone || "").toString().trim();
+    const password = (b.password || "").toString();
+    if (!validEmail(email)) return json({ error: "Enter a valid email." }, 400);
+    if (password.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
+    if (await getUserByEmail(env, email)) return json({ error: "That email already exists." }, 400);
+    await env.DB.prepare("INSERT INTO users (name, email, phone, pass, photo, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(name, email, phone, await passHashNew(env, password), "", "approved", Date.now()).run();
+    return json({ ok: true });
+  }
+  return json({ error: "Unknown action." }, 400);
+}
+
+// --------------------------------------------------------------------------- //
+// Live presence: each open app sends a heartbeat with what it is doing; the
+// owner can see who is on the site right now and their current activity.
+// --------------------------------------------------------------------------- //
+async function presenceName(env, request) {
+  const id = await verifyUid(env, parseCookies(request).uid);
+  if (id === "admin") return "Owner";
+  if (id) { const u = await getUserById(env, id); return u ? (u.name || u.email) : "User"; }
+  return "Guest";
+}
+
+async function handlePresence(request, env) {
+  if (!env.DB) return json({ ok: false });
+  await ensureD1(env);
+  const b = await request.json().catch(() => ({}));
+  const cid = (b.cid || "").toString().slice(0, 64);
+  if (!cid) return json({ ok: false });
+  const view = (b.view || "").toString().slice(0, 80);
+  const name = await presenceName(env, request);
+  try {
+    await env.DB.prepare("INSERT OR REPLACE INTO presence (uid, name, view, seen) VALUES (?, ?, ?, ?)")
+      .bind(cid, name, view, Date.now()).run();
+  } catch (e) { /* ignore */ }
+  return json({ ok: true });
+}
+
+async function handleAdminPresence(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ online: [], now: Date.now() });
+  await ensureD1(env);
+  const now = Date.now();
+  try { await env.DB.prepare("DELETE FROM presence WHERE seen < ?").bind(now - 3600000).run(); } catch (e) { /* ignore */ }
+  const r = await env.DB.prepare("SELECT name, view, seen FROM presence WHERE seen >= ? ORDER BY seen DESC").bind(now - 90000).all();
+  return json({ online: r.results || [], now });
+}
+
+// Record a play (called by the app when a track actually starts). De-duped so
+// the same person replaying/pausing the same track in a short window counts once.
+async function handlePlayed(request, env) {
+  if (!env.DB) return json({ ok: false });
+  const uid = (await verifyUid(env, parseCookies(request).uid)) || "guest";
+  const b = await request.json().catch(() => ({}));
+  const track = Number(b.track);
+  if (!track) return json({ ok: false });
+  await ensureD1(env);
+  const now = Date.now();
+  try {
+    const last = await env.DB.prepare("SELECT at FROM plays WHERE uid = ? AND track = ? ORDER BY at DESC LIMIT 1").bind(String(uid), track).first();
+    if (last && last.at && now - last.at < 30000) return json({ ok: true, dup: true });
+    await env.DB.prepare("INSERT INTO plays (uid, track, title, artist, at) VALUES (?, ?, ?, ?, ?)")
+      .bind(String(uid), track, (b.title || "").toString().slice(0, 200), (b.artist || "").toString().slice(0, 200), now).run();
+  } catch (e) { /* ignore */ }
+  return json({ ok: true });
+}
+
+// Admin: listening statistics — totals, top songs, most active people, and a
+// recent-plays feed (who played what).
+async function handleAdminStats(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Statistics need a D1 database.", d1: false }, 400);
+  await ensureD1(env);
+  // Maintenance: clear all listening history.
+  if ((b.action || "") === "reset") {
+    try { await env.DB.prepare("DELETE FROM plays").run(); } catch (e) { return json({ error: "Could not reset." }, 500); }
+    return json({ ok: true, reset: true });
+  }
+  const now = Date.now(), dayAgo = now - 86400000, weekAgo = now - 7 * 86400000, monthAgo = now - 30 * 86400000;
+  // Build a uid -> display-name map from the users table.
+  const names = {};
+  try {
+    const us = await env.DB.prepare("SELECT id, name, email FROM users").all();
+    (us.results || []).forEach((u) => { names[String(u.id)] = u.name || u.email || ("User " + u.id); });
+  } catch (e) { /* ignore */ }
+  const who = (uid) => uid === "admin" ? "Owner" : (uid === "guest" || uid === "" ? "Guest" : (names[uid] || ("User " + uid)));
+  const out = { total: 0, today: 0, week: 0, month: 0, listeners: 0, activeToday: 0, activeWeek: 0, topTracks: [], topArtists: [], topUsers: [], recent: [], daily: [] };
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays").first(); out.total = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(dayAgo).first(); out.today = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(weekAgo).first(); out.week = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE at >= ?").bind(monthAgo).first(); out.month = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(DISTINCT uid) AS n FROM plays").first(); out.listeners = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(DISTINCT uid) AS n FROM plays WHERE at >= ?").bind(dayAgo).first(); out.activeToday = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(DISTINCT uid) AS n FROM plays WHERE at >= ?").bind(weekAgo).first(); out.activeWeek = (t && t.n) || 0; } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT track, title, artist, COUNT(*) AS c FROM plays GROUP BY track ORDER BY c DESC LIMIT 20").all();
+    out.topTracks = (r.results || []).map((x) => ({ track: x.track, title: x.title, artist: x.artist, count: x.c }));
+  } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT artist, COUNT(*) AS c FROM plays WHERE artist IS NOT NULL AND artist <> '' GROUP BY artist ORDER BY c DESC LIMIT 12").all();
+    out.topArtists = (r.results || []).map((x) => ({ artist: x.artist, count: x.c }));
+  } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT uid, COUNT(*) AS c FROM plays GROUP BY uid ORDER BY c DESC LIMIT 12").all();
+    out.topUsers = (r.results || []).map((x) => ({ name: who(x.uid), count: x.c }));
+  } catch (e) {}
+  try {
+    const r = await env.DB.prepare("SELECT uid, track, title, artist, at FROM plays ORDER BY at DESC LIMIT 40").all();
+    out.recent = (r.results || []).map((x) => ({ name: who(x.uid), title: x.title, artist: x.artist, at: x.at }));
+  } catch (e) {}
+  // Plays per day for the last 7 days (oldest → newest), for a mini bar chart.
+  try {
+    const dayMid = now - (now % 86400000); // UTC midnight of today
+    const startDay = Math.floor((dayMid - 6 * 86400000) / 86400000);
+    const r = await env.DB.prepare("SELECT CAST(at/86400000 AS INTEGER) AS day, COUNT(*) AS c FROM plays WHERE at >= ? GROUP BY day").bind(dayMid - 6 * 86400000).all();
+    const byDay = {}; (r.results || []).forEach((x) => { byDay[x.day] = x.c; });
+    const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    for (let i = 0; i < 7; i++) { const d = startDay + i; const ms = d * 86400000; out.daily.push({ label: wd[new Date(ms).getUTCDay()], count: byDay[d] || 0 }); }
+  } catch (e) {}
+  return json(out);
+}
+
+// Admin: one person's listening — their recent plays, totals, and top tracks.
+async function handleAdminUserPlays(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Needs a D1 database." }, 400);
+  await ensureD1(env);
+  const uid = String(b.id == null ? "" : b.id);
+  if (!uid) return json({ error: "Missing id." }, 400);
+  const out = { total: 0, week: 0, recent: [], top: [] };
+  const weekAgo = Date.now() - 7 * 86400000;
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE uid = ?").bind(uid).first(); out.total = (t && t.n) || 0; } catch (e) {}
+  try { const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM plays WHERE uid = ? AND at >= ?").bind(uid, weekAgo).first(); out.week = (t && t.n) || 0; } catch (e) {}
+  try { const r = await env.DB.prepare("SELECT track, title, artist, at FROM plays WHERE uid = ? ORDER BY at DESC LIMIT 50").bind(uid).all(); out.recent = (r.results || []).map((x) => ({ track: x.track, title: x.title, artist: x.artist, at: x.at })); } catch (e) {}
+  try { const r = await env.DB.prepare("SELECT track, title, artist, COUNT(*) AS c FROM plays WHERE uid = ? GROUP BY track ORDER BY c DESC LIMIT 10").bind(uid).all(); out.top = (r.results || []).map((x) => ({ track: x.track, title: x.title, artist: x.artist, count: x.c })); } catch (e) {}
+  return json(out);
+}
+
+// Admin: export plays or accounts as CSV for download.
+async function handleAdminExport(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "Needs a D1 database." }, 400);
+  await ensureD1(env);
+  const what = (b.what || "plays").toString();
+  const q = (s) => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+  const iso = (ms) => { try { return new Date(Number(ms)).toISOString(); } catch (e) { return ""; } };
+  let csv = "", filename = "export.csv";
+  if (what === "accounts") {
+    const r = await env.DB.prepare("SELECT id, name, email, phone, status, role, created FROM users ORDER BY created DESC").all();
+    const plays = {};
+    try { const p = await env.DB.prepare("SELECT uid, COUNT(*) AS c FROM plays GROUP BY uid").all(); (p.results || []).forEach((x) => { plays[String(x.uid)] = x.c; }); } catch (e) {}
+    csv = "id,name,email,phone,status,role,joined,plays\n" + (r.results || []).map((u) =>
+      [u.id, q(u.name), q(u.email), q(u.phone), u.status || "", u.role || "", iso(u.created), plays[String(u.id)] || 0].join(",")).join("\n");
+    filename = "accounts.csv";
+  } else {
+    const names = {};
+    try { const us = await env.DB.prepare("SELECT id, name, email FROM users").all(); (us.results || []).forEach((u) => { names[String(u.id)] = u.name || u.email || ("User " + u.id); }); } catch (e) {}
+    const who = (uid) => uid === "admin" ? "Owner" : (uid === "guest" || uid === "" ? "Guest" : (names[uid] || ("User " + uid)));
+    const r = await env.DB.prepare("SELECT uid, track, title, artist, at FROM plays ORDER BY at DESC LIMIT 5000").all();
+    csv = "when,listener,track,title,artist\n" + (r.results || []).map((x) =>
+      [iso(x.at), q(who(String(x.uid))), x.track, q(x.title), q(x.artist)].join(",")).join("\n");
+    filename = "plays.csv";
+  }
+  return new Response(csv, { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="' + filename + '"', "Cache-Control": "no-store" } });
+}
+
+// Admin: set the music-server login from inside the app (stored in D1), so
+// playback keeps working without touching Cloudflare. Never returns the
+// password/token — only whether they are set.
+async function handleAdminMusic(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.DB) return json({ error: "This needs a D1 database." }, 400);
+  const action = (b.action || "status").toString();
+  const status = async () => {
+    const c = await getMusicCreds(env);
+    return {
+      token: !!(c.token || env.USER_TOKEN),
+      autologin: !!((c.email && c.password) || (env.ZING_EMAIL && env.ZING_PASSWORD)),
+      email: c.email || env.ZING_EMAIL || "",
+    };
+  };
+  if (action === "save") {
+    const cur = await getMusicCreds(env);
+    const obj = Object.assign({}, cur);
+    if (typeof b.email === "string") obj.email = b.email.trim();
+    if (typeof b.password === "string" && b.password) obj.password = b.password; // keep old if blank
+    if (typeof b.token === "string" && b.token.trim()) obj.token = b.token.trim();
+    // Drop any cached login so the new credentials take effect immediately.
+    delete obj.idToken; delete obj.idExp; delete obj.firebaseRefresh;
+    await saveMusicCreds(env, obj);
+    CACHED_TOKEN = null; CACHED_EXP = 0;
+    return json({ ok: true, has: await status() });
+  }
+  if (action === "clear") {
+    await saveMusicCreds(env, {});
+    CACHED_TOKEN = null; CACHED_EXP = 0;
+    return json({ ok: true, has: await status() });
+  }
+  if (action === "test") {
+    CACHED_TOKEN = null; CACHED_EXP = 0;
+    const detail = {};
+    try {
+      const cr = await musicCreds(env);
+      detail.hasEmail = !!cr.email; detail.hasToken = !!cr.token;
+      // Zing uses Firebase — sign in with the email/password and capture the result.
+      if (cr.email && cr.password) {
+        detail.firebaseKeyFound = !!(await getFirebaseKey(env));
+        const fr = await firebaseSignIn(env, cr.email, cr.password);
+        detail.loginOk = !!fr.ok;
+        detail.loginError = fr.ok ? null : fr.error;
+      }
+      const tok = await currentToken(env, true);
+      detail.gotToken = !!tok;
+      if (!tok) return json({ ok: false, stage: "login", error: "Couldn’t get a login from the music server.", detail, has: await status() });
+      // Find a real track id, then try the audio server with a 1-byte range.
+      let tid = 1;
+      try {
+        const d = await graphql(env, "query { albums(take: 1) { tracks { id } } }");
+        const t = (((d && d.data && d.data.albums) || [])[0] || {}).tracks || [];
+        if (t[0] && t[0].id) tid = t[0].id;
+      } catch (e) {}
+      const r = await fetchAudio(env, tid, { Range: "bytes=0-0" });
+      detail.audioStatus = r.status;
+      if (r.status === 200 || r.status === 206) return json({ ok: true, status: r.status, detail, has: await status() });
+      return json({ ok: false, stage: "audio", status: r.status, error: r.status === 403 ? "The music server rejected the login (wrong email/password, or Zing uses a different login)." : ("Music server returned " + r.status + "."), detail, has: await status() });
+    } catch (e) {
+      return json({ ok: false, error: String((e && e.message) || e), detail });
+    }
+  }
+  if (action === "recon") {
+    // Read the real jewishmusic.fm player JS. Needs no login or audio server,
+    // so it won't trip rate limits.
+    try { return json({ ok: true, recon: await reconClientJS(env) }); }
+    catch (e) { return json({ ok: false, error: String((e && e.message) || e) }); }
+  }
+  return json({ has: await status() });
+}
+
+// --------------------------------------------------------------------------- //
+// Auto-login (optional): when ZING_EMAIL + ZING_PASSWORD are set, the Worker
+// logs in itself to get a fresh session token, so the token never has to be
+// updated by hand. Falls back to the USER_TOKEN secret when auto-login is off.
+// --------------------------------------------------------------------------- //
+let CACHED_TOKEN = null; // per-isolate cache of the latest session token
+let CACHED_EXP = 0; // epoch seconds when the cached token expires (0 = unknown)
+
+function canFirebase(env) {
+  return !!(env.FIREBASE_API_KEY && env.FIREBASE_REFRESH_TOKEN);
+}
+
+function canAutoLogin(env) {
+  return !!(env.API_URL && env.ZING_EMAIL && env.ZING_PASSWORD);
+}
+
+function hasAuth(env) {
+  return !!(env.USER_TOKEN || canFirebase(env) || canAutoLogin(env));
+}
+
+// Exchange the long-lived Firebase refresh token for a fresh ID token.
+// Google's endpoint has a valid certificate, so Cloudflare can reach it.
+async function firebaseRefresh(env) {
+  if (!canFirebase(env)) return { ok: false, error: "FIREBASE_API_KEY / FIREBASE_REFRESH_TOKEN not set." };
+  try {
+    const r = await fetch(
+      "https://securetoken.googleapis.com/v1/token?key=" + encodeURIComponent(env.FIREBASE_API_KEY),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body:
+          "grant_type=refresh_token&refresh_token=" +
+          encodeURIComponent(env.FIREBASE_REFRESH_TOKEN),
+      }
+    );
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) {
+      const msg = d.error && (d.error.message || d.error);
+      return { ok: false, error: msg || "Refresh returned " + r.status + "." };
+    }
+    const idt = d.id_token || d.access_token;
+    if (idt) {
+      CACHED_TOKEN = idt;
+      CACHED_EXP = Math.floor(Date.now() / 1000) + (parseInt(d.expires_in, 10) || 3600);
+      return { ok: true, token: idt };
+    }
+    return { ok: false, error: "No id_token in the refresh response." };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+// The Firebase Web API key (public, embedded in the Zing web/app). Uses the
+// secret, a saved value, or auto-discovers it from the Zing website (the Worker
+// can reach it even though it looks like just an app).
+async function getFirebaseKey(env) {
+  if (env.FIREBASE_API_KEY) return env.FIREBASE_API_KEY;
+  const c = await getMusicCreds(env);
+  if (c.firebaseKey) return c.firebaseKey;
+  const key = await discoverFirebaseKey(env);
+  if (key) { c.firebaseKey = key; await saveMusicCreds(env, c); }
+  return key || "";
+}
+async function discoverFirebaseKey(env) {
+  const rx = /AIza[0-9A-Za-z_\-]{35}/;
+  const seeds = ["https://jewishmusic.fm", "https://www.jewishmusic.fm", "https://app.jewishmusic.fm"];
+  for (const url of seeds) {
+    try {
+      const r = await fetchT(url, {}, 12000);
+      if (!r.ok) continue;
+      const html = await r.text();
+      let m = html.match(rx);
+      if (m) return m[0];
+      const scripts = [];
+      const re = /<script[^>]+src=["']([^"']+)["']/gi; let sm;
+      while ((sm = re.exec(html)) && scripts.length < 10) scripts.push(sm[1]);
+      for (let s of scripts) {
+        try {
+          if (s.startsWith("//")) s = "https:" + s;
+          else if (s.startsWith("/")) s = new URL(s, url).href;
+          else if (!/^https?:/i.test(s)) continue;
+          const jr = await fetchT(s, {}, 12000);
+          if (!jr.ok) continue;
+          const js = await jr.text();
+          const mm = js.match(rx);
+          if (mm) return mm[0];
+        } catch (e) { /* next */ }
+      }
+    } catch (e) { /* next seed */ }
+  }
+  return "";
+}
+// Refresh an ID token using a stored Firebase refresh token + the (public) key.
+async function firebaseRefreshWith(env, refreshToken) {
+  const key = await getFirebaseKey(env);
+  if (!key || !refreshToken) return { ok: false, error: "No Firebase key / refresh token." };
+  try {
+    const r = await fetchT("https://securetoken.googleapis.com/v1/token?key=" + encodeURIComponent(key),
+      { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(refreshToken) }, 15000);
+    const d = await r.json().catch(() => ({}));
+    const idt = d && (d.id_token || d.access_token);
+    if (idt) {
+      const exp = Math.floor(Date.now() / 1000) + (parseInt(d.expires_in, 10) || 3600);
+      CACHED_TOKEN = idt; CACHED_EXP = exp; // per-isolate only; NOT cached in D1 (these tokens are rejected by the audio server)
+      return { ok: true, token: idt };
+    }
+    return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Refresh returned " + r.status) };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+// Sign in to Firebase with the Zing email/password (Zing uses Firebase auth).
+// Saves the refresh token so future tokens renew automatically — forever.
+async function firebaseSignIn(env, email, password) {
+  const key = await getFirebaseKey(env);
+  if (!key) return { ok: false, error: "Couldn’t find the Zing Firebase key (auto-discovery failed)." };
+  try {
+    const r = await fetchT("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + encodeURIComponent(key),
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password, returnSecureToken: true }) }, 15000);
+    const d = await r.json().catch(() => ({}));
+    if (d && d.idToken) {
+      const exp = Math.floor(Date.now() / 1000) + (parseInt(d.expiresIn, 10) || 3600);
+      CACHED_TOKEN = d.idToken;
+      CACHED_EXP = exp;
+      // Cache this working sign-in token in D1 (versioned), shared across all
+      // Worker isolates, so we don't sign in on every request (Firebase
+      // rate-limits that).
+      try { const c = await getMusicCreds(env); c.idToken = d.idToken; c.idExp = exp; c.tokenVer = TOKEN_VER; await saveMusicCreds(env, c); } catch (e) {}
+      return { ok: true, token: d.idToken };
+    }
+    return { ok: false, error: (d && d.error && (d.error.message || d.error)) || ("Firebase sign-in failed (" + r.status + ").") };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+
+// Music-server login can be set in the Admin panel (stored in D1) instead of
+// only via Cloudflare secrets, so the owner can fix it from their phone. The
+// in-app values take precedence over the secrets. These are never sent to the
+// browser (only booleans about whether they're set).
+const MUSIC_KEY = "music_creds";
+async function getMusicCreds(env) {
+  if (!env.DB) return {};
+  try {
+    await ensureD1(env);
+    const r = await env.DB.prepare("SELECT v FROM settings WHERE k = ?").bind(MUSIC_KEY).first();
+    const c = r && r.v ? JSON.parse(r.v) : {};
+    return (c && typeof c === "object") ? c : {};
+  } catch (e) { return {}; }
+}
+async function saveMusicCreds(env, obj) {
+  if (!env.DB) return;
+  await ensureD1(env);
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (k, v) VALUES (?, ?)").bind(MUSIC_KEY, JSON.stringify(obj || {})).run();
+}
+async function musicCreds(env) {
+  const c = await getMusicCreds(env);
+  return {
+    token: (c.token || env.USER_TOKEN || ""),
+    email: (c.email || env.ZING_EMAIL || ""),
+    password: (c.password || env.ZING_PASSWORD || ""),
+  };
+}
+async function hasAuthNow(env) {
+  if (hasAuth(env)) return true;
+  const c = await getMusicCreds(env);
+  return !!(c.token || (c.email && c.password));
+}
+
+// Compact login diagnosis, safe to return to an admin (never the secrets):
+// did the login work, and if it did, does the audio server still reject it?
+async function loginDiag(env, request, realTrackId) {
+  try {
+    if (!(await isAdminReq(env, request, {}))) return null;
+  } catch (e) { return null; }
+  const cr = await musicCreds(env);
+  const out = { build: BUILD, hasEmail: !!cr.email, hasToken: !!cr.token };
+  if (cr.email && cr.password) {
+    const key = await getFirebaseKey(env);
+    out.firebaseKeyFound = !!key;
+    if (!key) { out.note = "Couldn’t auto-find the Zing Firebase key. Tell the developer."; return out; }
+    const fr = await firebaseSignIn(env, cr.email, cr.password);
+    out.firebaseLoginOk = !!fr.ok;
+    out.firebaseLoginError = fr.ok ? null : (fr.error || "unknown");
+    if (fr.ok) {
+      out.note = "Firebase sign-in OK. Probing how Zing's audio wants the token…";
+      out.tokenClaims = decodeJwtClaims(fr.token);
+      const base = env.AUDIO_API_BASE;
+      // Probe the ACTUAL track the user tried to play (not a generic sample),
+      // so we can tell whether this specific track is gated.
+      const tid = realTrackId || 1;
+      out.realTrack = tid;
+      const qurl = (id) => base + "?trackId=" + encodeURIComponent(id) + "&token=" + encodeURIComponent(fr.token);
+      try { const r = await fetchT(qurl(tid), { headers: { Range: "bytes=0-1" } }, 12000); out.audio_real_range = r.status; } catch (e) { out.audio_real_range = "err"; }
+      try { const r = await fetchT(qurl(tid), {}, 12000); out.audio_real_full = r.status; } catch (e) { out.audio_real_full = "err"; }
+      // Compare against a known sample track (first track of the first album).
+      try {
+        const d = await graphql(env, "query { albums(take: 1) { tracks { id } } }");
+        const st = (((d && d.data && d.data.albums) || [])[0] || {}).tracks || [];
+        if (st[0] && st[0].id) { out.sampleTrack = st[0].id; const r = await fetchT(qurl(st[0].id), { headers: { Range: "bytes=0-1" } }, 12000); out.audio_sample = r.status; }
+      } catch (e) { out.audio_sample = "err"; }
+      // Keep the Bearer-form probe on the real track for completeness.
+      try { const r = await fetchT(base + "?trackId=" + encodeURIComponent(tid), { headers: { Range: "bytes=0-1", Authorization: "Bearer " + fr.token } }, 12000); out.audio_real_bearer = r.status; } catch (e) { out.audio_real_bearer = "err"; }
+      // Catalog scan: one track from several different albums, to see how much
+      // of the library actually streams with the plain token (206) vs 403.
+      try {
+        const d = await graphql(env, "query { albums(take: 10, orderBy: [{ id: desc }]) { id enName tracks(take: 1) { id } } }");
+        const albs = ((d && d.data && d.data.albums) || []);
+        out.catalogScan = [];
+        for (const a of albs) {
+          const t0 = (a.tracks || [])[0];
+          if (!t0 || t0.id == null) continue;
+          let s = "err";
+          try { const r = await fetchT(qurl(t0.id), { headers: { Range: "bytes=0-1" } }, 8000); s = r.status; } catch (e) {}
+          out.catalogScan.push({ album: a.id, track: t0.id, status: s });
+        }
+        out.catalogSummary = out.catalogScan.reduce((m, x) => { m[x.status] = (m[x.status] || 0) + 1; return m; }, {});
+      } catch (e) { out.catalogScan = [{ error: String((e && e.message) || e) }]; }
+      try { out.startStreamingSession = await introspectMutation(env, "startStreamingSession"); } catch (e) {}
+      try { out.sessionResult = await introspectType(env, "SessionResult"); } catch (e) {}
+      try { out.sessionTry = await tryStartSession(env, fr.token, tid); } catch (e) { out.sessionTry = { error: String((e && e.message) || e) }; }
+      try { out.recon = await reconClientJS(env); } catch (e) { out.recon = { error: String((e && e.message) || e) }; }
+    } else {
+      out.note = "Firebase sign-in failed — likely the Zing email/password is wrong.";
+    }
+  } else {
+    out.note = "No email/password saved — set the Music server login.";
+  }
+  return out;
+}
+
+// Return a mutation's arg names + return type (to learn how, e.g.,
+// startStreamingSession must be called).
+async function introspectMutation(env, name) {
+  const q = "query { __schema { mutationType { fields { name args { name type { kind name ofType { kind name } } } type { kind name ofType { kind name fields { name } } } } } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const fields = (((d.data || {}).__schema || {}).mutationType || {}).fields || [];
+    const f = fields.find((x) => x.name === name);
+    if (!f) return { found: false };
+    const tn = (t) => { while (t && !t.name && t.ofType) t = t.ofType; return t ? (t.kind + " " + t.name) : "?"; };
+    return { found: true, args: (f.args || []).map((a) => a.name + ": " + tn(a.type)), returns: tn(f.type), returnFields: (((f.type || {}).ofType || {}).fields || (f.type || {}).fields || []).map((x) => x.name) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
+// Introspect a named GraphQL type to learn its fields (e.g. SessionResult, so
+// we know what startStreamingSession returns and how to use it).
+async function introspectType(env, name) {
+  const q = "query($n:String!){ __type(name:$n){ name kind fields { name type { kind name ofType { kind name } } } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, variables: { n: name } }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const t = (d.data || {}).__type;
+    if (!t) return { found: false };
+    const tn = (x) => { while (x && !x.name && x.ofType) x = x.ofType; return x ? (x.kind + " " + x.name) : "?"; };
+    return { found: true, kind: t.kind, fields: (t.fields || []).map((f) => f.name + ": " + tn(f.type)) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
+// Send an authenticated GraphQL request to Zing with the Firebase idToken.
+async function zingAuthed(env, token, query) {
+  const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (token || "") }, body: JSON.stringify({ query }) }, 12000);
+  return await r.json().catch(() => ({}));
+}
+
+// Attempt to open a streaming session for a track and report what comes back
+// (or the GraphQL errors, which usually name any required args we're missing).
+// Introspect a GraphQL INPUT type's fields (for building create inputs).
+async function introspectInputType(env, name) {
+  const q = "query($n:String!){ __type(name:$n){ name kind inputFields { name type { kind name ofType { kind name ofType { kind name } } } } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, variables: { n: name } }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const t = (d.data || {}).__type;
+    if (!t) return { found: false };
+    const tn = (x) => { let req = ""; if (x && x.kind === "NON_NULL") req = "!"; while (x && !x.name && x.ofType) x = x.ofType; return (x ? (x.kind + " " + x.name) : "?") + req; };
+    return { found: true, fields: (t.inputFields || []).map((f) => f.name + ": " + tn(f.type)) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
+// Introspect an ENUM type's values.
+async function introspectEnum(env, name) {
+  const q = "query($n:String!){ __type(name:$n){ name enumValues { name } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, variables: { n: name } }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const t = (d.data || {}).__type;
+    if (!t) return { found: false };
+    return (t.enumValues || []).map((e) => e.name);
+  } catch (e) { return [String((e && e.message) || e)]; }
+}
+
+// Fetch the real jewishmusic.fm web player's JS and extract how it builds the
+// audio/stream request (so we stop guessing the session form).
+async function reconClientJS(env) {
+  const out = { bundles: [], hits: {}, pages: [] };
+  const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml" };
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const audHost = (() => { try { return new URL(env.AUDIO_API_BASE).host; } catch (e) { return null; } })();
+  const apiHost = (() => { try { return new URL(env.API_URL).host; } catch (e) { return null; } })();
+  const keywords = ["startStreamingSession", "sessionId", "royaltyMode", "Heartbeat", "/stream", ".mp3", "trackId"];
+  if (audHost) keywords.push(audHost);
+  // Collect candidate JS URLs from one or more entry pages.
+  const jsUrls = new Set();
+  const entryPages = ["https://jewishmusic.fm/", "https://app.jewishmusic.fm/", "https://www.jewishmusic.fm/"];
+  for (const page of entryPages) {
+    try {
+      const r = await fetchT(page, { headers: UA }, 12000);
+      const html = await r.text();
+      out.pages.push({ url: page, status: r.status, len: html.length, head: html.slice(0, 160).replace(/\s+/g, " ") });
+      // Broad extraction: src=, href=, modulepreload, and bare /_next or .js paths.
+      const pats = [
+        /["'](https?:\/\/[^"']+?\.js[^"']*)["']/g,
+        /["'](\/[^"']+?\.js[^"']*)["']/g,
+        /(\/_next\/static\/[^"'\s)]+\.js)/g,
+        /src=["']([^"']+)["']/g,
+      ];
+      const baseHost = new URL(page).origin;
+      for (const p of pats) { let m; while ((m = p.exec(html))) { let s = m[1]; if (!/\.js(\?|$)/.test(s)) continue; const abs = s.startsWith("http") ? s : (baseHost + (s.startsWith("/") ? "" : "/") + s); jsUrls.add(abs); } }
+      if (jsUrls.size) break; // got bundles from this page
+    } catch (e) { out.pages.push({ url: page, error: String((e && e.message) || e) }); }
+  }
+  const abs = Array.from(jsUrls).slice(0, 16);
+  out.bundles = abs;
+  for (const u of abs.slice(0, 12)) {
+    try {
+      const jr = await fetchT(u, { headers: UA }, 10000); if (!jr.ok) continue;
+      let js = await jr.text(); if (js.length > 3500000) js = js.slice(0, 3500000);
+      for (const kw of keywords) {
+        const kre = new RegExp("(.{0,70})" + esc(kw) + "(.{0,150})", "g");
+        let mm, n = 0;
+        while ((mm = kre.exec(js)) && n < 2) {
+          const key = kw === audHost ? "AUDIO_HOST" : kw;
+          (out.hits[key] = out.hits[key] || []).push((mm[1] + "«" + (kw === audHost ? "HOST" : kw) + "»" + mm[2]).replace(/\s+/g, " ").slice(0, 240));
+          n++;
+        }
+      }
+    } catch (e) {}
+  }
+  return out;
+}
+
+// List root query/mutation field names matching a pattern (to discover how to
+// get userId, deviceId, etc.).
+async function introspectRootNames(env, which, re) {
+  const field = which === "mutation" ? "mutationType" : "queryType";
+  const q = "query { __schema { " + field + " { fields { name } } } }";
+  try {
+    const r = await fetchT(env.API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }) }, 12000);
+    const d = await r.json().catch(() => ({}));
+    const fs = (((d.data || {}).__schema || {})[field] || {}).fields || [];
+    return fs.map((f) => f.name).filter((n) => re.test(n)).slice(0, 25);
+  } catch (e) { return [String((e && e.message) || e)]; }
+}
+
+async function tryStartSession(env, token, trackId) {
+  const out = {};
+  try {
+    // Discover candidate roots for the ids we still need.
+    out.userQueries = await introspectRootNames(env, "query", /user|viewer|^me$|account|profile/i);
+    out.deviceQueries = await introspectRootNames(env, "query", /device/i);
+    out.deviceMutations = await introspectRootNames(env, "mutation", /device|session/i);
+    // Profile (we know profiles works) — look for a userId on it.
+    let profileId = null, userId = null;
+    try { const p = await zingAuthed(env, token, "query { profiles { id userId } }"); const ps = ((p.data || {}).profiles) || []; if (ps[0]) { profileId = ps[0].id; if (ps[0].userId != null) userId = ps[0].userId; } out.profiles = ps.slice(0, 2); } catch (e) {}
+    // Try a handful of user-id queries.
+    for (const q of ["query { me { id } }", "query { currentUser { id } }", "query { viewer { id } }", "query { user { id } }", "query { account { id } }"]) {
+      if (userId != null) break;
+      try { const r = await zingAuthed(env, token, q); const key = q.match(/\{\s*(\w+)/)[1]; const v = (r.data || {})[key]; if (v && v.id != null) { userId = v.id; out.userFrom = key; } } catch (e) {}
+    }
+    out.userId = userId; out.profileId = profileId;
+
+    // Find a real deviceId owned by this user (deviceId=1 gave
+    // "Not authorized for this device"). Try listing the user's devices a few
+    // ways; the phone app should already have registered one.
+    out.devices = { tried: [] };
+    const devShapes = [
+      "query { userDevices(where:{ user:{ id:{ equals: " + Number(userId) + " } } }) { id udid name model os active isZingPlayer } }",
+      "query { userDevices { id udid name model os active isZingPlayer } }",
+      "query { userDevices(take: 10) { id udid name os active } }",
+    ];
+    let deviceId = null, deviceList = [];
+    for (const dq of devShapes) {
+      try {
+        const r = await zingAuthed(env, token, dq);
+        if (r.data && Array.isArray(r.data.userDevices)) { deviceList = r.data.userDevices; out.devices.query = dq; break; }
+        out.devices.tried.push({ q: dq.slice(0, 60), err: (r.errors || []).map((e) => e.message)[0] });
+      } catch (e) { out.devices.tried.push({ q: dq.slice(0, 60), err: String(e) }); }
+    }
+    out.devices.list = deviceList.slice(0, 5);
+    if (deviceList[0] && deviceList[0].id != null) deviceId = deviceList[0].id;
+    // Always learn the create-device schema so we can register a dedicated web
+    // device if needed (the phone's device may not authorize web streaming).
+    out.createDeviceInput = await introspectInputType(env, "UserDeviceCreateInput");
+    out.osEnum = await introspectEnum(env, "OS");
+    out.deviceId = deviceId;
+
+    // Attempt startStreamingSession with each known device id (first that works).
+    const runSession = async (did) => {
+      const args = ["trackId: " + Number(trackId), "deviceId: " + Number(did)];
+      if (userId != null) args.push("userId: " + Number(userId));
+      if (profileId != null) args.push("profileId: " + Number(profileId));
+      args.push('royaltyMode: "FREE"', 'platform: "WEB"', 'version: "1.0.0"');
+      const q = "mutation { startStreamingSession(" + args.join(", ") + ") { sessionId allowed reason royaltyMode } }";
+      const r = await zingAuthed(env, token, q);
+      return { query: q, result: (r.data && r.data.startStreamingSession) || null, errors: (r.errors || []).map((e) => e.message).slice(0, 3) };
+    };
+    const ids = deviceList.map((d) => d.id).filter((x) => x != null).slice(0, 3);
+    if (!ids.length) ids.push(1); // fall back to the old guess just to record the error
+    out.sessionAttempts = [];
+    let good = null;
+    for (const did of ids) {
+      const a = await runSession(did);
+      out.sessionAttempts.push({ deviceId: did, result: a.result, errors: a.errors });
+      if (a.result && a.result.allowed) { good = { deviceId: did, result: a.result }; break; }
+    }
+    // Look for a resolver that turns a track/session into a stream URL, and the
+    // heartbeat/end mutations — the audio server may need the session heartbeat
+    // before it serves a CLIENT-royalty track.
+    out.streamQueries = await introspectRootNames(env, "query", /stream|audio|url|playback|media|listen|hls|manifest/i);
+    out.streamMutations = await introspectRootNames(env, "mutation", /stream|audio|url|playback|media|listen|heartbeat|royalty/i);
+    out.heartbeatArgs = await introspectMutation(env, "updateSessionHeartbeat");
+
+    // If a session opened, try: (a) heartbeat then re-request, (b) a few audio
+    // forms. Kept small to avoid rate limits.
+    if (good) {
+      out.openedWith = good.deviceId; out.session = good.result;
+      const base = env.AUDIO_API_BASE, rawSid = good.result.sessionId || "";
+      const sid = encodeURIComponent(rawSid);
+      const tk = encodeURIComponent(token);
+      const T = base + "?trackId=" + trackId + "&token=" + tk;
+      const did = good.deviceId;
+      // Send a heartbeat for the session (best-guess args from introspection).
+      try {
+        const hbArgs = ((out.heartbeatArgs || {}).args || []).map((a) => String(a).split(":")[0].trim());
+        const parts = [];
+        if (hbArgs.includes("sessionId")) parts.push('sessionId: "' + rawSid + '"');
+        if (hbArgs.includes("deviceId")) parts.push("deviceId: " + Number(did));
+        if (hbArgs.includes("userId") && userId != null) parts.push("userId: " + Number(userId));
+        if (hbArgs.includes("trackId")) parts.push("trackId: " + Number(trackId));
+        if (hbArgs.includes("profileId") && profileId != null) parts.push("profileId: " + Number(profileId));
+        const hbSel = ((out.heartbeatArgs || {}).returns || "").indexOf("OBJECT") === 0 ? " { __typename }" : "";
+        const hq = "mutation { updateSessionHeartbeat(" + parts.join(", ") + ")" + hbSel + " }";
+        out.heartbeatCall = hq;
+        const hr = await zingAuthed(env, token, hq);
+        out.heartbeatResult = hr.data || null;
+        out.heartbeatErrors = (hr.errors || []).map((e) => e.message).slice(0, 2);
+      } catch (e) { out.heartbeatError = String((e && e.message) || e); }
+      const probes = {
+        afterHB_plain: { url: T },
+        afterHB_sessionId: { url: T + "&sessionId=" + sid },
+        afterHB_device_session: { url: T + "&deviceId=" + did + "&sessionId=" + sid },
+      };
+      out.audioAfterSession = {};
+      for (const k in probes) {
+        try { const rr = await fetchT(probes[k].url, { headers: Object.assign({ Range: "bytes=0-1" }, probes[k].headers || {}) }, 10000); out.audioAfterSession[k] = rr.status; }
+        catch (e) { out.audioAfterSession[k] = "err"; }
+      }
+    }
+    return out;
+  } catch (e) { out.error = String((e && e.message) || e); return out; }
+}
+
+async function zingLogin(env) {
+  const cr = await musicCreds(env);
+  if (!(env.API_URL && cr.email && cr.password)) return { ok: false, error: "No music-server email/password set." };
+  const query =
+    "mutation($e: String!, $p: String!) { authenticateUserWithPassword(email: $e, password: $p) { __typename ... on UserAuthenticationWithPasswordSuccess { sessionToken } ... on UserAuthenticationWithPasswordFailure { message } } }";
+  try {
+    const r = await fetchT(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables: { e: cr.email, p: cr.password } }),
+    }, 15000);
+    if (!r.ok) return { ok: false, error: "Login endpoint returned " + r.status + "." };
+    const d = await r.json().catch(() => ({}));
+    if (d && d.errors && d.errors.length) {
+      return { ok: false, error: (d.errors[0] && d.errors[0].message) || "GraphQL error." };
+    }
+    const res = (d && d.data && d.data.authenticateUserWithPassword) || {};
+    if (res.sessionToken) {
+      CACHED_TOKEN = res.sessionToken;
+      CACHED_EXP = 0; // unknown expiry; the 403-retry covers staleness
+      return { ok: true, token: res.sessionToken };
+    }
+    return { ok: false, error: res.message || "Login failed (no session token returned)." };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+// Ask the GraphQL schema which login-related mutations exist (to find the
+// right one when our guess fails). Returns a list like ["name(arg, arg)"].
+async function introspectAuthMutations(env) {
+  const q =
+    "query { __schema { mutationType { fields { name args { name } } } } }";
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q }),
+    });
+    if (!r.ok) return { error: "introspection returned " + r.status };
+    const d = await r.json().catch(() => ({}));
+    if (d && d.errors && d.errors.length) return { error: "introspection blocked" };
+    const fields =
+      (((d.data || {}).__schema || {}).mutationType || {}).fields || [];
+    const re = /auth|login|session|token|sign|password/i;
+    const cand = fields
+      .filter((f) => re.test(f.name))
+      .map((f) => f.name + "(" + (f.args || []).map((a) => a.name).join(", ") + ")");
+    return { total: fields.length, candidates: cand };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+
+// List the top-level Query fields AND the content types' fields (the full
+// "structure" of the API), so the UI can show real names, durations, etc.
+async function handleSchema(env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const q =
+    "query { __schema { " +
+    "queryType { fields { name args { name } type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } " +
+    "types { name kind fields { name type { name kind ofType { name kind ofType { name kind ofType { name } } } } } } " +
+    "} }";
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d && d.errors && d.errors.length) {
+      return json({ error: (d.errors[0] && d.errors[0].message) || "introspection blocked" }, 502);
+    }
+    const schema = (d.data || {}).__schema || {};
+    const tn = (t) => {
+      while (t && !t.name && t.ofType) t = t.ofType;
+      return t ? t.name : null;
+    };
+    const queryFields = ((schema.queryType || {}).fields || []).map((f) => ({
+      name: f.name,
+      args: (f.args || []).map((a) => a.name),
+      returns: tn(f.type),
+    }));
+    // Content types worth showing (real track/album/artist fields, etc.).
+    const wanted = /track|album|artist|song|genre|playlist|podcast|episode|profile/i;
+    const types = {};
+    (schema.types || []).forEach((t) => {
+      if (t.kind !== "OBJECT" || !t.name || t.name.indexOf("__") === 0) return;
+      if (!wanted.test(t.name)) return;
+      const fs = (t.fields || []).map((f) => f.name + ": " + (tn(f.type) || "?"));
+      if (fs.length) types[t.name] = fs;
+    });
+    return json({ queryFields, types });
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 502);
+  }
+}
+
+// Full structure export: the COMPLETE API schema (every query, every type
+// with its fields and types, input filters, and enums) as one readable text
+// blob. Lets the whole Zing system/structure be captured and rebuilt.
+const TYPE_REF =
+  "kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }";
+
+function renderGqlType(t) {
+  if (!t) return "?";
+  if (t.kind === "NON_NULL") return renderGqlType(t.ofType) + "!";
+  if (t.kind === "LIST") return "[" + renderGqlType(t.ofType) + "]";
+  return t.name || "?";
+}
+
+async function handleFullSchema(env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const q =
+    "query { __schema { queryType { name } mutationType { name } types { " +
+    "kind name " +
+    "fields(includeDeprecated: true) { name args { name type { " + TYPE_REF + " } } type { " + TYPE_REF + " } } " +
+    "inputFields { name type { " + TYPE_REF + " } } " +
+    "enumValues(includeDeprecated: true) { name } " +
+    "} } }";
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d && d.errors && d.errors.length) {
+      return json({ error: (d.errors[0] && d.errors[0].message) || "introspection blocked" }, 502);
+    }
+    const schema = (d.data || {}).__schema || {};
+    const types = schema.types || [];
+    const byName = {};
+    types.forEach((t) => { if (t && t.name) byName[t.name] = t; });
+    const isInternal = (n) => !n || n.indexOf("__") === 0;
+    const scalarSkip = { String: 1, Int: 1, Float: 1, Boolean: 1, ID: 1, DateTime: 1, JSON: 1, Json: 1, Decimal: 1, BigInt: 1, Upload: 1 };
+
+    const lines = [];
+    lines.push("ZING API — FULL STRUCTURE");
+    lines.push("Generated by the app for rebuilding the whole system.");
+    lines.push("");
+
+    const rootName = (schema.queryType || {}).name || "Query";
+    const root = byName[rootName];
+    const queryFields = (root && root.fields) || [];
+    lines.push("==================== TOP-LEVEL QUERIES (" + queryFields.length + ") ====================");
+    queryFields.forEach((f) => {
+      const args = (f.args || []).map((a) => a.name + ": " + renderGqlType(a.type)).join(", ");
+      lines.push("- " + f.name + (args ? "(" + args + ")" : "") + " -> " + renderGqlType(f.type));
+    });
+    lines.push("");
+
+    const objTypes = types.filter((t) => t.kind === "OBJECT" && !isInternal(t.name) && t.name !== rootName && t.name !== ((schema.mutationType || {}).name));
+    lines.push("==================== TYPES (" + objTypes.length + ") ====================");
+    objTypes.forEach((t) => {
+      lines.push(t.name + " {");
+      (t.fields || []).forEach((f) => {
+        const args = (f.args || []).filter((a) => a.name).map((a) => a.name + ": " + renderGqlType(a.type)).join(", ");
+        lines.push("  " + f.name + (args ? "(" + args + ")" : "") + ": " + renderGqlType(f.type));
+      });
+      lines.push("}");
+    });
+    lines.push("");
+
+    const inputTypes = types.filter((t) => t.kind === "INPUT_OBJECT" && !isInternal(t.name));
+    lines.push("==================== INPUT / FILTER TYPES (" + inputTypes.length + ") ====================");
+    inputTypes.forEach((t) => {
+      const fs = (t.inputFields || []).map((f) => f.name + ": " + renderGqlType(f.type)).join(", ");
+      lines.push(t.name + " { " + fs + " }");
+    });
+    lines.push("");
+
+    const enums = types.filter((t) => t.kind === "ENUM" && !isInternal(t.name) && !scalarSkip[t.name]);
+    lines.push("==================== ENUMS (" + enums.length + ") ====================");
+    enums.forEach((t) => {
+      lines.push(t.name + " = " + (t.enumValues || []).map((v) => v.name).join(" | "));
+    });
+    lines.push("");
+
+    const mutName = (schema.mutationType || {}).name;
+    if (mutName && byName[mutName]) {
+      const mfs = byName[mutName].fields || [];
+      lines.push("==================== MUTATIONS (" + mfs.length + ") ====================");
+      mfs.forEach((f) => {
+        const args = (f.args || []).map((a) => a.name + ": " + renderGqlType(a.type)).join(", ");
+        lines.push("- " + f.name + (args ? "(" + args + ")" : "") + " -> " + renderGqlType(f.type));
+      });
+      lines.push("");
+    }
+
+    const text = lines.join("\n");
+    return json({
+      text,
+      counts: {
+        queries: queryFields.length,
+        types: objTypes.length,
+        inputs: inputTypes.length,
+        enums: enums.length,
+        mutations: mutName && byName[mutName] ? (byName[mutName].fields || []).length : 0,
+      },
+    });
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 502);
+  }
+}
+
+// Authenticated GraphQL passthrough: same as /api/query but attaches the
+// user's login token, so per-account operations (favorites, my playlists,
+// history) work. Retries once with a fresh token on an auth error.
+// --- GraphQL request guard ---------------------------------------------------
+// The /api/query and /api/authquery endpoints proxy GraphQL to Zing. authquery
+// runs with the shared account token, so a logged-in user must not be able to
+// run arbitrary (especially destructive) mutations through it. We parse the
+// operation and, for mutations, require every root field to be allow-listed.
+function gqlStrip(q) {
+  return String(q || "")
+    .replace(/"""[\s\S]*?"""/g, " ")       // block strings
+    .replace(/"(?:\\.|[^"\\])*"/g, " ")      // normal strings
+    .replace(/#[^\n]*/g, " ");               // comments
+}
+function gqlIsMutation(q) { return /^\s*mutation\b/i.test(gqlStrip(q).replace(/^\uFEFF/, "")); }
+function gqlRootFields(q) {
+  const s = gqlStrip(q);
+  // find the selection set: first '{' at paren-depth 0
+  let p = 0, start = -1;
+  for (let i = 0; i < s.length; i++) { const c = s[i]; if (c === "(") p++; else if (c === ")") p--; else if (c === "{" && p === 0) { start = i; break; } }
+  if (start < 0) return [];
+  const roots = []; let b = 0, pp = 0;
+  for (let j = start; j < s.length; j++) {
+    const c = s[j];
+    if (c === "(") { pp++; continue; }
+    if (c === ")") { pp--; continue; }
+    if (c === "{") { b++; continue; }
+    if (c === "}") { b--; if (b === 0) break; continue; }
+    if (b === 1 && pp === 0 && /[A-Za-z_]/.test(c)) {
+      const m = s.slice(j).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*([({:])/);
+      if (m) { if (m[2] !== ":") roots.push(m[1]); j += m[1].length - 1; }
+    }
+  }
+  return roots;
+}
+const AUTHQUERY_ALLOWED_MUTATIONS = {
+  saveMyArtistToProfile: 1, createOneMyArtist: 1,
+  saveMyAlbumToProfile: 1, createOneMyAlbum: 1,
+  deleteMyArtist: 1, deleteMyAlbum: 1,
+  deleteOneMyArtist: 1, deleteOneMyAlbum: 1,
+};
+function guardGraphQL(q, allowedMutations) {
+  if (!gqlIsMutation(q)) return { ok: true };               // reads are allowed
+  if (!allowedMutations) return { ok: false };               // mutations not allowed here at all
+  const roots = gqlRootFields(q);
+  if (!roots.length) return { ok: false };
+  for (const f of roots) { if (!allowedMutations[f]) return { ok: false, field: f }; }
+  return { ok: true };
+}
+
+async function handleAuthQuery(request, env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const body = await request.json().catch(() => ({}));
+  if (!body.query) return json({ error: "Missing query." }, 400);
+  const guard = guardGraphQL(body.query, AUTHQUERY_ALLOWED_MUTATIONS);
+  if (!guard.ok) return json({ error: "This action isn’t allowed." }, 403);
+  const payload = JSON.stringify({ query: body.query, variables: body.variables || {} });
+  const call = async (tok) =>
+    fetch(env.API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + (tok || ""),
+      },
+      body: payload,
+    });
+  try {
+    let r = await call(await currentToken(env, false));
+    let d = await r.json().catch(() => ({}));
+    const looksAuth =
+      r.status === 401 ||
+      (d && d.errors && /auth|forbidden|denied|token|unauthor|login|permission/i.test(JSON.stringify(d.errors)));
+    if (looksAuth && (canFirebase(env) || canAutoLogin(env))) {
+      r = await call(await currentToken(env, true));
+      d = await r.json().catch(() => ({}));
+    }
+    return json(d);
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 502);
+  }
+}
+
+// Run an arbitrary read query against the API (behind the site password).
+// Lets the UI fetch genres, playlists, podcasts, etc. without new endpoints.
+async function handleRawQuery(request, env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const body = await request.json().catch(() => ({}));
+  if (!body.query) return json({ error: "Missing query." }, 400);
+  // Read-only: no mutations through the unauthenticated proxy.
+  if (!guardGraphQL(body.query, null).ok) return json({ error: "Only read queries are allowed here." }, 403);
+  try {
+    const r = await fetch(env.API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: body.query, variables: body.variables || {} }),
+    });
+    const d = await r.json().catch(() => ({}));
+    return json(d);
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 502);
+  }
+}
+
+async function currentToken(env, forceLogin) {
+  const now = Math.floor(Date.now() / 1000);
+  if (!forceLogin && CACHED_TOKEN && (CACHED_EXP === 0 || now < CACHED_EXP - 60)) {
+    return CACHED_TOKEN;
+  }
+  // A token cached in D1 (shared across all isolates) — reuse it until it's
+  // about to expire, so we don't sign in on every request (Firebase rate-limits
+  // that, which caused intermittent 403s).
+  const c0 = await getMusicCreds(env);
+  if (!forceLogin && c0.idToken && c0.tokenVer === TOKEN_VER && c0.idExp && now < c0.idExp - 120) {
+    CACHED_TOKEN = c0.idToken; CACHED_EXP = c0.idExp;
+    return c0.idToken;
+  }
+  // Preferred: Firebase refresh token from secrets (works forever).
+  if (canFirebase(env)) {
+    const res = await firebaseRefresh(env);
+    if (res.ok) return res.token;
+  }
+  const cr = await musicCreds(env);
+  // Zing uses Firebase: a full email/password sign-in gives a token the audio
+  // server accepts. (We deliberately do NOT use the securetoken refresh flow —
+  // its tokens are rejected by Zing's audio server. The sign-in token is cached
+  // in D1 above, so this runs at most ~once an hour, not on every request.)
+  if (cr.email && cr.password) {
+    const res = await firebaseSignIn(env, cr.email, cr.password);
+    if (res.ok) return res.token;
+  }
+  // Last resort: a Keystone-style GraphQL login (most Zing-like APIs don't have one).
+  if (env.API_URL && cr.email && cr.password) {
+    const res = await zingLogin(env);
+    if (res.ok) return res.token;
+  }
+  if (!forceLogin && CACHED_TOKEN) return CACHED_TOKEN;
+  return cr.token || "";
+}
+
+// Fetch from the audio server, retrying once with a fresh token on a 403.
+// fetch with a hard timeout, so a slow/unreachable upstream never hangs the
+// Worker (which would make the Admin "Test" appear to do nothing).
+async function fetchT(url, opts, ms) {
+  const ctl = new AbortController();
+  const id = setTimeout(() => ctl.abort(), ms || 15000);
+  try {
+    return await fetch(url, Object.assign({}, opts || {}, { signal: ctl.signal }));
+  } finally { clearTimeout(id); }
+}
+
+async function fetchAudio(env, trackId, extraHeaders, file) {
+  let token = await currentToken(env, false);
+  const base = env.AUDIO_API_BASE;
+  const tok = () => encodeURIComponent(token || "");
+  const byId = () => base + "?trackId=" + encodeURIComponent(trackId) + "&token=" + tok();
+  const byIdFile = () => base + "?trackId=" + encodeURIComponent(trackId) + "&file=" + encodeURIComponent(file || "") + "&token=" + tok();
+  const byFile = () => base + "?file=" + encodeURIComponent(file || "") + "&token=" + tok();
+  const hdrs = { headers: extraHeaders || {} };
+  let r = await fetchT(byId(), hdrs, 15000);
+  // On a 403, try once more with a freshly fetched token (covers an expired
+  // token whether the login comes from secrets OR the Admin panel).
+  if (r.status === 403) {
+    token = await currentToken(env, true);
+    if (token) r = await fetchT(byId(), hdrs, 15000);
+  }
+  // Still refused? The token may need to travel as an Authorization: Bearer
+  // header (how Firebase-based APIs usually expect it) rather than a query param.
+  if (!r.ok && r.status !== 206 && token) {
+    const bh = Object.assign({}, extraHeaders || {}, { Authorization: "Bearer " + token });
+    const noTok = base + "?trackId=" + encodeURIComponent(trackId);
+    for (const u of [noTok, byId()]) {
+      try { const rb = await fetchT(u, { headers: bh }, 15000); if (rb.ok || rb.status === 206) return rb; } catch (e) {}
+    }
+  }
+  // Some tracks (notably singles) can't be resolved by track id alone — retry
+  // with the file path (id+file, then file-only). Only runs when the id-only
+  // request failed, so tracks that already work are untouched.
+  if (!r.ok && r.status !== 206 && file) {
+    for (const make of [byIdFile, byFile]) {
+      try {
+        const r2 = await fetchT(make(), hdrs, 15000);
+        if (r2.ok || r2.status === 206) return r2;
+      } catch (e) { /* try the next form, else keep the original response */ }
+    }
+  }
+  return r;
+}
+
+// --------------------------------------------------------------------------- //
+// GraphQL helpers
+// --------------------------------------------------------------------------- //
+async function graphql(env, query) {
+  if (!env.API_URL) return null;
+  const res = await fetch(env.API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) return null;
+  return await res.json();
+}
+
+async function fetchArtists(env) {
+  const all = [];
+  let skip = 0;
+  const batchSize = 500;
+  while (true) {
+    const query =
+      "query { artists(skip: " + skip + ", take: " + batchSize + ") { id enName heName image } }";
+    const data = await graphql(env, query);
+    if (!data || data.errors) break;
+    const batch = ((data.data || {}).artists) || [];
+    if (!batch.length) break;
+    all.push(...batch);
+    if (batch.length < batchSize) break;
+    skip += batchSize;
+  }
+  return all;
+}
+
+async function handleArtists(env) {
+  if (!env.API_URL) {
+    return json({ error: "Server not configured. Set the API_URL secret." }, 400);
+  }
+  const artists = await fetchArtists(env);
+  if (!artists.length) {
+    return json({ error: "No artists found. Check the API_URL secret." }, 502);
+  }
+  return json({ artists });
+}
+
+async function handleArtist(request, env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const body = await request.json().catch(() => ({}));
+  const id = body.id;
+  if (id === undefined || id === null) {
+    return json({ error: "Missing artist id." }, 400);
+  }
+  const query =
+    "query { artist(where: { id: " + Number(id) + " }) { id enName heName image bio heDesc enDesc " +
+    "albums { id enName heName images { cdnSmall cdnMedium medium small } tracks { id } } } }";
+  const data = await graphql(env, query);
+  const artist = data && data.data ? data.data.artist : null;
+  if (!artist) return json({ error: "No details found for this artist." }, 502);
+  return json({ artist });
+}
+
+async function handleNew(env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const base =
+    "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
+  const fieldsC = base + " createdAt";
+  // "New music" = most recently ADDED to the catalog, i.e. createdAt desc. We
+  // fetch createdAt and order by it (the true signal), rather than assuming the
+  // album id increases with every addition — if ids aren't monotonic, an
+  // id-sort buries genuinely new releases behind stale high-id albums. We avoid
+  // releasedAt (it surfaces future-dated items and daily podcasts). Each attempt
+  // falls back to the next if the API rejects a field/orderBy.
+  const attempts = [
+    { q: "query { albums(take: 40, orderBy: [{ createdAt: desc }]) { " + fieldsC + " } }", by: "createdAt" },
+    { q: "query { albums(take: 40, orderBy: [{ id: desc }]) { " + base + " } }", by: "id" },
+    { q: "query { albums(take: 50) { " + base + " } }", by: "id" },
+  ];
+  let albums = [];
+  for (let i = 0; i < attempts.length; i++) {
+    const data = await graphql(env, attempts[i].q);
+    if (data && !data.errors && ((data.data || {}).albums || []).length) {
+      albums = data.data.albums;
+      break;
+    }
+  }
+  // Newest-added first: by createdAt when we have it, else by id.
+  albums = sortNewest(albums);
+  return json({ albums: albums.slice(0, 12) });
+}
+
+// Owner-only diagnostic: run several "newest albums" query shapes against the
+// API and report, for each, whether it errored and the first few albums it
+// returned (name, id, releasedAt, createdAt). This shows exactly which query
+// actually returns the newest music, so the New Releases logic can be tuned.
+async function handleProbeNew(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, body))) return json({ error: "Wrong password." }, 403);
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const f = "id enName heName releasedAt";
+  const variants = [
+    { label: "orderBy createdAt desc", q: "query { albums(take: 6, orderBy: [{ createdAt: desc }]) { " + f + " createdAt } }" },
+    { label: "orderBy releasedAt desc", q: "query { albums(take: 6, orderBy: [{ releasedAt: desc }]) { " + f + " } }" },
+    { label: "orderBy id desc", q: "query { albums(take: 6, orderBy: [{ id: desc }]) { " + f + " } }" },
+    { label: "orderBy {createdAt:desc} (object)", q: "query { albums(take: 6, orderBy: { createdAt: desc }) { " + f + " createdAt } }" },
+    { label: "no orderBy (default)", q: "query { albums(take: 6) { " + f + " } }" },
+    { label: "latestAlbums", q: "query { latestAlbums(take: 6) { " + f + " } }" },
+    { label: "newReleases", q: "query { newReleases(take: 6) { " + f + " } }" },
+  ];
+  const out = [];
+  for (const v of variants) {
+    try {
+      const d = await graphql(env, v.q);
+      if (!d) { out.push({ label: v.label, error: "no response" }); continue; }
+      if (d.errors && d.errors.length) { out.push({ label: v.label, error: (d.errors[0] && d.errors[0].message) || "error" }); continue; }
+      const data = d.data || {};
+      const key = Object.keys(data)[0];
+      const rows = (data[key] || []).map((a) => ({ id: a.id, name: a.enName || a.heName || "", releasedAt: a.releasedAt || null, createdAt: a.createdAt || null }));
+      out.push({ label: v.label, count: rows.length, rows });
+    } catch (e) {
+      out.push({ label: v.label, error: String((e && e.message) || e) });
+    }
+  }
+  return json({ probe: out });
+}
+
+// Owner-only diagnostic: compare how the audio server responds to a SINGLE vs.
+// an ordinary album track, across a few URL shapes, so we can see exactly what
+// singles need. Uses the current (working) token.
+async function handleProbeAudio(request, env) {
+  const b = await request.json().catch(() => ({}));
+  if (!(await isAdminReq(env, request, b))) return json({ error: "Wrong password." }, 403);
+  if (!env.API_URL || !env.AUDIO_API_BASE) return json({ error: "Server not configured." }, 400);
+  let albums = [];
+  try {
+    const d = await graphql(env, "query { albums(take: 40, orderBy: [{ id: desc }]) { id enName heName tracks { id file } } }");
+    albums = ((d && d.data && d.data.albums) || []);
+  } catch (e) { return json({ error: "Could not read albums." }, 502); }
+  const single = albums.find((a) => (a.tracks || []).length === 1);
+  const multi = albums.find((a) => (a.tracks || []).length > 1);
+  const token = await currentToken(env, false);
+  const base = env.AUDIO_API_BASE;
+  const enc = encodeURIComponent;
+  const tryOne = async (label, u) => {
+    try { const r = await fetchT(u, { headers: { Range: "bytes=0-0" } }, 12000); return { label, status: r.status, type: r.headers.get("Content-Type"), len: r.headers.get("Content-Length") }; }
+    catch (e) { return { label, error: String((e && e.message) || e) }; }
+  };
+  const probeTrack = async (t) => {
+    if (!t) return null;
+    const id = enc(t.id), file = enc(t.file || ""), tk = enc(token || "");
+    const res = [];
+    res.push(await tryOne("id", base + "?trackId=" + id + "&token=" + tk));
+    res.push(await tryOne("id+file", base + "?trackId=" + id + "&file=" + file + "&token=" + tk));
+    res.push(await tryOne("file", base + "?file=" + file + "&token=" + tk));
+    return { id: t.id, file: t.file, hasFile: !!t.file, results: res };
+  };
+  return json({
+    single: single ? { album: single.enName || single.heName, tracks: (single.tracks || []).length, track: await probeTrack((single.tracks || [])[0]) } : null,
+    album: multi ? { album: multi.enName || multi.heName, tracks: (multi.tracks || []).length, track: await probeTrack((multi.tracks || [])[0]) } : null,
+  });
+}
+
+// Newest-added first. Prefer createdAt (the real "added to catalog" time) when
+// the items carry it; otherwise fall back to id descending. We avoid releasedAt
+// here — it surfaces future-dated items and daily podcasts.
+function sortNewest(list) {
+  const arr = (list || []).slice();
+  const hasCreated = arr.some((a) => a && a.createdAt);
+  const cv = (a) => { const t = Date.parse((a && a.createdAt) || ""); return isNaN(t) ? -1 : t; };
+  if (hasCreated) {
+    return arr.sort((a, b) => { const d = cv(b) - cv(a); return d !== 0 ? d : (Number((b && b.id) || 0) - Number((a && a.id) || 0)); });
+  }
+  return arr.sort((a, b) => Number((b && b.id) || 0) - Number((a && a.id) || 0));
+}
+
+// A page of ALL albums, newest first (old + new together), for the Albums
+// browse view. Supports skip/take for "load more". Same ordering fallbacks.
+async function handleAlbumsPage(request, env) {
+  if (!env.API_URL) return json({ error: "Server not configured." }, 400);
+  const body = await request.json().catch(() => ({}));
+  const take = Math.min(Math.max(parseInt(body.take, 10) || 30, 1), 60);
+  const skip = Math.max(parseInt(body.skip, 10) || 0, 0);
+  const base =
+    "id enName heName releasedAt images { cdnSmall cdnMedium medium small } artists { enName heName image } tracks { id }";
+  const fieldsC = base + " createdAt";
+  const attempts = [
+    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ createdAt: desc }]) { " + fieldsC + " } }",
+    "query { albums(take: " + take + ", skip: " + skip + ", orderBy: [{ id: desc }]) { " + base + " } }",
+    "query { albums(take: " + take + ", skip: " + skip + ") { " + base + " } }",
+  ];
+  for (let i = 0; i < attempts.length; i++) {
+    const data = await graphql(env, attempts[i]);
+    if (data && !data.errors) {
+      const albums = sortNewest(((data.data || {}).albums) || []);
+      return json({ albums });
+    }
+  }
+  return json({ albums: [] });
+}
+
+// Read a JWT's non-secret claims (issuer, audience, expiry) to identify the
+// auth provider. Never exposes the token itself — only these public claims.
+function decodeJwtClaims(token) {
+  try {
+    const parts = (token || "").split(".");
+    if (parts.length < 2) return { error: "not a JWT" };
+    let b = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b.length % 4) b += "=";
+    const claims = JSON.parse(atob(b));
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      iss: claims.iss || null,
+      aud: typeof claims.aud === "string" ? claims.aud : null,
+      exp: claims.exp || null,
+      expired: claims.exp ? claims.exp < now : null,
+      ttlMinutes: claims.exp ? Math.round((claims.exp - now) / 60) : null,
+    };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+
+async function handleCheck(env) {
+  // Diagnose connectivity: can the Worker actually reach your servers, and
+  // does a REAL track play with the current token?
+  const out = { api: {}, audio: {} };
+  let realTrackId = null;
+
+  // Identify the token's provider/expiry (public claims only, no secrets).
+  if (env.USER_TOKEN) out.tokenInfo = decodeJwtClaims(env.USER_TOKEN);
+
+  // Test whichever auto-token method is configured.
+  if (canFirebase(env)) {
+    const res = await firebaseRefresh(env);
+    out.login = res.ok ? { ok: true, method: "firebase" } : { ok: false, method: "firebase", error: res.error };
+  } else if (env.ZING_EMAIL && env.ZING_PASSWORD) {
+    const res = await zingLogin(env);
+    out.login = res.ok ? { ok: true, method: "password" } : { ok: false, method: "password", error: res.error };
+    if (!res.ok && env.API_URL) {
+      out.authMutations = await introspectAuthMutations(env);
+    }
+  } else {
+    out.login = { configured: false };
+  }
+
+  // Test the GraphQL API and grab a real track id to test playback with.
+  if (!env.API_URL) {
+    out.api = { configured: false };
+  } else {
+    try {
+      const r = await fetch(env.API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "query { albums(take: 5) { id tracks { id } } }" }),
+      });
+      out.api = { reachable: true, status: r.status };
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}));
+        if (d && d.errors) out.api.graphqlError = true;
+        const albums = ((d.data || {}).albums) || [];
+        out.api.hasData = albums.length > 0;
+        for (let i = 0; i < albums.length; i++) {
+          const tracks = albums[i].tracks || [];
+          if (tracks.length) { realTrackId = tracks[0].id; break; }
+        }
+      }
+    } catch (e) {
+      out.api = { reachable: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  // Test the audio server with a real track id when we have one.
+  if (!env.AUDIO_API_BASE) {
+    out.audio = { configured: false };
+  } else {
+    const tid = realTrackId != null ? realTrackId : 1;
+    try {
+      const r = await fetchAudio(env, tid, { Range: "bytes=0-0" });
+      out.audio = { reachable: true, status: r.status, realTrack: realTrackId != null };
+    } catch (e) {
+      out.audio = { reachable: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  return json(out);
+}
+
+const PREMIUM_CACHE = new Map(); // trackId -> { premium, at } (per-isolate, 1h)
+async function isPremiumTrack(env, trackId) {
+  const c = PREMIUM_CACHE.get(trackId);
+  if (c && Date.now() - c.at < 3600000) return c.premium;
+  let premium = false;
+  try {
+    const d = await graphql(env, "query { track(where: { id: " + Number(trackId) + " }) { album { premium } } }");
+    premium = !!(d && d.data && d.data.track && d.data.track.album && d.data.track.album.premium);
+  } catch (e) { /* treat unknown as not premium */ }
+  PREMIUM_CACHE.set(trackId, { premium, at: Date.now() });
+  return premium;
+}
+
+async function handlePlay(url, request, env) {
+  // Stream a track for in-browser playback (inline, with Range support for seeking).
+  if (!env.AUDIO_API_BASE) {
+    return json({ error: "Server not configured (AUDIO_API_BASE)." }, 400);
+  }
+  const trackId = (url.searchParams.get("trackId") || "").trim();
+  if (!trackId) return json({ error: "Missing track id." }, 400);
+  const filePath = (url.searchParams.get("file") || "").trim();
+
+  const range = request.headers.get("Range");
+  let upstream;
+  try {
+    upstream = await fetchAudio(env, trackId, range ? { Range: range } : {}, filePath);
+  } catch (exc) {
+    return json({ error: "Playback error: " + (exc && exc.message) }, 502);
+  }
+  if (upstream.status === 403) {
+    // Locked on Zing's audio server. Premium albums get a clear reason so the
+    // listener knows it is a subscription matter, not a broken player.
+    const premium = await isPremiumTrack(env, trackId);
+    return json({
+      error: premium
+        ? "This is a premium album — premium access isn’t active on our music account right now."
+        : "This track isn’t available to stream.",
+      locked: true, premium: premium, status: 403,
+    }, 403);
+  }
+  if (!upstream.ok && upstream.status !== 206) {
+    const msg = upstream.status === 429
+      ? "The music server is busy right now — please wait a minute and try again."
+      : ("Server returned code " + upstream.status + ".");
+    return json({ error: msg, status: upstream.status }, 502);
+  }
+
+  const headers = new Headers();
+  headers.set("Content-Type", upstream.headers.get("Content-Type") || "audio/mpeg");
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "no-store");
+  const cr = upstream.headers.get("Content-Range");
+  if (cr) headers.set("Content-Range", cr);
+  const cl = upstream.headers.get("Content-Length");
+  if (cl) headers.set("Content-Length", cl);
+
+  return new Response(upstream.body, { status: upstream.status, headers });
+}
+
+async function handleDownload(url, env) {
+  if (!env.AUDIO_API_BASE) {
+    return json({ error: "Server not configured (AUDIO_API_BASE)." }, 400);
+  }
+  const trackId = (url.searchParams.get("trackId") || "").trim();
+  const filePath = (url.searchParams.get("file") || "").trim();
+  if (!trackId) return json({ error: "Missing track id." }, 400);
+
+  // Build the filename the same way the original script does.
+  let filename = filePath ? filePath.split("/").pop() : "track_" + trackId + ".mp3";
+  if (!/\.(mp3|wav|m4a)$/i.test(filename)) filename += ".mp3";
+  // Keep the header safe.
+  filename = filename.replace(/["\\\r\n]/g, "_");
+
+  let upstream;
+  try {
+    upstream = await fetchAudio(env, trackId, {}, filePath);
+  } catch (exc) {
+    return json({ error: "Download error: " + (exc && exc.message) }, 502);
+  }
+  if (upstream.status === 403) {
+    return json({ error: "Access Denied (403). Token expired and re-login failed." }, 403);
+  }
+  if (!upstream.ok) {
+    return json({ error: "Server returned code " + upstream.status + "." }, 502);
+  }
+
+  const headers = new Headers();
+  headers.set("Content-Disposition", 'attachment; filename="' + filename + '"');
+  headers.set("Content-Type", upstream.headers.get("Content-Type") || "audio/mpeg");
+  const cl = upstream.headers.get("Content-Length");
+  if (cl) headers.set("Content-Length", cl);
+
+  return new Response(upstream.body, { headers });
+}
+
+// --------------------------------------------------------------------------- //
+// Response helpers
+// --------------------------------------------------------------------------- //
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      // Never let the phone or a CDN serve stale data — always fetch fresh, so
+      // newly added music shows up immediately.
+      "Cache-Control": "no-store, must-revalidate",
+    },
+  });
+}
+
+function html(body) {
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      // Never let the phone/browser serve a stale copy of the app after a
+      // new deploy — always fetch the latest page.
+      "Cache-Control": "no-store, must-revalidate",
+    },
+  });
+}
+
+// --------------------------------------------------------------------------- //
+// Login page — shown when the site is password-protected and you're not in yet.
+// --------------------------------------------------------------------------- //
+const LOGIN = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Zing — Sign in</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet" />
+<style>
+  :root{color-scheme:dark;}
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{font-family:"Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#f4f4fb;
+    background:radial-gradient(900px 500px at 20% -10%, rgba(124,92,255,.28), transparent 60%),
+      radial-gradient(800px 460px at 100% 0%, rgba(255,77,141,.18), transparent 55%), #0a0a12;
+    display:grid; place-items:center; padding:24px;}
+  .box{width:100%; max-width:360px; text-align:center;}
+  .logo{width:60px;height:60px;border-radius:18px;display:grid;place-items:center;margin:0 auto 18px;font-size:28px;
+    background:linear-gradient(135deg,#7c5cff,#ff4d8d); box-shadow:0 12px 30px rgba(124,92,255,.5);}
+  h1{font-size:1.5rem; margin:0 0 6px; font-weight:800;}
+  p{color:#a3a3c2; margin:0 0 22px;}
+  input{width:100%; padding:14px 16px; border-radius:13px; border:1px solid rgba(255,255,255,.1);
+    background:#161627; color:#f4f4fb; font-size:1.05rem; font-family:inherit; outline:none; text-align:center;}
+  input:focus{border-color:#7c5cff;}
+  button{width:100%; margin-top:12px; padding:14px; border:none; border-radius:13px; cursor:pointer;
+    font-family:inherit; font-weight:800; font-size:1rem; color:#fff;
+    background:linear-gradient(135deg,#7c5cff,#ff4d8d); box-shadow:0 10px 24px rgba(124,92,255,.4);}
+  button:disabled{opacity:.6;}
+  .msg{min-height:20px; margin-top:14px; font-size:.92rem; color:#fb7185;}
+  .tabs2{display:flex; gap:6px; background:#161627; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:4px; margin:0 0 18px;}
+  .tab2{flex:1; margin:0; padding:10px; border-radius:9px; font-weight:700; font-size:.95rem; background:transparent; color:#a3a3c2; box-shadow:none;}
+  .tab2.on{background:linear-gradient(135deg,#7c5cff,#ff4d8d); color:#fff;}
+  button.ghost{background:#1e1e34; color:#f4f4fb; box-shadow:none; border:1px solid rgba(255,255,255,.1); font-weight:600; font-size:.9rem;}
+  .selfie{margin-top:12px;}
+  .shot{width:150px; height:150px; margin:0 auto 8px; border-radius:999px; overflow:hidden; background:#161627; border:1px solid rgba(255,255,255,.1);
+    display:grid; place-items:center; position:relative;}
+  .shot video, .shot img{width:100%; height:100%; object-fit:cover; display:block;}
+  .shot #shotHint{position:absolute; padding:0 14px; color:#a3a3c2; font-size:.82rem; text-align:center;}
+  .shot video[hidden], .shot img[hidden]{display:none;}
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo">♪</div>
+    <h1>Zing Music</h1>
+    <div class="tabs2">
+      <button id="tSignin" class="tab2 on" type="button">Sign in</button>
+      <button id="tSignup" class="tab2" type="button">Request access</button>
+    </div>
+
+    <div id="signin">
+      <p>Sign in with your email and password.</p>
+      <input id="si_email" type="email" placeholder="Email (owner: leave blank)" autocomplete="username" />
+      <input id="si_pw" type="password" placeholder="Password" autocomplete="current-password" style="margin-top:10px" />
+      <button id="si_go" type="button">Sign in</button>
+      <div class="msg" id="si_msg"></div>
+    </div>
+
+    <div id="signup" hidden>
+      <p>Create an account. The owner approves new accounts.</p>
+      <input id="su_name" type="text" placeholder="Full name" autocomplete="name" />
+      <input id="su_email" type="email" placeholder="Email address" autocomplete="email" style="margin-top:10px" />
+      <input id="su_phone" type="tel" placeholder="Phone number" autocomplete="tel" style="margin-top:10px" />
+      <input id="su_pw" type="password" placeholder="Choose a password" autocomplete="new-password" style="margin-top:10px" />
+      <div class="selfie">
+        <div id="shot" class="shot"><span id="shotHint">Your selfie photo is required</span><video id="cam" playsinline autoplay muted></video><img id="pic" alt="" /></div>
+        <button id="camBtn" type="button" class="ghost">Open camera</button>
+        <button id="capBtn" type="button" class="ghost" hidden>Take photo</button>
+        <button id="retBtn" type="button" class="ghost" hidden>Retake</button>
+      </div>
+      <button id="su_go" type="button">Request access</button>
+      <div class="msg" id="su_msg"></div>
+    </div>
+  </div>
+  <canvas id="cv" hidden></canvas>
+  <script>
+    function $(id){ return document.getElementById(id); }
+    function show(el,on){ if(el) el.hidden = !on; }
+    // Tabs
+    function tab(which){
+      var inU = which === "up";
+      $("tSignin").className = "tab2" + (inU ? "" : " on");
+      $("tSignup").className = "tab2" + (inU ? " on" : "");
+      show($("signin"), !inU); show($("signup"), inU);
+    }
+    $("tSignin").onclick = function(){ tab("in"); };
+    $("tSignup").onclick = function(){ tab("up"); };
+
+    // Sign in
+    function signin(){
+      var m = $("si_msg"); m.textContent = "";
+      fetch("/api/login", { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ email: $("si_email").value, password: $("si_pw").value }) })
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+      .then(function(x){ if(x.ok){ location.href = "/"; } else { m.textContent = (x.d && x.d.error) || "Wrong email or password."; } })
+      .catch(function(){ m.textContent = "Something went wrong. Try again."; });
+    }
+    $("si_go").onclick = signin;
+    $("si_pw").addEventListener("keydown", function(e){ if(e.key === "Enter") signin(); });
+
+    // Selfie camera
+    var stream = null, photo = "";
+    function stopCam(){ if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; } }
+    $("camBtn").onclick = function(){
+      var m = $("su_msg"); m.textContent = "";
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ m.textContent = "Camera is not available on this device."; return; }
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false }).then(function(s){
+        stream = s; var v = $("cam"); v.srcObject = s; show(v, true); show($("pic"), false); $("shotHint").style.display = "none";
+        show($("camBtn"), false); show($("capBtn"), true); show($("retBtn"), false);
+      }).catch(function(){ m.textContent = "Could not open the camera. Please allow camera access."; });
+    };
+    $("capBtn").onclick = function(){
+      var v = $("cam"), cv = $("cv");
+      var w = v.videoWidth || 360, h = v.videoHeight || 360; var scale = 360 / Math.max(w, h);
+      cv.width = Math.round(w * scale); cv.height = Math.round(h * scale);
+      cv.getContext("2d").drawImage(v, 0, 0, cv.width, cv.height);
+      photo = cv.toDataURL("image/jpeg", 0.6);
+      stopCam(); show(v, false); var p = $("pic"); p.src = photo; show(p, true);
+      show($("capBtn"), false); show($("retBtn"), true);
+    };
+    $("retBtn").onclick = function(){ photo = ""; $("camBtn").click(); };
+
+    // Request access
+    function signup(){
+      var m = $("su_msg"); m.textContent = "";
+      var name = $("su_name").value.trim(), email = $("su_email").value.trim(), phone = $("su_phone").value.trim(), pw = $("su_pw").value;
+      if(name.length < 2){ m.textContent = "Enter your full name."; return; }
+      if(email.indexOf("@") < 1){ m.textContent = "Enter a valid email address."; return; }
+      if(phone.replace(/[^0-9]/g, "").length < 6){ m.textContent = "Enter a valid phone number."; return; }
+      if(pw.length < 8){ m.textContent = "Password must be at least 8 characters."; return; }
+      if(!photo){ m.textContent = "Please take your selfie photo first."; return; }
+      $("su_go").disabled = true;
+      fetch("/api/signup", { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ name: name, email: email, phone: phone, password: pw, photo: photo }) })
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+      .then(function(x){ $("su_go").disabled = false;
+        if(x.ok){ $("signup").innerHTML = "<p style=\\"color:#34d399;font-size:1.05rem;line-height:1.6\\">Thank you! Your request was sent.<br>The owner will approve your account soon.</p>"; }
+        else { m.textContent = (x.d && x.d.error) || "Could not send the request."; } })
+      .catch(function(){ $("su_go").disabled = false; m.textContent = "Something went wrong. Try again."; });
+    }
+    $("su_go").onclick = signup;
+    $("si_email").focus();
+  </script>
+</body>
+</html>`;
+
+// --------------------------------------------------------------------------- //
+// Frontend (served at /). Artist catalog is cached in the browser for 24h.
+// --------------------------------------------------------------------------- //
+const PAGE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Zing — Jewish Music</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <meta name="theme-color" content="#0a0a12" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400..700,0..1,0&display=block" rel="stylesheet" />
+  <style>
+    :root{
+      color-scheme: dark;
+      --bg:#0a0a12; --bg-2:#0f0f1b; --surface:#161627; --surface-2:#1e1e34; --surface-3:#262640;
+      --text:#f4f4fb; --muted:#9aa0c0; --line:rgba(255,255,255,.08);
+      --accent:#7c5cff; --accent-2:#ff4d8d; --ok:#34d399; --err:#fb7185; --warn:#fbbf24;
+      --grad:linear-gradient(135deg,var(--accent),var(--accent-2));
+      --font:"Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --tabs-h:64px; --player-h:66px;
+      --bar:rgba(10,10,18,.82); --bar-player:rgba(20,20,34,.94); --bar-tabs:rgba(14,14,24,.96); --ovl-bg:rgba(10,10,18,.97);
+    }
+    :root[data-theme="light"]{
+      color-scheme: light;
+      --bg:#f4f4fb; --bg-2:#ececf4; --surface:#ffffff; --surface-2:#f1f1f8; --surface-3:#e7e7f1;
+      --text:#191933; --muted:#6a6a86; --line:rgba(0,0,0,.10);
+      --bar:rgba(255,255,255,.85); --bar-player:rgba(255,255,255,.95); --bar-tabs:rgba(255,255,255,.96); --ovl-bg:rgba(247,247,251,.98);
+    }
+    *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html,body{ height:100%; margin:0; }
+    body{
+      font-family:var(--font); color:var(--text);
+      background:
+        radial-gradient(1000px 520px at 12% -8%, rgba(124,92,255,.18), transparent 60%),
+        radial-gradient(900px 460px at 100% 0%, rgba(255,77,141,.12), transparent 55%),
+        var(--bg);
+      min-height:100%;
+    }
+    /* Icons: inline SVG always works; once Google's Material Symbols font is
+       confirmed loaded we upgrade to its modern glyphs (html.symbols). */
+    .ms{ display:inline-grid; place-items:center; width:1em; height:1em; font-size:24px; line-height:1; flex:none; vertical-align:middle; overflow:hidden; }
+    html.symbols .ms{ overflow:visible; }
+    .ms > svg{ width:1em; height:1em; fill:currentColor; display:block; }
+    html.symbols .ms{ font-family:'Material Symbols Rounded'; font-weight:normal; font-style:normal; letter-spacing:normal;
+      text-transform:none; white-space:nowrap; direction:ltr; width:auto; height:auto; -webkit-font-smoothing:antialiased;
+      font-variation-settings:'FILL' 0,'wght' 500,'GRAD' 0,'opsz' 24; }
+    html.symbols .ms::before{ content:attr(data-ic); }
+    html.symbols .ms > svg{ display:none; }
+    html.symbols .ms.fill{ font-variation-settings:'FILL' 1,'wght' 500,'GRAD' 0,'opsz' 24; }
+
+    /* Top bar */
+    .top{ position:sticky; top:env(safe-area-inset-top,0px); z-index:30;
+      display:flex; align-items:center; gap:12px; padding:13px 18px;
+      background:var(--bar); backdrop-filter:blur(14px); border-bottom:1px solid var(--line); }
+    .brand{ display:flex; align-items:center; gap:10px; }
+    .logo{ width:36px; height:36px; border-radius:11px; display:grid; place-items:center; background:var(--grad);
+      box-shadow:0 6px 16px rgba(124,92,255,.45); }
+    .logo .ms{ font-size:22px; color:#fff; }
+    .brand .name{ font-weight:800; font-size:1.2rem; letter-spacing:.3px; }
+    .top .spacer{ flex:1; }
+    .iconbtn{ width:40px; height:40px; border-radius:11px; border:none; background:transparent; color:var(--muted);
+      display:grid; place-items:center; cursor:pointer; }
+    .iconbtn:hover{ background:var(--surface-2); color:var(--text); }
+    .iconbtn .ms{ font-size:24px; }
+    [hidden]{ display:none !important; }
+
+    .wrap{ max-width:1000px; margin:0 auto; padding:14px 0 calc(var(--tabs-h) + var(--player-h) + 24px + env(safe-area-inset-bottom,0px)); }
+    .pad{ padding-left:18px; padding-right:18px; }
+
+    /* Sections + horizontal rows (Zing-style) */
+    .sec{ margin-top:22px; }
+    .sec-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0 18px 12px; }
+    .sec-head h2{ margin:0; font-size:1.15rem; font-weight:800; }
+    .see{ display:inline-flex; align-items:center; gap:2px; color:var(--muted); font-size:.85rem; cursor:pointer; background:none; border:none; }
+    .see:hover{ color:var(--text); }
+    .see .ms{ font-size:18px; }
+    .hrow{ display:flex; gap:14px; overflow-x:auto; padding:2px 18px 6px; scroll-snap-type:x proximity; -webkit-overflow-scrolling:touch; }
+    .hrow::-webkit-scrollbar{ height:0; }
+    .hcard{ flex:0 0 auto; width:150px; scroll-snap-align:start; cursor:pointer; }
+    .hcard.artist{ width:120px; text-align:center; }
+    .hcard.wide{ width:200px; }
+    .banner-card{ flex:0 0 auto; width:300px; max-width:82vw; aspect-ratio:16/9; border-radius:16px; scroll-snap-align:start; cursor:pointer;
+      background-size:cover; background-position:center; background-color:var(--surface-2); box-shadow:0 8px 22px rgba(0,0,0,.35); }
+
+    .cover{ width:100%; aspect-ratio:1/1; border-radius:14px; display:grid; place-items:center; margin-bottom:9px;
+      color:rgba(255,255,255,.95); box-shadow:0 8px 20px rgba(0,0,0,.3), inset 0 0 40px rgba(0,0,0,.18);
+      overflow:hidden; position:relative; }
+    .cover.round{ border-radius:999px; width:86%; margin:0 auto 9px; }
+    .cover .ini{ font-weight:800; font-size:1.8rem; }
+    .cover .disc{ width:30%; height:30%; border-radius:999px;
+      background:radial-gradient(circle at 50% 50%, #fff 0 13%, rgba(255,255,255,.22) 14% 33%, rgba(0,0,0,.14) 34% 100%); }
+    .c-name{ font-weight:600; font-size:.92rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .c-sub{ color:var(--muted); font-size:.78rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px; }
+    .fab{ position:absolute; right:8px; bottom:8px; width:38px; height:38px; border-radius:999px; background:var(--grad);
+      display:grid; place-items:center; color:#fff; box-shadow:0 8px 16px rgba(0,0,0,.45); opacity:0; transform:translateY(6px);
+      transition:opacity .15s, transform .15s; }
+    .hcard:hover .fab, .tile:hover .fab{ opacity:1; transform:translateY(0); }
+    .hcard, .tile{ transition:transform .12s ease; }
+    .hcard:active, .tile:active{ transform:scale(.96); }
+    .hcard .cover, .tile .cover{ transition:transform .18s ease, box-shadow .18s ease; }
+    .hcard:hover .cover, .tile:hover .cover{ transform:translateY(-2px); box-shadow:0 12px 26px rgba(0,0,0,.4); }
+    .fab .ms{ font-size:22px; }
+
+    /* Grids (see-all pages) */
+    .grid{ display:grid; gap:16px; padding:0 18px; }
+    .grid.artists{ grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
+    .grid.albums{ grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); }
+    .tile{ cursor:pointer; position:relative; }
+    .tile.artist{ text-align:center; }
+
+    /* Search */
+    .searchbar{ display:flex; align-items:center; gap:10px; margin:6px 18px 4px; background:var(--surface); border:1px solid var(--line);
+      border-radius:14px; padding:10px 14px; }
+    .searchbar .ms{ color:var(--muted); font-size:22px; }
+    .searchbar input{ flex:1; min-width:0; background:transparent; border:none; outline:none; color:var(--text); font-family:inherit; font-size:1.02rem; }
+    .searchbar input::placeholder{ color:var(--muted); }
+
+    /* Detail (album/playlist) */
+    .back{ display:inline-flex; align-items:center; gap:4px; cursor:pointer; color:var(--muted); font-size:.92rem; margin:2px 18px 12px; }
+    .back:hover{ color:var(--text); } .back .ms{ font-size:20px; }
+    .hero{ display:flex; gap:18px; align-items:flex-end; margin:0 18px 18px; flex-wrap:wrap; }
+    .hero .cover{ width:150px; height:150px; margin:0; flex:none; }
+    .hero .kicker{ color:var(--muted); font-size:.72rem; letter-spacing:2px; text-transform:uppercase; }
+    .hero h2{ margin:5px 0 6px; font-size:clamp(1.3rem,4.5vw,1.9rem); font-weight:800; text-wrap:balance; }
+    .hero .sub{ color:var(--muted); font-size:.9rem; }
+    .hero .actions{ margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; }
+    .btn{ border:none; cursor:pointer; font-family:inherit; font-weight:700; font-size:.92rem; color:#fff; padding:11px 18px;
+      border-radius:12px; background:var(--grad); box-shadow:0 8px 18px rgba(124,92,255,.32); display:inline-flex; align-items:center; gap:7px; }
+    .btn .ms{ font-size:20px; } .btn:hover{ filter:brightness(1.08); } .btn:active{ transform:translateY(1px); }
+    .btn.ghost{ background:var(--surface-2); color:var(--text); box-shadow:none; border:1px solid var(--line); font-weight:600; }
+    .btn.sm{ padding:8px 13px; font-size:.85rem; }
+
+    .tracks{ margin:0 18px; border:1px solid var(--line); border-radius:16px; overflow:hidden; background:var(--surface); }
+    .track{ display:flex; align-items:center; gap:12px; padding:11px 14px; border-bottom:1px solid var(--line); transition:background .12s; cursor:pointer; }
+    .track:last-child{ border-bottom:none; } .track:hover{ background:var(--surface-2); }
+    .track.playing{ background:linear-gradient(90deg, rgba(124,92,255,.16), transparent); }
+    .track .num{ width:24px; text-align:center; color:var(--muted); font-variant-numeric:tabular-nums; font-size:.9rem; flex:none; }
+    .track.playing .num{ color:var(--accent); }
+    .track .tk{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:.95rem; }
+    .track .tk .sub{ color:var(--muted); font-size:.8rem; }
+    .track .time{ color:var(--muted); font-size:.82rem; font-variant-numeric:tabular-nums; flex:none; }
+    .track .dl{ flex:none; width:38px; height:38px; border-radius:999px; border:none; background:transparent; color:var(--muted); cursor:pointer; display:grid; place-items:center; }
+    .track .dl:hover{ color:#fff; background:var(--grad); } .track .dl .ms{ font-size:20px; }
+
+    .empty{ color:var(--muted); padding:44px 22px; text-align:center; line-height:1.6; }
+    .spinner{ display:inline-block; width:16px; height:16px; border:2px solid var(--muted); border-top-color:transparent; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-3px; margin-right:8px; }
+    @keyframes spin{ to{ transform:rotate(360deg); } }
+    /* Loading skeletons (shimmer) */
+    .skel{ position:relative; overflow:hidden; background:var(--surface-2); border-radius:12px; }
+    .skel::after{ content:""; position:absolute; inset:0; transform:translateX(-100%);
+      background:linear-gradient(90deg,transparent,rgba(255,255,255,.07),transparent); animation:shim 1.35s infinite; }
+    :root[data-theme="light"] .skel::after{ background:linear-gradient(90deg,transparent,rgba(0,0,0,.05),transparent); }
+    @keyframes shim{ 100%{ transform:translateX(100%); } }
+    .sk-card{ width:150px; flex:0 0 auto; }
+    .sk-cover{ width:100%; aspect-ratio:1/1; border-radius:14px; }
+    .sk-line{ height:11px; border-radius:6px; margin-top:9px; } .sk-line.sm{ width:58%; }
+    /* Image fade-in over the gradient placeholder; broken images just fall back */
+    .cvimg{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity .4s ease; }
+    .cvimg.on{ opacity:1; }
+    #status{ min-height:18px; font-size:.9rem; margin:6px 18px; }
+    .ok{ color:var(--ok); } .err{ color:var(--err); } .muted{ color:var(--muted); }
+
+    /* Now-playing bar */
+    .player{ position:fixed; left:0; right:0; bottom:calc(var(--tabs-h) + env(safe-area-inset-bottom,0px)); z-index:35;
+      display:flex; align-items:center; gap:12px; padding:9px 14px;
+      background:var(--bar-player); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
+    .player[hidden]{ display:none; }
+    .np-cover{ width:46px; height:46px; border-radius:10px; flex:none; display:grid; place-items:center; overflow:hidden; box-shadow:inset 0 0 20px rgba(0,0,0,.3); }
+    .np-cover .disc{ width:34%; height:34%; border-radius:999px; background:radial-gradient(circle at 50% 50%,#fff 0 14%,rgba(255,255,255,.22) 15% 33%,rgba(0,0,0,.14) 34% 100%); }
+    .np-meta{ flex:1; min-width:0; }
+    .np-title{ font-weight:700; font-size:.92rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .np-artist{ color:var(--muted); font-size:.78rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .np-btn{ width:40px; height:40px; border-radius:999px; border:none; background:transparent; color:var(--text); cursor:pointer; display:grid; place-items:center; flex:none; }
+    .np-btn:hover{ background:var(--surface-3); } .np-btn .ms{ font-size:24px; }
+    .np-btn.main{ width:46px; height:46px; background:var(--grad); color:#fff; box-shadow:0 6px 16px rgba(124,92,255,.4); }
+    .np-btn.main .ms{ font-size:26px; }
+    .np-seek-wrap{ position:absolute; left:0; right:0; top:-3px; height:3px; }
+    .np-seek{ -webkit-appearance:none; appearance:none; width:100%; height:3px; background:var(--surface-3); outline:none; margin:0; }
+    .np-seek::-webkit-slider-thumb{ -webkit-appearance:none; width:12px; height:12px; border-radius:999px; background:var(--accent); cursor:pointer; }
+    .np-seek::-moz-range-thumb{ width:12px; height:12px; border:none; border-radius:999px; background:var(--accent); }
+    @media (max-width:520px){ .np-btn.prev{ display:none; } }
+
+    /* Now-playing full sheet */
+    .np-art{ width:min(74vw,300px); aspect-ratio:1/1; border-radius:20px; margin:6px auto 18px; display:grid; place-items:center;
+      background-size:cover; background-position:center; box-shadow:0 20px 50px rgba(0,0,0,.5); overflow:hidden; }
+    .np-art .disc{ width:32%; height:32%; border-radius:999px; background:radial-gradient(circle at 50% 50%,#fff 0 13%,rgba(255,255,255,.22) 14% 33%,rgba(0,0,0,.14) 34% 100%); }
+    .np-info{ text-align:center; margin-bottom:14px; }
+    .np-tt{ font-weight:800; font-size:1.3rem; line-height:1.2; word-break:break-word; }
+    .np-prog{ margin:6px 2px 8px; }
+    .np-seek.big{ height:6px; border-radius:999px; }
+    .np-seek.big::-webkit-slider-thumb{ width:15px; height:15px; }
+    .np-times{ display:flex; justify-content:space-between; color:var(--muted); font-size:.74rem; margin-top:5px; }
+    .np-controls{ display:flex; align-items:center; justify-content:center; gap:8px; margin:6px 0 14px; }
+    .np-c{ width:52px; height:52px; border-radius:999px; border:none; background:transparent; color:var(--text); cursor:pointer; display:grid; place-items:center; }
+    .np-c:hover{ background:var(--surface-2); } .np-c .ms{ font-size:30px; }
+    .np-c.play{ width:66px; height:66px; background:var(--grad); color:#fff; box-shadow:0 10px 24px rgba(124,92,255,.45); }
+    .np-c.play .ms{ font-size:34px; }
+    .np-c.on{ color:var(--accent); }
+    .np-controls2{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-6px 0 10px; }
+    .np-c2{ display:inline-flex; align-items:center; gap:3px; border:1px solid var(--line); background:var(--surface-2); color:var(--text);
+      font-family:inherit; font-weight:700; font-size:.85rem; padding:7px 13px; border-radius:999px; cursor:pointer; min-width:54px; justify-content:center; transition:transform .12s ease, border-color .2s ease; }
+    .np-c2:active{ transform:scale(.95); } .np-c2 .ms{ font-size:18px; }
+    .np-vol{ display:flex; align-items:center; gap:10px; margin:0 2px 12px; color:var(--muted); }
+    .np-vol .ms{ font-size:20px; flex:none; } .np-vol .np-seek{ flex:1; }
+    .np-actions{ display:flex; justify-content:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+    .np-seg{ display:flex; width:100%; background:var(--surface-2); border-radius:12px; padding:4px; }
+    .np-seg button{ flex:1; border:none; background:transparent; color:var(--muted); font-family:inherit; font-weight:700; font-size:.86rem; padding:9px 6px; border-radius:9px; cursor:pointer; }
+    .np-seg button.on{ background:var(--grad); color:#fff; }
+    .np-mini{ width:44px; height:44px; border-radius:9px; flex:none; background-size:cover; background-position:center; box-shadow:inset 0 0 16px rgba(0,0,0,.25); }
+    .np-eq{ color:var(--accent); display:grid; place-items:center; } .np-eq .ms{ font-size:22px; }
+
+    /* Bottom tabs */
+    .tabs{ position:fixed; left:0; right:0; bottom:0; z-index:36; height:calc(var(--tabs-h) + env(safe-area-inset-bottom,0px));
+      padding-bottom:env(safe-area-inset-bottom,0px); display:flex; background:var(--bar-tabs); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
+    .tab{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; background:none; border:none; color:var(--muted); cursor:pointer; font-family:inherit; }
+    .tab .ms{ font-size:25px; } .tab span.lbl{ font-size:.66rem; font-weight:600; }
+    .tab.active{ color:var(--text); }
+    .tab.active .ms{ background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
+
+    /* Overlay (lyrics / settings) */
+    .ovl{ position:fixed; inset:0; z-index:60; background:var(--ovl-bg); backdrop-filter:blur(8px); overflow:auto;
+      padding:18px 18px calc(28px + env(safe-area-inset-bottom,0px)); }
+    .ovl .obar{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:16px; position:sticky; top:0; }
+    .ovl h2{ margin:0; font-size:1.2rem; }
+    .ovl pre{ white-space:pre-wrap; font-family:inherit; font-size:1.02rem; line-height:1.8; margin:0; }
+    .banner{ border-radius:14px; padding:13px 15px; margin:0 18px 8px; border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); color:var(--warn); font-size:.9rem; }
+    .banner code{ background:rgba(255,255,255,.1); padding:1px 6px; border-radius:6px; color:var(--text); }
+    .toast{ position:fixed; left:50%; bottom:calc(var(--tabs-h) + var(--player-h) + 12px + env(safe-area-inset-bottom,0px)); transform:translateX(-50%) translateY(14px);
+      background:var(--surface-3); color:var(--text); border:1px solid var(--line); padding:11px 16px; border-radius:12px;
+      box-shadow:0 12px 30px rgba(0,0,0,.5); opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; z-index:70; font-size:.9rem; max-width:88%; text-align:center; }
+    .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+    .chips{ display:flex; gap:8px; padding:0 18px; flex-wrap:wrap; }
+    .chip{ background:var(--surface); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:8px 14px; font-weight:600; font-size:.85rem; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+    .chip .ms{ font-size:18px; }
+    .chip.on{ color:var(--accent); border-color:var(--accent); }
+
+    /* Settings */
+    .set-sec{ margin-top:22px; }
+    .set-sec:first-child{ margin-top:4px; }
+    .set-sec h3{ margin:0 0 10px; font-size:.74rem; letter-spacing:1.6px; text-transform:uppercase; color:var(--muted); }
+    .card{ background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+    .row{ display:flex; align-items:center; gap:12px; padding:13px 15px; border-bottom:1px solid var(--line); }
+    .row:last-child{ border-bottom:none; }
+    .arow{ display:flex; align-items:center; gap:4px; padding:12px 12px; cursor:pointer; border-bottom:1px solid var(--line); transition:background .12s; }
+    .arow:last-child{ border-bottom:none; }
+    .arow:active{ background:var(--surface-2); }
+    .arow .aic{ width:38px; height:38px; border-radius:11px; background:var(--surface-3); display:grid; place-items:center; flex:none; margin-right:12px; color:var(--accent); }
+    .arow .ms svg{ width:22px; height:22px; }
+    .abadge{ display:inline-block; min-width:18px; text-align:center; background:var(--accent); color:#fff; border-radius:999px; font-size:.68rem; font-weight:800; padding:1px 6px; margin-left:6px; vertical-align:1px; }
+    .row .rlabel{ flex:1; min-width:0; }
+    .row .rlabel .rt{ font-weight:600; font-size:.98rem; }
+    .row .rlabel .rd{ color:var(--muted); font-size:.8rem; margin-top:2px; }
+    .row .ms{ color:var(--muted); font-size:22px; flex:none; }
+    .seg{ display:inline-flex; background:var(--surface-3); border-radius:11px; padding:3px; flex:none; }
+    .seg button{ border:none; background:transparent; color:var(--muted); font-family:inherit; font-weight:600; font-size:.86rem; padding:7px 13px; border-radius:9px; cursor:pointer; }
+    .seg button.on{ background:var(--grad); color:#fff; box-shadow:0 4px 10px rgba(124,92,255,.35); }
+    .field{ width:100%; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:var(--bg-2); color:var(--text); font-size:1rem; font-family:inherit; outline:none; }
+    .field:focus{ border-color:var(--accent); }
+    .code-item{ display:flex; align-items:center; gap:12px; padding:12px 15px; border-bottom:1px solid var(--line); }
+    .code-item:last-child{ border-bottom:none; }
+    .code-item .ci-name{ font-weight:600; font-size:.96rem; }
+    .code-item .ci-code{ color:var(--muted); font-size:.82rem; margin-top:1px; }
+    .trash{ margin-left:auto; width:38px; height:38px; border-radius:999px; border:none; background:transparent; color:var(--muted); cursor:pointer; display:grid; place-items:center; flex:none; }
+    .trash:hover{ background:rgba(251,113,133,.14); color:var(--err); } .trash .ms{ font-size:20px; }
+    .set-sec code, .card code{ background:var(--surface-3); padding:1px 6px; border-radius:6px; font-size:.86em; color:var(--text); }
+    .steps{ margin:0; padding-left:20px; line-height:1.85; } .steps li{ margin-bottom:6px; }
+
+    /* ---------- Visual polish ---------- */
+    @keyframes fadeUp{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:none; } }
+    .sec, .hero, .grid, .tracks.solo{ animation:fadeUp .36s cubic-bezier(.2,.7,.3,1) both; }
+    .sec:nth-child(2){ animation-delay:.03s; } .sec:nth-child(3){ animation-delay:.06s; }
+    .sec:nth-child(4){ animation-delay:.09s; } .sec:nth-child(5){ animation-delay:.12s; } .sec:nth-child(6){ animation-delay:.15s; }
+    /* accent bar before section titles */
+    .sec-head h2{ position:relative; padding-left:13px; }
+    .sec-head h2::before{ content:""; position:absolute; left:0; top:51%; transform:translateY(-50%); width:4px; height:17px; border-radius:3px; background:var(--grad); }
+    /* cover art gently zooms on hover */
+    .hcard .cvimg, .tile .cvimg{ transition:opacity .4s ease, transform .55s cubic-bezier(.2,.7,.3,1); }
+    .hcard:hover .cvimg, .tile:hover .cvimg{ transform:scale(1.07); }
+    /* richer press / hover feedback */
+    .btn{ transition:transform .12s ease, box-shadow .2s ease, filter .2s ease; }
+    .btn:hover{ filter:brightness(1.06); } .btn:active{ transform:scale(.97); }
+    .chip{ transition:transform .12s ease, border-color .2s ease, background .2s ease, color .2s ease; }
+    .chip:hover{ border-color:var(--accent); } .chip:active{ transform:scale(.95); }
+    .iconbtn{ transition:background .18s ease, color .18s ease, transform .12s ease; } .iconbtn:active{ transform:scale(.9); }
+    .track:active, .arow:active, .row:active, .code-item:active{ background:var(--surface-2); }
+    .see:active{ transform:scale(.95); }
+    /* logo sheen */
+    .logo{ position:relative; overflow:hidden; }
+    .logo::after{ content:""; position:absolute; inset:0; background:linear-gradient(120deg,transparent 42%,rgba(255,255,255,.4) 50%,transparent 58%); transform:translateX(-130%); animation:sheen 6s ease-in-out infinite; }
+    @keyframes sheen{ 0%,72%{ transform:translateX(-130%); } 88%,100%{ transform:translateX(130%); } }
+    /* softer, deeper card shadows */
+    .card{ box-shadow:0 1px 2px rgba(0,0,0,.04); transition:border-color .2s ease, box-shadow .2s ease; }
+    .cover{ box-shadow:0 10px 24px rgba(0,0,0,.34), inset 0 0 40px rgba(0,0,0,.16); }
+    .empty{ font-size:.96rem; }
+    @media (prefers-reduced-motion: reduce){ *{ transition:none !important; animation-duration:.01ms !important; } }
+
+.workspace-banner{margin:20px 18px;padding:24px;border:1px solid var(--line);border-radius:22px;background:linear-gradient(135deg,var(--surface-2),var(--surface))}.workspace-banner h2{font-size:clamp(1.5rem,4vw,2.2rem);margin:6px 0 10px;letter-spacing:-.04em}.workspace-banner p{line-height:1.6;margin:0 0 12px}.workspace-banner .chips{padding:0}.library-tools{margin:12px 18px}.library-tile{text-align:left;color:var(--text);background:none;border:0;font:inherit;cursor:pointer;padding:0}.library-tile .kicker{margin-top:6px;font-size:.65rem}.tab{min-width:0;padding:0 2px}.tab .lbl{font-size:.63rem}button:disabled{opacity:.3;cursor:default}html[data-density="compact"] .track{min-height:46px;padding-top:5px;padding-bottom:5px}html[data-motion="reduced"] *,html[data-motion="reduced"] *::before{animation:none!important;transition:none!important;scroll-behavior:auto!important}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}@media(max-width:480px){.workspace-banner{padding:18px}.track .iconbtn{width:30px;min-width:30px}.seg{flex-wrap:wrap}.row{flex-wrap:wrap;gap:10px}}
+
+.eq-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:18px 0}.eq-band{padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}.eq-band label,.eq-band output{display:block;font-size:.85rem}.eq-band input{width:100%;accent-color:var(--accent);margin:16px 0}.mix-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 18px 22px}.mix-card{padding:22px;text-align:left;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,var(--surface-3),var(--surface));color:var(--text);font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:10px;min-height:180px}.mix-card strong{font-size:1.4rem}.mix-card span:not(.kicker),.mix-card small{color:var(--muted);line-height:1.5}.track[hidden]{display:none!important}@media(min-width:700px){.eq-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:480px){.mix-grid{gap:10px}.mix-card{padding:16px}.mix-card strong{font-size:1.1rem}}
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div class="brand"><span class="logo"><span class="ms">music_note</span></span><span class="name">Zing</span></div>
+    <div class="spacer"></div>
+    <span class="muted" id="cfgBadge" style="font-size:.72rem"></span>
+    <button class="iconbtn" title="Search" onclick="go('search')"><span class="ms">search</span></button>
+    <button class="iconbtn" title="My Music" onclick="browseLibrary()"><span class="ms">favorite</span></button>
+    <button class="iconbtn" id="meAvatar" title="You" onclick="openSettings()" hidden style="padding:0"><img id="meImg" alt="" style="width:30px;height:30px;border-radius:999px;object-fit:cover" /></button>
+    <button class="iconbtn" title="Settings" onclick="openSettings()"><span class="ms">settings</span></button>
+  </div>
+
+  <div class="wrap">
+    <div class="banner" id="cfgBanner" hidden>
+      Not configured yet. Add your <code>API_URL</code>, <code>AUDIO_API_BASE</code> and a token / auto-login, then reload.
+    </div>
+    <div id="status"></div>
+    <div id="view"></div>
+  </div>
+
+  <!-- Now playing -->
+  <div class="player" id="player" hidden>
+    <div class="np-seek-wrap"><input type="range" class="np-seek" id="seek" min="0" max="1000" value="0" /></div>
+    <div class="np-cover" id="npCover"><span class="disc"></span></div>
+    <div class="np-meta" onclick="openNowPlaying()"><div class="np-title" id="npTitle">—</div><div class="np-artist" id="npArtist"></div></div>
+    <button class="np-btn prev" title="Previous" onclick="prevTrack()"><span class="ms">skip_previous</span></button>
+    <button class="np-btn main" id="playBtn" title="Play/Pause" onclick="togglePlay()"><span class="ms">play_arrow</span></button>
+    <button class="np-btn" title="Next" onclick="nextTrack()"><span class="ms">skip_next</span></button>
+    <button class="np-btn" id="npDl" title="Download" onclick="dlCurrent()"><span class="ms">download</span></button>
+  </div>
+
+  <!-- Bottom tabs -->
+  <nav class="tabs">
+    <button class="tab active" id="tabHome" onclick="go('home')"><span class="ms">home</span><span class="lbl">Home</span></button>
+    <button class="tab" id="tabAlbums" onclick="go('albums')"><span class="ms">album</span><span class="lbl">Albums</span></button>
+    <button class="tab" id="tabSearch" onclick="go('search')"><span class="ms">search</span><span class="lbl">Search</span></button>
+    <button class="tab" id="tabGenres" onclick="go('genres')"><span class="ms">category</span><span class="lbl">Genres</span></button>
+    <button class="tab" id="tabPlaylists" onclick="go('playlists')"><span class="ms">featured_play_list</span><span class="lbl">Playlists</span></button>
+    <button class="tab" id="tabLibrary" onclick="browseLibrary()"><span class="ms">favorite</span><span class="lbl">Library</span></button>
+    <button class="tab" id="tabArtists" onclick="go('artists')"><span class="ms">artist</span><span class="lbl">Artists</span></button>
+  </nav>
+
+  <audio id="audio" preload="none"></audio>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    var artists=[], artistsLoaded=false;
+    var CACHE_KEY="zing_artists_cache_v2", CACHE_TTL=3600000;
+    var queue=[], qi=-1;
+    var curTab="home", _dirtyView=false, _admPw="";
+
+    // ---------- App settings (saved on this device) ----------
+    var SET_KEY="zing_settings";
+    function loadSettings(){ var d={lang:"en",theme:"dark",autoplay:true,radio:true,speed:1,skip:15,resume:true,fade:false,vol:1};
+      try{ var o=JSON.parse(localStorage.getItem(SET_KEY)||"null"); if(o){ if(o.lang==="he")d.lang="he"; if(o.theme==="light")d.theme="light"; if(o.autoplay===false)d.autoplay=false; if(o.radio===false)d.radio=false;
+        if([0.75,1,1.25,1.5,1.75,2].indexOf(o.speed)>=0)d.speed=o.speed; if([10,15,30].indexOf(o.skip)>=0)d.skip=o.skip; if(o.resume===false)d.resume=false; if(o.fade===true)d.fade=true; if(typeof o.vol==="number"&&o.vol>=0&&o.vol<=1)d.vol=o.vol; } }catch(e){}
+      return d; }
+    var SET=loadSettings();
+    function saveSettings(){ try{ localStorage.setItem(SET_KEY, JSON.stringify(SET)); }catch(e){} }
+    function applyTheme(){ document.documentElement.setAttribute("data-theme", SET.theme); }
+    applyTheme();
+
+    // Admin-controlled site settings (shared for everyone; loaded from the server).
+    var CFG_FEATURES=["banners","albums","popular","search","genres","categories","playlists","artists","stories","downloads","favorites"];
+    var CFG_ACCENTS={purple:["#7c5cff","#ff4d8d"],blue:["#3b82f6","#06b6d4"],green:["#10b981","#34d399"],red:["#ef4444","#f97316"],gold:["#f59e0b","#fbbf24"],teal:["#14b8a6","#22d3ee"]};
+    var CFG={appName:"",announcement:"",theme:"",lang:"",accent:"",features:{},featured:[],hidden:[]};
+    CFG_FEATURES.forEach(function(k){ CFG.features[k]=true; });
+    var _setSaved=false; try{ _setSaved=!!localStorage.getItem(SET_KEY); }catch(e){}
+    function feat(k){ return CFG.features[k]!==false; }
+    function isHidden(id){ return CFG.hidden&&CFG.hidden.indexOf(Number(id))>=0; }
+    function isFeatured(id){ return CFG.featured&&CFG.featured.indexOf(Number(id))>=0; }
+    function dropHidden(list){ if(!CFG.hidden||!CFG.hidden.length) return list||[]; return (list||[]).filter(function(a){ return a&&!isHidden(a.id); }); }
+    function applyConfig(c){
+      c=c||{}; CFG.appName=(typeof c.appName==="string"?c.appName:""); CFG.announcement=(typeof c.announcement==="string"?c.announcement:"");
+      CFG.theme=(c.theme==="dark"||c.theme==="light")?c.theme:""; CFG.lang=(c.lang==="en"||c.lang==="he")?c.lang:""; CFG.accent=(c.accent&&CFG_ACCENTS[c.accent])?c.accent:"";
+      var f=(c.features&&typeof c.features==="object")?c.features:{}; CFG_FEATURES.forEach(function(k){ CFG.features[k]=f[k]!==false; });
+      CFG.featured=Array.isArray(c.featured)?c.featured.map(Number):[]; CFG.hidden=Array.isArray(c.hidden)?c.hidden.map(Number):[];
+      // Accent color (whole app + gradients follow --accent / --accent-2).
+      var rs=document.documentElement.style;
+      if(CFG.accent){ rs.setProperty("--accent",CFG_ACCENTS[CFG.accent][0]); rs.setProperty("--accent-2",CFG_ACCENTS[CFG.accent][1]); }
+      else { rs.removeProperty("--accent"); rs.removeProperty("--accent-2"); }
+      // Admin defaults for theme/language apply only if this device has not chosen its own.
+      if(!_setSaved){ if(CFG.theme){ SET.theme=CFG.theme; applyTheme(); } if(CFG.lang){ SET.lang=CFG.lang; } }
+      var bn=document.querySelector(".brand .name"); if(bn) bn.textContent=CFG.appName||"Zing";
+      try{ document.title=(CFG.appName||"Zing")+" — Jewish Music"; }catch(e){}
+      var tabMap={tabAlbums:"albums",tabSearch:"search",tabGenres:"genres",tabPlaylists:"playlists",tabArtists:"artists"};
+      Object.keys(tabMap).forEach(function(id){ var el=$(id); if(el) el.style.display=feat(tabMap[id])?"":"none"; });
+      var favBtn=document.querySelector('.iconbtn[title="My Music"]'); if(favBtn) favBtn.style.display=feat("favorites")?"":"none";
+      var srchBtn=document.querySelector('.iconbtn[title="Search"]'); if(srchBtn) srchBtn.style.display=feat("search")?"":"none";
+      var npdl=$("npDl"); if(npdl) npdl.style.display=feat("downloads")?"":"none";
+      var ann=$("annBanner");
+      if(CFG.announcement){ if(!ann){ ann=document.createElement("div"); ann.id="annBanner"; ann.className="banner"; ann.style.marginTop="10px"; var st=$("status"); if(st&&st.parentNode) st.parentNode.insertBefore(ann, st); } ann.textContent=CFG.announcement; ann.hidden=false; }
+      else if(ann){ ann.hidden=true; }
+    }
+    function loadConfig(){ return fetch("/api/config").then(function(r){return r.json();}).then(function(c){ applyConfig(c); }).catch(function(){}); }
+    var ME={admin:false,user:null};
+    function dlAllowed(){ return feat("downloads") && !(ME.user && ME.user.nodl); }
+    function loadMe(){ return fetch("/api/me").then(function(r){return r.json();}).then(function(d){
+      if(d&&d.otherDevice){ showTakeover(); return; }
+      hideTakeover();
+      ME.admin=!!(d&&d.admin); ME.user=(d&&d.user)||null;
+      if(ME.user&&ME.user.photo&&/^data:image/.test(ME.user.photo)){ var a=$("meAvatar"),im=$("meImg"); if(im) im.src=ME.user.photo; if(a) a.hidden=false; }
+      updateCfgBanner(); if(ME.admin) loadPending();
+      var np=$("npDl"); if(np) np.style.display=dlAllowed()?"":"none";
+      // Re-render the current view only when the download permission actually
+      // changes — never on every poll (that would bounce you off your page) and
+      // never away from where you are (we re-apply the saved route in place).
+      var dl=dlAllowed();
+      if(_dlState!==null && _dlState!==dl){ try{ restoreRoute(); }catch(e){} }
+      _dlState=dl;
+    }).catch(function(){}); }
+    var _dlState=null;
+    function loadPending(){ fetch("/api/pending").then(function(r){return r.json();}).then(function(d){ var n=(d&&d.pending)||0;
+      var g=document.querySelector('.iconbtn[title="Settings"]'); if(!g) return; g.style.position="relative"; var b=$("pendBadge");
+      if(n>0){ if(!b){ b=document.createElement("span"); b.id="pendBadge"; b.style.cssText="position:absolute;top:3px;right:3px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--err);color:#fff;font-size:.62rem;font-weight:800;display:grid;place-items:center"; g.appendChild(b); } b.textContent=n; b.hidden=false; }
+      else if(b){ b.hidden=true; } }).catch(function(){}); }
+    // Live presence: tell the server what this device is doing, so the owner can see who is on.
+    var _cid=""; try{ _cid=localStorage.getItem("zing_cid")||""; if(!_cid){ _cid=Date.now().toString(36)+Math.random().toString(36).slice(2,8); localStorage.setItem("zing_cid",_cid); } }catch(e){ _cid="c"+Math.random().toString(36).slice(2,10); }
+    var _activity="Home";
+    function setActivity(a){ _activity=a||""; sendPresence(); }
+    function sendPresence(){ fetch("/api/presence",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cid:_cid,view:_activity})}).catch(function(){}); }
+
+    function $(id){ return document.getElementById(id); }
+    function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
+    var ICONS={
+      star:"M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z",
+      star_border:"M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28z",
+      visibility:"M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
+      volume_up:"M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z",
+      speed:"M20.38 8.57l-1.23 1.85a8 8 0 0 1-.22 7.58H5.07A8 8 0 0 1 15.58 6.85l1.85-1.23A10 10 0 0 0 3.35 19a2 2 0 0 0 1.72 1h13.85a2 2 0 0 0 1.74-1 10 10 0 0 0-.27-10.44zm-9.79 6.84a2 2 0 0 0 2.83 0l5.66-8.49-8.49 5.66a2 2 0 0 0 0 2.83z",
+      fast_rewind:"M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z",
+      fast_forward:"M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z",
+      visibility_off:"M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78 3.15 3.15.02-.16c0-1.66-1.34-3-3-3z",
+      music_note:"M12 3v10.55A4 4 0 1 0 14 17V7h4V3z",
+      settings:"M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
+      chevron_right:"M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
+      home:"M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z",
+      search:"M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z",
+      category:"M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z",
+      featured_play_list:"M3 10h11v2H3v-2zm0-4h11v2H3V6zm0 8h7v2H3v-2zm13-1v6l5-3-5-3z",
+      artist:"M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z",
+      album:"M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm0-5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z",
+      favorite:"M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z",
+      favorite_border:"M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z",
+      play_arrow:"M8 5v14l11-7z",
+      pause:"M6 5h4v14H6zm8 0h4v14h-4z",
+      skip_previous:"M6 6h2v12H6zm3.5 6 8.5 6V6z",
+      skip_next:"M16 6h2v12h-2zM6 18l8.5-6L6 6z",
+      shuffle:"M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z",
+      repeat:"M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z",
+      repeat_one:"M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z",
+      history:"M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
+      graphic_eq:"M7 18h2V6H7v12zm4 4h2V2h-2v20zm-8-8h2v-4H3v4zm12 4h2V6h-2v12zm4-8v4h2v-4h-2z",
+      queue_music:"M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z",
+      bedtime:"M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
+      more_vert:"M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
+      playlist_add:"M14 10H2v2h12v-2zm0-4H2v2h12V6zM2 16h8v-2H2v2zm19-6-1.41-1.41L16 12.17V4h-2v8.17l-3.59-3.58L9 10l5 5 5-5z",
+      download:"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
+      arrow_back_ios_new:"M17.77 3.77 16 2 6 12l10 10 1.77-1.77L9.54 12z",
+      close:"M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+      delete:"M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+      person_add:"M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-1V8H4v3H1v2h3v3h2v-3h3v-2H6zm9 3c-2.67 0-8 1.34-8 4v3h16v-3c0-2.66-5.33-4-8-4z",
+      logout:"M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4z",
+      lock:"M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"
+    };
+    // Each icon carries both an inline SVG (always renders) and its Material
+    // Symbols name in data-ic (used once the font loads, via CSS ::before).
+    function ic(n){ return '<span class="ms" data-ic="'+n+'"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="'+(ICONS[n]||ICONS.play_arrow)+'"></path></svg></span>'; }
+    function hydrateIcons(root){ (root||document).querySelectorAll("span.ms:not([data-ic])").forEach(function(el){ el.outerHTML = ic(el.textContent.trim()); }); }
+    // Upgrade to Google's Material Symbols glyphs only once they REALLY render.
+    // We measure a known ligature: with the icon font, "home" collapses to one
+    // narrow square glyph; without it, the four letters are much wider. This
+    // way a blocked or slow font never leaves raw words on screen.
+    function symbolsRender(){ try{ var s=document.createElement("span");
+      s.textContent="home"; s.style.cssText="position:absolute;left:-9999px;top:-9999px;font-size:48px;line-height:1;white-space:nowrap;font-family:'Material Symbols Rounded'";
+      document.body.appendChild(s); var wIcon=s.offsetWidth; s.style.fontFamily="monospace"; var wMono=s.offsetWidth; document.body.removeChild(s);
+      return wIcon>0 && wMono>0 && wIcon < wMono*0.6; }catch(e){ return false; } }
+    function tryEnableSymbols(){ if(document.documentElement.classList.contains("symbols")) return true; if(symbolsRender()){ document.documentElement.classList.add("symbols"); return true; } return false; }
+    (function(){ try{
+      var tries=0, timer=setInterval(function(){ tries++; if(tryEnableSymbols()||tries>20) clearInterval(timer); }, 250);
+      if(document.fonts&&document.fonts.load){ document.fonts.load('24px "Material Symbols Rounded"').then(tryEnableSymbols).catch(function(){}); }
+    }catch(e){} })();
+    function hash(s){ var h=0; s=s||"?"; for(var i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; } return h; }
+    function grad(name){ var h=hash(name); var a=h%360; var b=(a+45+(h>>3)%70)%360; return "linear-gradient(135deg, hsl("+a+",72%,56%), hsl("+b+",70%,44%))"; }
+    function ini(name){ var p=(name||"?").trim().split(/\\s+/).filter(Boolean); if(!p.length) return "?"; return (p.length===1?p[0].slice(0,2):(p[0][0]+p[1][0])).toUpperCase(); }
+    function fmt(sec){ if(!isFinite(sec)||sec<0) sec=0; var m=Math.floor(sec/60), s=Math.floor(sec%60); return m+":"+(s<10?"0":"")+s; }
+    function pick(en,he){ if(SET.lang==="he"){ return he||en||""; } return en||he||""; }
+    function trackName(t){ return (pick(t.enName,t.heName)||(t.file||"").split("/").pop()||("Track "+t.id)); }
+    function albName(al){ return (pick(al.enName,al.heName)||"Unknown Album"); }
+    function artNames(list){ return (list||[]).map(function(a){return pick(a.enName,a.heName)||"Unknown";}).join(", "); }
+    function plName(p){ return pick(p.enName||p.name, p.heName)||"Playlist"; }
+    function genName(g){ return pick(g.enName,g.heName)||"Genre"; }
+    function albImg(al){ var im=al&&al.images; return (im && (im.cdnMedium||im.medium||im.cdnSmall||im.small))||null; }
+    function imgUrl(v){ return (typeof v==="string" && /^https?:\\/\\//.test(v)) ? v : null; }
+
+    function setStatus(h,c){ $("status").innerHTML=h||""; $("status").className=c||""; }
+    function loading(m){ setStatus('<span class="spinner"></span>'+m,"muted"); }
+    var toastT;
+    function toast(m){ var t=$("toast"); t.textContent=m; t.classList.add("show"); clearTimeout(toastT); toastT=setTimeout(function(){ t.classList.remove("show"); }, 2600); }
+    function setView(h){ $("view").innerHTML=h; window.scrollTo({top:0,behavior:"smooth"}); }
+
+    function coverHtml(name,opts){ opts=opts||{}; var cls="cover"+(opts.round?" round":""); var url=imgUrl(opts.img);
+      var fab=opts.fab?'<div class="fab">'+ic("play_arrow")+'</div>':'';
+      var inner=opts.round?'<span class="ini">'+esc(ini(name))+'</span>':'<span class="disc"></span>';
+      // The gradient + initial/disc show first; the real cover fades in over it
+      // when it loads, and a broken image just removes itself (gradient stays).
+      var img=url?'<img class="cvimg" src="'+esc(url)+'" alt="" loading="lazy" onload="this.classList.add(\\'on\\')" onerror="this.remove()" />':'';
+      return '<div class="'+cls+'" style="background:'+grad(name)+'">'+inner+img+fab+'</div>'; }
+
+    // Shimmer skeletons shown while content loads (nicer than a bare spinner).
+    function skCard(){ return '<div class="sk-card"><div class="skel sk-cover"></div><div class="skel sk-line"></div><div class="skel sk-line sm"></div></div>'; }
+    function skRow(n){ var s=""; for(var i=0;i<(n||6);i++) s+=skCard(); return '<div class="hrow">'+s+'</div>'; }
+    function skGrid(n){ var s=""; for(var i=0;i<(n||9);i++) s+='<div class="tile"><div class="skel sk-cover"></div><div class="skel sk-line"></div><div class="skel sk-line sm"></div></div>'; return '<div class="grid albums">'+s+'</div>'; }
+    function skSec(title,n){ return '<div class="sec">'+secHead(title)+skRow(n)+'</div>'; }
+    function skHome(){ return '<div class="sec" style="margin-top:12px"><div class="skel" style="height:150px;border-radius:16px;margin:0 18px"></div></div>'+skSec("New Releases")+skSec("Popular this month"); }
+    function skTiles(n){ var s=""; for(var i=0;i<(n||9);i++) s+='<div class="tile"><div class="skel sk-cover"></div><div class="skel sk-line"></div><div class="skel sk-line sm"></div></div>'; return s; }
+    function skDetail(){ return '<div class="hero" style="margin-top:8px"><div class="skel" style="width:150px;height:150px;border-radius:16px;flex:none"></div><div style="flex:1;min-width:160px"><div class="skel sk-line" style="width:40%;height:9px"></div><div class="skel sk-line" style="width:75%;height:22px;margin-top:12px"></div><div class="skel sk-line sm" style="margin-top:10px"></div></div></div>'+
+      '<div style="margin:6px 18px">'+function(){ var r=""; for(var i=0;i<7;i++) r+='<div class="skel sk-line" style="height:40px;margin-top:10px;border-radius:12px"></div>'; return r; }()+'</div>'; }
+
+    function post(path,payload){
+      return fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload||{})})
+        .then(function(res){ return res.json().catch(function(){return {};}).then(function(d){
+          if(res.status===401&&d.needLogin){ location.href="/"; throw new Error("Please log in."); }
+          if(!res.ok) throw new Error(d.error||("Request failed ("+res.status+")")); return d; }); });
+    }
+    function gql(query,vars){
+      return fetch("/api/query",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:query,variables:vars||{}})})
+        .then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); })
+        .then(function(d){ if(d&&d.errors&&d.errors.length) throw new Error(d.errors[0].message||"query error"); return (d&&d.data)||{}; });
+    }
+    // Authenticated GraphQL (attaches the login token) for per-account actions.
+    function agql(query,vars){
+      return fetch("/api/authquery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:query,variables:vars||{}})})
+        .then(function(r){ if(r.status===401){ location.href="/"; throw new Error("login"); } return r.json(); })
+        .then(function(d){ if(d&&d.errors&&d.errors.length) throw new Error(d.errors[0].message||"query error"); return (d&&d.data)||{}; });
+    }
+    var _profileId=null, _profileTried=false;
+    function ensureProfile(){
+      if(_profileId) return Promise.resolve(_profileId);
+      if(_profileTried) return Promise.resolve(_profileId);
+      return agql("query { profiles { id name } }").then(function(d){ _profileTried=true; var ps=d.profiles||[]; _profileId=ps.length?ps[0].id:null; return _profileId; })
+        .catch(function(){ _profileTried=true; return null; });
+    }
+    function saveArtist(id){ toast("Saving…"); ensureProfile().then(function(pid){
+      var q = pid ? "mutation($a:Int!,$p:Int!){ saveMyArtistToProfile(artistId:$a, profileId:$p){ id } }"
+                  : "mutation($a:Int!){ createOneMyArtist(data:{ artist:{ connect:{ id:$a } } }){ id } }";
+      var v = pid ? {a:Number(id),p:Number(pid)} : {a:Number(id)};
+      agql(q,v).then(function(){ toast("Saved to My Music ♥"); }).catch(function(e){ if(e.message==="login")return; toast("Couldn’t save: "+(e.message||"login not connected")); }); }); }
+    function saveAlbum(id){ toast("Saving…"); ensureProfile().then(function(pid){
+      var q = pid ? "mutation($a:Int!,$p:Int!){ saveMyAlbumToProfile(albumId:$a, profileId:$p){ id } }"
+                  : "mutation($a:Int!){ createOneMyAlbum(data:{ album:{ connect:{ id:$a } } }){ id } }";
+      var v = pid ? {a:Number(id),p:Number(pid)} : {a:Number(id)};
+      agql(q,v).then(function(){ toast("Saved to My Music ♥"); }).catch(function(e){ if(e.message==="login")return; toast("Couldn’t save: "+(e.message||"login not connected")); }); }); }
+
+    var _configured=true;
+    function updateCfgBanner(){ var show=ME.admin && !_configured; var b=$("cfgBanner"); if(b) b.hidden=!show; var bd=$("cfgBadge"); if(bd) bd.textContent=show?"Not configured":""; }
+    function checkStatus(){ fetch("/api/status").then(function(r){return r.json();}).then(function(s){ _configured=!!s.configured; updateCfgBanner(); }).catch(function(){}); }
+
+    function loadCache(){ try{ var o=JSON.parse(localStorage.getItem(CACHE_KEY)||"null"); if(o&&Date.now()-o.t<CACHE_TTL&&o.a&&o.a.length) return o.a; }catch(e){} return null; }
+    function saveCache(a){ try{ localStorage.setItem(CACHE_KEY, JSON.stringify({t:Date.now(),a:a})); }catch(e){} }
+    function refreshArtists(){ return post("/api/artists",{}).then(function(d){ if(d.artists&&d.artists.length){ artists=d.artists; saveCache(artists); } return true; }).catch(function(){ return false; }); }
+    function ensureArtists(){
+      if(artistsLoaded) return Promise.resolve(true);
+      var c=loadCache();
+      if(c){ artists=c; artistsLoaded=true; refreshArtists(); return Promise.resolve(true); } // show cached now, refresh in the background
+      loading("Loading artists…");
+      return post("/api/artists",{}).then(function(d){ artists=d.artists||[]; artistsLoaded=true; saveCache(artists); setStatus(""); return true; })
+        .catch(function(e){ setStatus("Could not load: "+esc(e.message),"err"); return false; });
+    }
+
+    // ---------- Tabs ----------
+    function setTab(id){ ["tabHome","tabAlbums","tabSearch","tabGenres","tabPlaylists","tabArtists","tabLibrary"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
+    var GO_LABEL={home:"Home",albums:"Albums",search:"Searching",genres:"Genres",playlists:"Playlists",artists:"Artists"};
+    function go(where){
+      curTab=where; setActivity(GO_LABEL[where]||"Home"); saveRoute(where);
+      if(where==="home"){ setTab("tabHome"); home(); }
+      else if(where==="albums"){ setTab("tabAlbums"); browseAlbums(); }
+      else if(where==="search"){ setTab("tabSearch"); searchView(); }
+      else if(where==="genres"){ setTab("tabGenres"); browseGenres(); }
+      else if(where==="playlists"){ setTab("tabPlaylists"); browsePlaylists(); }
+      else if(where==="artists"){ setTab("tabArtists"); browseArtists(); }
+    }
+    // Remember where you are so a refresh brings you right back to the same
+    // place instead of jumping to Home.
+    function saveRoute(k,a){ try{ localStorage.setItem("zing_route", JSON.stringify({k:k,a:(a==null?"":a)})); }catch(e){} }
+    function restoreRoute(){ var r=null; try{ r=JSON.parse(localStorage.getItem("zing_route")||"null"); }catch(e){}
+      if(!r||!r.k){ go("home"); return; }
+      var tabs={home:1,albums:1,search:1,genres:1,playlists:1,artists:1};
+      if(tabs[r.k]){ if(r.k==="search"&&r.a){ curTab="search"; setTab("tabSearch"); saveRoute("search",r.a); searchView(); var q=$("q"); if(q){ q.value=r.a; doSearch(r.a); } } else { go(r.k); } return; }
+      var opens={track:openTrackRoute,album:openAlbum,artist:openArtist,playlist:openPlaylist,genre:openGenre,category:openCategory,story:openStory};
+      if(opens[r.k]){ try{ opens[r.k](r.a); }catch(e){ go("home"); } return; }
+      go("home");
+    }
+
+    // ---------- Cards ----------
+    function albumHCard(al, sub){ return '<div class="hcard album" onclick="openAlbum('+al.id+')">'+coverHtml(albName(al),{img:albImg(al),fab:true})+
+      '<div class="c-name">'+esc(albName(al))+'</div><div class="c-sub">'+esc(sub||"")+'</div></div>'; }
+    function artistHCard(a){ var nm=pick(a.enName,a.heName)||"Artist"; return '<div class="hcard artist" onclick="openArtist('+a.id+')">'+coverHtml(nm,{round:true,img:a.image})+
+      '<div class="c-name">'+esc(nm)+'</div></div>'; }
+    function albumTile(al, sub){ return '<div class="tile album" onclick="openAlbum('+al.id+')">'+coverHtml(albName(al),{img:albImg(al),fab:true})+
+      '<div class="c-name">'+esc(albName(al))+'</div><div class="c-sub">'+esc(sub||"")+'</div></div>'; }
+    function artistTile(a){ var nm=pick(a.enName,a.heName)||"Unknown"; var alt=(SET.lang==="he")?(a.enName||""):(a.heName||"");
+      return '<div class="tile artist" onclick="openArtist('+a.id+')">'+coverHtml(nm,{round:true,img:a.image})+
+      '<div class="c-name">'+esc(nm)+'</div><div class="c-sub">'+esc(alt)+'</div></div>'; }
+
+    function secHead(title, seeTab, seeFn){
+      var see = seeFn ? '<button class="see" onclick="'+seeFn+'">See all '+ic("chevron_right")+'</button>'
+        : (seeTab ? '<button class="see" onclick="go(\\''+seeTab+'\\')">See all '+ic("chevron_right")+'</button>' : '');
+      return '<div class="sec-head"><h2>'+esc(title)+'</h2>'+see+'</div>'; }
+
+    // ---------- Home ----------
+    function bannerImg(b){ return (SET.lang==="he") ? (b.heImage||b.enImage) : (b.enImage||b.heImage); }
+    function bannerCard(b){ var u=imgUrl(bannerImg(b)); if(!u) return "";
+      return '<div class="banner-card" onclick="openBannerUrl('+esc(JSON.stringify(b.url||"")).replace(/"/g,"&quot;")+')" style="background-image:url(\\''+esc(u)+'\\')"></div>'; }
+    function openBannerUrl(url){ url=url||""; var m;
+      if((m=url.match(/album[s]?[\\/=](\\d+)/i))){ openAlbum(+m[1]); return; }
+      if((m=url.match(/artist[s]?[\\/=](\\d+)/i))){ openArtist(+m[1]); return; }
+      if((m=url.match(/playlist[s]?[\\/=](\\d+)/i))){ openPlaylist(+m[1]); return; }
+      if(/^https?:/i.test(url)){ window.open(url,"_blank"); } }
+    function home(){
+      setStatus(""); setView(skHome());
+      var pBan=gql("query { banners(take: 15) { id enName heName enImage heImage url index platform } }").then(function(d){ var b=d.banners||[]; b.sort(function(x,y){return (x.index||0)-(y.index||0);}); return b; }).catch(function(){return [];});
+      var pNew=post("/api/new",{}).then(function(d){return d.albums||[];}).catch(function(){return [];});
+      var pPop=gql("query { getMostPlayed(input: { type: ALBUMS, period: MONTH, limit: 12 }) { albumsWithEntities { plays album { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } } }").then(function(d){ return (((d.getMostPlayed||{}).albumsWithEntities)||[]).map(function(x){return x.album;}).filter(Boolean); }).catch(function(){return [];});
+      var pGen=gql("query { genres(take: 20) { id enName heName } }").then(function(d){return d.genres||[];}).catch(function(){return [];});
+      var pCat=gql("query { categories(take: 40) { id enName heName } }").then(function(d){return d.categories||[];}).catch(function(){return [];});
+      var pPl=gql("query { playlists(take: 20) { id name enName heName image cdnImage } }").then(function(d){return d.playlists||[];}).catch(function(){return [];});
+      var pStr=gql("query { stories(take: 15, orderBy: [{ releaseDate: desc }]) { id enName heName imageUrl } }").then(function(d){return d.stories||[];}).catch(function(){return [];});
+      var pFeat=(CFG.featured&&CFG.featured.length)?gql("query { albums(where:{ id:{ in:["+CFG.featured.join(",")+"] } }) { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } }").then(function(d){return d.albums||[];}).catch(function(){return [];}):Promise.resolve([]);
+      Promise.all([pBan,pNew,pPop,pGen,pCat,pPl,pStr,pFeat]).then(function(res){
+        setStatus("");
+        var banners=res[0], albums=dropHidden(res[1]), popular=dropHidden(res[2]), genres=res[3], categories=res[4], playlists=res[5], stories=res[6], featured=res[7]||[];
+        // Keep featured in the admin-chosen order.
+        if(featured.length){ var fm={}; featured.forEach(function(a){fm[a.id]=a;}); featured=CFG.featured.map(function(id){return fm[id];}).filter(Boolean); }
+        window._albums=window._albums||{};
+        var html=libraryHub()+personalMixesHtml();
+        if(banners.length && feat("banners")){
+          var bcards=banners.map(bannerCard).filter(Boolean).join("");
+          if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
+        }
+        if(featured.length){
+          html+='<div class="sec">'+secHead("Featured")+'<div class="hrow">'+featured.map(function(al){ window._albums[al.id]=al;
+            return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
+        }
+        var hist=getHistory();
+        if(hist.length){
+          html+='<div class="sec">'+secHead("Recently played", null, "openHistory()")+'<div class="hrow">'+hist.slice(0,12).map(function(t,i){
+            return '<div class="hcard" onclick="playHistory('+i+')">'+coverHtml(t.title,{img:t.coverImg,fab:true})+'<div class="c-name">'+esc(t.title)+'</div><div class="c-sub">'+esc(t.artist||"")+'</div></div>'; }).join("")+'</div></div>';
+        }
+        var liked=getLiked();
+        if(liked.length){
+          html+='<div class="sec">'+secHead("Liked songs", null, "openLiked()")+'<div class="hrow">'+liked.slice(0,12).map(function(t,i){
+            return '<div class="hcard" onclick="playLiked('+i+')">'+coverHtml(t.title,{img:t.coverImg,fab:true})+'<div class="c-name">'+esc(t.title)+'</div><div class="c-sub">'+esc(t.artist||"")+'</div></div>'; }).join("")+'</div></div>';
+        }
+        var mypl=getPlaylists();
+        if(mypl.length){
+          html+='<div class="sec">'+secHead("Your playlists", null, "openMyPlaylists()")+'<div class="hrow">'+mypl.slice(0,12).map(function(p){
+            return '<div class="hcard" onclick="openMyPlaylist(\\''+p.id+'\\')"><div class="cover" style="background:'+grad(p.name)+';display:grid;place-items:center;color:#fff">'+ic("queue_music")+'</div><div class="c-name">'+esc(p.name)+'</div><div class="c-sub">'+p.tracks.length+' songs</div></div>'; }).join("")+'</div></div>';
+        }
+        if(albums.length && feat("albums")){
+          html+='<div class="sec">'+secHead("New Releases", null, "go('albums')")+'<div class="hrow" id="newRow">'+newRowHtml(albums)+'</div></div>';
+        }
+        if(popular.length && feat("popular")){
+          html+='<div class="sec">'+secHead("Popular this month")+'<div class="hrow">'+popular.map(function(al){ window._albums[al.id]=al;
+            return albumHCard(al, artNames(al.artists)); }).join("")+'</div></div>';
+        }
+        if(genres.length && feat("genres")){
+          html+='<div class="sec">'+secHead("Genres","genres")+'<div class="chips">'+genres.map(function(g){
+            return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div></div>';
+        }
+        if(categories.length && feat("categories")){
+          html+='<div class="sec">'+secHead("Categories")+'<div class="chips">'+categories.map(function(c){
+            return '<button class="chip" onclick="openCategory('+c.id+')">'+esc(genName(c))+'</button>'; }).join("")+'</div></div>';
+        }
+        if(playlists.length && feat("playlists")){
+          html+='<div class="sec">'+secHead("Playlists","playlists")+'<div class="hrow">'+playlists.map(function(p){ var nm=plName(p);
+            return '<div class="hcard" onclick="openPlaylist('+p.id+')">'+coverHtml(nm,{img:p.cdnImage||p.image,fab:true})+'<div class="c-name">'+esc(nm)+'</div><div class="c-sub">Playlist</div></div>'; }).join("")+'</div></div>';
+        }
+        if(stories.length && feat("stories")){
+          html+='<div class="sec">'+secHead("Stories")+'<div class="hrow">'+stories.map(function(s){ var nm=pick(s.enName,s.heName)||"Story";
+            return '<div class="hcard" onclick="openStory('+s.id+')">'+coverHtml(nm,{img:s.imageUrl})+'<div class="c-name">'+esc(nm)+'</div></div>'; }).join("")+'</div></div>';
+        }
+        if(!html) html='<div class="empty">Nothing to show yet. Check Settings.</div>';
+        setView(html);
+      });
+    }
+    // Build the New Releases row and remember the albums shown, so we can tell
+    // when new music has come in.
+    function newRowHtml(albums){ window._albums=window._albums||{}; _newIds=albums.map(function(a){return a.id;}).join(",");
+      return albums.map(function(al){ window._albums[al.id]=al; return albumHCard(al, artNames(al.artists)); }).join(""); }
+    // Auto-refresh: while you're on Home, quietly re-check for new music every
+    // minute and update the New Releases row in place if anything changed.
+    var _newIds="";
+    function refreshNew(){ if(curTab!=="home") return; if(document.hidden) return; var row=$("newRow"); if(!row) return;
+      post("/api/new",{}).then(function(d){ var albums=dropHidden(d.albums||[]); if(!albums.length) return;
+        var ids=albums.map(function(a){return a.id;}).join(",");
+        if(ids!==_newIds){ row.innerHTML=newRowHtml(albums); hydrateIcons(); }
+      }).catch(function(){}); }
+    function openCategory(id){ saveRoute("category",id); setStatus(""); setView(secHead("Category")+'<div class="grid albums">'+skTiles(6)+'</div>');
+      gql("query { category(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
+        var g=d.category; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=function(){ go("home"); };
+        var head='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead(g?genName(g):"Category");
+        if(!albums.length){ setView(head+'<div class="empty">No albums in this category.</div>'); return; }
+        window._albums=window._albums||{}; setView(head+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al, artNames(al.artists)); }).join("")+'</div>');
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+    function openStory(id){ saveRoute("story",id); loading("Loading…");
+      gql("query { story(where:{id:"+Number(id)+"}) { id enName heName imageUrl articles { id enName heName pdfUrl releaseDate index } } }").then(function(d){
+        var s=d.story; setStatus(""); if(!s){ setView('<div class="empty">Story not found.</div>'); return; }
+        var nm=pick(s.enName,s.heName)||"Story"; var arts=(s.articles||[]).slice().sort(function(x,y){return (x.index||0)-(y.index||0);});
+        var back='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>';
+        var rows=arts.map(function(a){ var an=pick(a.enName,a.heName)||("Part "+a.id);
+          return '<div class="track" onclick="openArticle('+esc(JSON.stringify(a.pdfUrl||"")).replace(/"/g,"&quot;")+')"><div class="num">'+ic("featured_play_list")+'</div><div class="tk">'+esc(an)+'</div><div class="dl">'+ic("chevron_right")+'</div></div>'; }).join("");
+        setView(back+'<div class="hero">'+coverHtml(nm,{img:s.imageUrl})+'<div><div class="kicker">Story</div><h2>'+esc(nm)+'</h2><div class="sub">'+arts.length+' parts</div></div></div>'+
+          (arts.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No parts to read yet.</div>'));
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+    function openArticle(pdfUrl){ if(pdfUrl && /^https?:/i.test(pdfUrl)){ window.open(pdfUrl,"_blank"); } else { toast("This part is not available."); } }
+
+    // ---------- Search (real, across songs / albums / artists) ----------
+    var _searchT, _searchSeq=0, _searchTracks=[];
+    function searchView(){
+      setView('<div class="searchbar">'+ic("search")+'<input id="q" type="text" placeholder="Search songs, albums, artists…" autocomplete="off" /></div><div id="sres"></div>');
+      var q=$("q"); q.focus();
+      q.addEventListener("input", function(){ var val=this.value; saveRoute("search",val); clearTimeout(_searchT); _searchT=setTimeout(function(){ doSearch(val); }, 280); });
+      doSearch("");
+    }
+    function nameFilter(){ return "OR:[{enName:{contains:$t,mode:insensitive}},{heName:{contains:$t,mode:insensitive}}]"; }
+    function doSearch(v){
+      var q=(v||"").trim(); var box=$("sres"); if(!box) return;
+      if(!q){ var rs=getRecentQ(); box.innerHTML='<div class="empty">Type to search songs, albums and artists.</div>'+(rs.length?'<div style="padding:0 18px"><div class="muted" style="font-size:.78rem;margin:6px 0">Recent searches <a href="#" onclick="clearRecentQ();return false" style="margin-left:8px">Clear</a></div>'+rs.map(function(x,i){ return '<span class="chip" style="display:inline-block;margin:0 8px 8px 0;padding:7px 13px;border-radius:999px;background:var(--surface-2);cursor:pointer" onclick="pickRecentQ('+i+')">'+esc(x)+'</span>'; }).join("")+'</div>':''); return; }
+      box.innerHTML='<div class="empty"><span class="spinner"></span>Searching…</div>';
+      var seq=++_searchSeq;
+      var query="query($t:String!){"+
+        " artists(take:24, where:{"+nameFilter()+"}){ id enName heName image }"+
+        " albums(take:24, where:{"+nameFilter()+"}){ id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } }"+
+        " tracks(take:30, where:{"+nameFilter()+"}){ id enName heName file duration album { images { cdnSmall cdnMedium medium small } } artists { enName heName } }"+
+        " }";
+      gql(query,{t:q}).then(function(d){
+        if(seq!==_searchSeq) return; // a newer search superseded this one
+        var arts=d.artists||[], albs=d.albums||[], trks=d.tracks||[];
+        window._albums=window._albums||{}; albs.forEach(function(al){ window._albums[al.id]=al; });
+        _searchTracks=trks;
+        if(arts.length||albs.length||trks.length) saveRecentQ(q);
+        if(!arts.length&&!albs.length&&!trks.length){ box.innerHTML='<div class="empty">Nothing found for “'+esc(q)+'”.</div>'; return; }
+        var html="";
+        if(trks.length){
+          html+='<div class="sec">'+secHead("Songs")+'<div class="tracks" style="margin:0 18px">'+trks.map(function(t,i){
+            return '<div class="track" onclick="playSearchTrack('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
+              '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
+              (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
+              dlBtn(t.id,t.file)+'</div>'; }).join("")+'</div></div>';
+        }
+        if(albs.length){
+          html+='<div class="sec">'+secHead("Albums")+'<div class="grid albums">'+albs.map(function(al){ return albumTile(al, artNames(al.artists)); }).join("")+'</div></div>';
+        }
+        if(arts.length){
+          html+='<div class="sec">'+secHead("Artists")+'<div class="grid artists">'+arts.map(artistTile).join("")+'</div></div>';
+        }
+        box.innerHTML=html;
+      }).catch(function(e){ if(seq!==_searchSeq) return; if(e.message==="login")return; box.innerHTML='<div class="empty">Search error: '+esc(e.message)+'</div>'; });
+    }
+    function playSearchTrack(i){ playTracks(_searchTracks||[], i, ""); }
+
+    // ---------- Genres ----------
+    function browseGenres(){ loading("Loading genres…");
+      gql("query { genres(take: 300) { id enName heName } }").then(function(d){ var gs=d.genres||[]; setStatus("");
+        if(!gs.length){ setView('<div class="empty">No genres.</div>'); return; }
+        setView(secHead("Genres")+'<div class="chips">'+gs.map(function(g){ return '<button class="chip" onclick="openGenre('+g.id+')">'+esc(genName(g))+'</button>'; }).join("")+'</div>');
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+    function openGenre(id){ saveRoute("genre",id); setStatus(""); setView(secHead("Genre")+'<div class="grid albums">'+skTiles(6)+'</div>');
+      gql("query { genre(where:{id:"+Number(id)+"}) { id enName heName albums { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){
+        var g=d.genre; var albums=(g&&g.albums)||[]; setStatus(""); window._albumBack=browseGenres;
+        var head='<div class="back" onclick="browseGenres()">'+ic("arrow_back_ios_new")+'Genres</div>'+secHead(g?genName(g):"Genre");
+        if(!albums.length){ setView(head+'<div class="empty">No albums in this genre.</div>'); return; }
+        window._albums=window._albums||{}; setView(head+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al, artNames(al.artists)); }).join("")+'</div>');
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+
+    // ---------- Playlists ----------
+    function browsePlaylists(){ setStatus(""); setView(secHead("Playlists")+'<div class="grid albums">'+skTiles(6)+'</div>');
+      gql("query { playlists(take: 300) { id name enName heName image cdnImage } }").then(function(d){ var ps=d.playlists||[]; setStatus("");
+        if(!ps.length){ setView('<div class="empty">No playlists.</div>'); return; }
+        setView(secHead("Playlists")+'<div class="grid albums">'+ps.map(function(p){ var nm=plName(p);
+          return '<div class="tile album" onclick="openPlaylist('+p.id+')">'+coverHtml(nm,{img:p.cdnImage||p.image,fab:true})+'<div class="c-name">'+esc(nm)+'</div><div class="c-sub">Playlist</div></div>'; }).join("")+'</div>');
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+    function openPlaylist(id){ saveRoute("playlist",id); loading("Loading…");
+      gql("query { playlist(where:{id:"+Number(id)+"}) { id name enName heName image cdnImage playlistTracks { track { id enName heName file duration trackNumber artists { enName heName } } } } }").then(function(d){
+        var p=d.playlist; setStatus("");
+        var tracks=((p&&p.playlistTracks)||[]).map(function(x){return x.track;}).filter(Boolean);
+        var nm=p?plName(p):"Playlist";
+        renderTrackList(nm, tracks.length+" tracks", tracks, browsePlaylists, (p&&(p.cdnImage||p.image)), "Playlist");
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+
+    // ---------- Albums (all, newest first, with load more) ----------
+    var _albPage={skip:0,take:30,loading:false,end:false};
+    function browseAlbums(){
+      _albPage={skip:0,take:30,loading:false,end:false};
+      setView(secHead("Albums")+'<p class="muted" style="margin:-4px 18px 10px">All albums, newest first — old and new together.</p><div id="albGrid" class="grid albums">'+skTiles(9)+'</div><div id="albMore" style="text-align:center;padding:18px"></div>');
+      loadMoreAlbums();
+    }
+    function loadMoreAlbums(){
+      if(_albPage.loading||_albPage.end) return; _albPage.loading=true;
+      var more=$("albMore"); if(more) more.innerHTML='<span class="spinner"></span>Loading…';
+      post("/api/albums",{skip:_albPage.skip,take:_albPage.take}).then(function(d){
+        var raw=d.albums||[]; var got=dropHidden(raw); window._albums=window._albums||{};
+        got.forEach(function(al){ window._albums[al.id]=al; });
+        var grid=$("albGrid"); if(grid){ if(_albPage.skip===0) grid.innerHTML=""; grid.insertAdjacentHTML("beforeend", got.map(function(al){ return albumTile(al, artNames(al.artists)); }).join("")); }
+        _albPage.skip+=raw.length; _albPage.loading=false;
+        if(got.length<_albPage.take){ _albPage.end=true; if(more) more.innerHTML=(_albPage.skip?'<span class="muted">That\\'s everything ('+_albPage.skip+' albums).</span>':'<span class="empty">No albums.</span>'); }
+        else if(more){ more.innerHTML='<button class="btn ghost" onclick="loadMoreAlbums()">Load more</button>'; }
+      }).catch(function(e){ _albPage.loading=false; if(e.message==="login")return; var more=$("albMore"); if(more) more.innerHTML='<span class="err">'+esc(e.message)+'</span>'; });
+    }
+
+    // ---------- Artists ----------
+    var _artistLimit=120,_artistFilter="";
+    function moreArtists(){_artistLimit+=120;var g=$("artGrid");if(g)g.innerHTML=artGridHtml(_artistFilter);}
+    function artGridHtml(q){ q=(q||"").trim().toLowerCase();
+      var list=artists.slice().sort(function(a,b){ return (a.enName||"").localeCompare(b.enName||""); });
+      if(q) list=list.filter(function(a){ return (a.enName||"").toLowerCase().indexOf(q)>=0||(a.heName||"").toLowerCase().indexOf(q)>=0; });
+      var shown=list.slice(0,_artistLimit);
+      return (shown.length?'<div class="grid artists">'+shown.map(artistTile).join("")+'</div>':'<div class="empty">No artists match.</div>')+(list.length>shown.length?'<div class="empty">Showing '+shown.length+' of '+list.length+' artists.<br><button class="btn ghost" onclick="moreArtists()">Load more artists</button></div>':''); }
+    function filterArtists(v){_artistFilter=v;_artistLimit=120; var g=$("artGrid"); if(g) g.innerHTML=artGridHtml(v); }
+    function browseArtists(){_artistFilter="";_artistLimit=120; ensureArtists().then(function(ok){ if(!ok) return;
+      setView(secHead("Artists")+'<div class="searchbar" style="margin:0 18px 12px"><span class="ms">'+ic("search")+'</span><input id="artQ" type="text" placeholder="Find an artist…" autocomplete="off" oninput="filterArtists(this.value)"></div><div id="artGrid">'+artGridHtml("")+'</div>');
+    }); }
+    var _artistTracks=[], _artistSongsFor=0;
+    function artistSongMenu(i){var t=(_artistTracks||[])[i];if(t)songMenu(normTrack(t));}
+    function playArtistTrack(i){ playTracks(_artistTracks||[], i, ""); }
+    function loadArtistSongs(id, more){ var box=$("artSongs"); if(!box) return; if(!more){ _artistTracks=[]; _artistSongsFor=id; box.innerHTML='<div class="empty"><span class="spinner"></span>Loading songs…</div>'; }
+      var skip=_artistTracks.length;
+      gql("query { tracks(take:60, skip:"+skip+", where:{artists:{some:{id:{equals:"+Number(id)+"}}}}) { id enName heName file duration album { images { cdnSmall cdnMedium medium small } } artists { enName heName } } }").then(function(d){
+        if(_artistSongsFor!==id||!$("artSongs")) return; var got=d.tracks||[]; _artistTracks=_artistTracks.concat(got); var b=$("artSongs");
+        if(!_artistTracks.length){ b.innerHTML=''; return; }
+        b.innerHTML=secHead("Songs")+'<div class="tracks" style="margin:0 18px">'+_artistTracks.map(function(t,i){
+          return '<div class="track" onclick="playArtistTrack('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
+            '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
+            (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+dlBtn(t.id,t.file)+'<button class="np-btn" title="Song options" onclick="event.stopPropagation();artistSongMenu('+i+')">'+ic("more_vert")+'</button></div>'; }).join("")+'</div>'+
+          (got.length>=60?'<div style="text-align:center;margin:12px"><button class="btn ghost" onclick="loadArtistSongs('+Number(id)+',true)">Load more songs</button></div>':'');
+      }).catch(function(e){ if(e.message==="login")return; var b=$("artSongs"); if(b&&!more) b.innerHTML=''; });
+    }
+
+    function openArtist(id){ saveRoute("artist",id); setStatus(""); setView(skDetail());
+      post("/api/artist",{id:id}).then(function(d){ var a=d.artist, albums=(a&&a.albums)||[]; window._artistRecords=window._artistRecords||{}; if(a)window._artistRecords[id]=a; setStatus(""); var anm=a?(pick(a.enName,a.heName)||"Artist"):"Artist"; var aalt=a?((SET.lang==="he")?(a.enName||""):(a.heName||"")):""; window._curArtist=anm;
+        var abio=a?(a.bio||pick(a.enDesc,a.heDesc)||""):"";
+        var localActions='<div class="chips" style="margin:12px 18px"><button id="followArtist" class="chip" onclick="followLocalArtist('+Number(id)+')">'+(followedArtist(id)?'Following - unfollow':'Follow artist')+'</button><button class="chip" onclick="sharePage()">Share artist</button></div>';
+      var head='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Back</div>'+
+          '<div class="hero">'+coverHtml(anm,{round:true,img:(a&&a.image)})+'<div><div class="kicker">Artist</div><h2>'+esc(anm)+'</h2>'+(aalt?'<div class="sub">'+esc(aalt)+'</div>':'')+
+            (feat("favorites")&&ME.user?'<div class="actions"><button class="btn ghost sm" onclick="saveArtist('+Number(id)+')">'+ic("favorite_border")+' Save to connected library</button></div>':'')+'</div></div>'+
+          (abio?'<p class="muted" style="margin:-6px 18px 18px;line-height:1.7;font-size:.92rem">'+esc(abio)+'</p>':'');
+        window._albumBack=function(){ openArtist(id); };
+        if(!albums.length){ setView(head+localActions+'<div id="artSongs"></div>'); loadArtistSongs(id); return; }
+        window._albums=window._albums||{}; setView(head+localActions+secHead("Albums")+'<div class="grid albums">'+albums.map(function(al){ window._albums[al.id]=al; return albumTile(al,(al.tracks||[]).length+" tracks"); }).join("")+'</div><div id="artSongs"></div>'); loadArtistSongs(id);
+      }).catch(function(e){ setStatus("Error: "+esc(e.message),"err"); });
+    }
+
+    // ---------- Album ----------
+    function openAlbum(id){ saveRoute("album",id); setStatus(""); setView(skDetail());
+      gql("query { album(where:{id:"+Number(id)+"}) { id enName heName images { cdnMedium cdnLarge medium large } artists { enName heName image } tracks { id enName heName file duration trackNumber } } }").then(function(d){
+        var al=d.album; setStatus(""); if(!al){ setView('<div class="empty">Album not found.</div>'); return; }
+        window._albums=window._albums||{}; window._albums[id]=al; renderAlbum(id, al);
+      }).catch(function(e){ if(e.message==="login")return; setStatus("Error: "+esc(e.message),"err"); });
+    }
+    function renderAlbum(id, al){
+      var tracks=al.tracks||[]; var artistName=(al.artists&&al.artists.length)?artNames(al.artists):(window._curArtist||"");
+      var back='<div class="back" onclick="'+(window._albumBack?'window._albumBack()':'go(\\'home\\')')+'">'+ic("arrow_back_ios_new")+'Back</div>';
+      var rows=tracks.map(function(t,i){ return '<div class="track" id="trk'+t.id+'"><div class="num" onclick="playAlbum('+id+','+i+')">'+(t.trackNumber||i+1)+'</div>'+
+        '<div class="tk" onclick="playAlbum('+id+','+i+')">'+esc(trackName(t))+'</div>'+(t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
+        dlBtn(t.id,t.file)+'<button class="np-btn" title="More" onclick="songMenuAlbum('+id+','+i+')">'+ic("more_vert")+'</button></div>'; }).join("");
+      setView(back+'<div class="hero">'+coverHtml(albName(al),{img:albImg(al)})+'<div><div class="kicker">Album'+(artistName?' · '+esc(artistName):'')+'</div><h2>'+esc(albName(al))+'</h2><div class="sub">'+tracks.length+' tracks</div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playAlbum('+id+',0)">'+ic("play_arrow")+' Play all</button><button class="btn ghost" onclick="shuffleAlbum('+id+')">'+ic("shuffle")+' Shuffle</button>':'')+(feat("favorites")&&ME.user?'<button class="btn ghost" onclick="saveAlbum('+id+')">'+ic("favorite_border")+' Save to connected library</button>':'')+((dlAllowed()&&tracks.length)?'<button class="btn ghost" onclick="downloadAlbum('+id+')">'+ic("download")+' Download all</button>':'')+'</div>'+
+        (ME.admin?('<div class="chips" style="padding:0;margin-top:10px"><span class="muted" style="font-size:.74rem;align-self:center;margin-right:2px">Admin:</span>'+
+          '<button class="chip" id="curFeat" onclick="curate('+id+',\\''+(isFeatured(id)?'unfeature':'feature')+'\\')">'+ic(isFeatured(id)?"star":"star_border")+(isFeatured(id)?' Unpin from Home':' Pin to Home')+'</button>'+
+          '<button class="chip" id="curHide" onclick="curate('+id+',\\''+(isHidden(id)?'unhide':'hide')+'\\')">'+ic(isHidden(id)?"visibility":"visibility_off")+(isHidden(id)?' Unhide':' Hide from everyone')+'</button></div>'):'')+
+        '</div></div><div class="chips" style="margin:12px 18px"><button class="chip" onclick="saveLocalAlbum('+Number(id)+')">'+(savedAlbum(id)?'Saved on device - remove':'Save album on device')+'</button><button class="chip" onclick="sharePage()">Share album</button></div>'+
+        (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
+      highlightPlaying();
+    }
+    function clearCurate(which){ if(!confirm("Clear all "+(which==="featured"?"pinned":"hidden")+" albums?")) return;
+      post("/api/admin/curate",{action:which==="featured"?"clearfeatured":"clearhidden"}).then(function(d){
+        CFG.featured=(d.featured||[]).map(Number); CFG.hidden=(d.hidden||[]).map(Number); toast("Cleared."); loadAccess();
+      }).catch(function(e){ toast(e.message||"Couldn’t clear."); }); }
+    function curate(id, action){ toast("Saving…");
+      post("/api/admin/curate",{id:id,action:action}).then(function(d){
+        CFG.featured=(d.featured||[]).map(Number); CFG.hidden=(d.hidden||[]).map(Number);
+        toast(action==="feature"?"Pinned to Home ★":action==="unfeature"?"Unpinned.":action==="hide"?"Hidden from everyone.":"Unhidden.");
+        if(window._albums&&window._albums[id]) renderAlbum(id, window._albums[id]);
+      }).catch(function(e){ toast(e.message||"Couldn’t save."); }); }
+
+    // ---------- Track list (playlists) ----------
+    function renderTrackList(title, subtitle, tracks, backFn, img, kicker){
+      window._listTracks=tracks; window._listBack=backFn;
+      var back='<div class="back" onclick="window._listBack&&window._listBack()">'+ic("arrow_back_ios_new")+'Back</div>';
+      var rows=tracks.map(function(t,i){ return '<div class="track" id="ltrk'+t.id+'" onclick="playList('+i+')"><div class="num">'+(i+1)+'</div>'+
+        '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
+        (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
+        dlBtn(t.id,t.file)+'<button class="np-btn" title="Song options" onclick="event.stopPropagation();listSongMenu('+i+')">'+ic("more_vert")+'</button></div>'; }).join("");
+      setView(back+'<div class="hero">'+coverHtml(title,{img:img})+'<div><div class="kicker">'+esc(kicker||"Collection")+'</div><h2>'+esc(title)+'</h2><div class="sub">'+esc(subtitle)+'</div>'+
+        '<div class="actions">'+(tracks.length?'<button class="btn" onclick="playList(0)">'+ic("play_arrow")+' Play all</button><button class="btn ghost" onclick="shuffleList()">'+ic("shuffle")+' Shuffle</button>':'')+'</div></div></div>'+
+        (tracks.length?'<div class="tracks">'+rows+'</div>':'<div class="empty">No tracks.</div>'));
+      highlightPlaying();
+    }
+    function listSongMenu(i){var t=(window._listTracks||[])[i];if(t)songMenu(normTrack(t));}
+    function playList(i){ playTracks(window._listTracks||[], i, ""); }
+
+    // ---------- Player ----------
+    var audio=$("audio");
+    var _retry=0, _fails=0;
+    var _shuffle=false, _repeat="off", _order=[], _dur=0;
+    try{ _shuffle=localStorage.getItem("zing_shuffle")==="1"; _repeat=localStorage.getItem("zing_repeat")||"off"; }catch(e){}
+    // Build the play order (a permutation of queue indices). Shuffle keeps the
+    // current track first so playback continues smoothly.
+    function buildOrder(startIdx){ _order=queue.map(function(_,i){ return i; });
+      if(_shuffle){ for(var i=_order.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var t=_order[i]; _order[i]=_order[j]; _order[j]=t; }
+        var pos=_order.indexOf(startIdx); if(pos>0){ var tmp=_order[0]; _order[0]=_order[pos]; _order[pos]=tmp; } } }
+    function startQueue(tracks, index){ _fails=0; _diagShown=false; queue=tracks; buildOrder(index); playIndex(index); }
+    function playAlbum(albumId, index){ var al=(window._albums||{})[albumId]; if(!al) return; var tracks=al.tracks||[];
+      var artistName=(al.artists&&al.artists.length)?artNames(al.artists):(window._curArtist||""); var aimg=albImg(al);
+      startQueue(tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; }), index); }
+    function playTracks(tracks, index, ctx){ startQueue(tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:(t.artists&&t.artists.length?artNames(t.artists):(ctx||"")), cover:ctx||trackName(t), coverImg:(t.album&&t.album.images)?(t.album.images.cdnSmall||t.album.images.cdnMedium||t.album.images.small):null}; }), index); }
+    function trackSrc(t,bust){ return "/api/play?trackId="+encodeURIComponent(t.id)+"&file="+encodeURIComponent(t.file)+(bust?("&r="+Date.now()):""); }
+    function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i]; _retry=0; _dur=0; _resumed=false;
+      setActivity("Playing: "+(t.title||""));
+      audio.src=trackSrc(t,false); try{ audio.playbackRate=SET.speed||1; }catch(e){} audio.volume=(SET.fade?0:(SET.vol==null?1:SET.vol));
+      audio.play().catch(function(){});
+      $("player").hidden=false; $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
+      var cu=imgUrl(t.coverImg);
+      if(cu){ $("npCover").style.background=""; $("npCover").style.backgroundImage="url('"+cu+"')"; $("npCover").style.backgroundSize="cover"; $("npCover").style.backgroundPosition="center"; $("npCover").innerHTML=""; }
+      else { $("npCover").style.backgroundImage=""; $("npCover").style.background=grad(t.cover||t.title); $("npCover").innerHTML='<span class="disc"></span>'; }
+      setPlayIcon(true); highlightPlaying(); syncSheet();
+    }
+    function setPlayIcon(p){ $("playBtn").innerHTML=ic(p?"pause":"play_arrow"); var b=$("shPlay"); if(b) b.innerHTML=ic(p?"pause":"play_arrow"); }
+    function highlightPlaying(){ var cur=queue[qi]; document.querySelectorAll(".track.playing").forEach(function(el){ el.classList.remove("playing"); });
+      if(cur){ var el=$("trk"+cur.id)||$("ltrk"+cur.id); if(el) el.classList.add("playing"); } }
+    function togglePlay(){ if(!queue.length) return; if(audio.paused) audio.play(); else audio.pause(); }
+    // Advance to the next queue index in the current play order.
+    function nextInOrder(){ var pos=_order.indexOf(qi); var np=pos+1;
+      if(np>=_order.length){ if(_repeat==="all"){ if(_shuffle) buildOrder(_order.length?_order[0]:0); return _order.length?_order[0]:-1; } return -1; }
+      return _order[np]; }
+    function nextTrack(){ if(!queue.length) return; if(_repeat==="one"){ playIndex(qi); return; } var n=nextInOrder(); if(n>=0){ playIndex(n); return; } if(_repeat==="off" && SET.radio) extendRadio(); }
+    // Endless radio: when the queue runs out, keep going with similar songs.
+    function extendRadio(){ var t=queue[qi]; if(!t){ return; }
+      gql("query { relatedTracks(trackId:"+Number(t.id)+", take: 20) { track { id enName heName file duration artists { enName heName } album { images { cdnSmall cdnMedium } } } } }").then(function(d){
+        var list=(d.relatedTracks||[]).map(function(x){return x.track;}).filter(Boolean).filter(function(tk){ return !queue.some(function(q){ return q.id===tk.id; }); });
+        if(!list.length){ toast("End of the queue."); return; }
+        var startIdx=queue.length;
+        list.forEach(function(tk){ queue.push(normTrack({id:tk.id,file:tk.file||"",title:trackName(tk),artist:(tk.artists&&tk.artists.length?artNames(tk.artists):""),coverImg:(tk.album&&tk.album.images)?(tk.album.images.cdnSmall||tk.album.images.cdnMedium):null})); _order.push(queue.length-1); });
+        toast("Radio — more like this ♫"); playIndex(startIdx);
+      }).catch(function(){ toast("End of the queue."); }); }
+    function prevTrack(){ if(audio.currentTime>3){ audio.currentTime=0; return; } if(!queue.length) return;
+      var pos=_order.indexOf(qi); var pp=pos-1; if(pp<0){ if(_repeat==="all") pp=_order.length-1; else { audio.currentTime=0; return; } } playIndex(_order[pp]); }
+    function toggleShuffle(){ _shuffle=!_shuffle; try{ localStorage.setItem("zing_shuffle",_shuffle?"1":"0"); }catch(e){} if(queue.length) buildOrder(qi); syncSheet(); toast(_shuffle?"Shuffle on":"Shuffle off"); }
+    function cycleRepeat(){ _repeat=(_repeat==="off"?"all":(_repeat==="all"?"one":"off")); try{ localStorage.setItem("zing_repeat",_repeat); }catch(e){} syncSheet(); toast(_repeat==="off"?"Repeat off":(_repeat==="all"?"Repeat all":"Repeat one")); }
+    audio.addEventListener("play", function(){ setPlayIcon(true); try{ if("mediaSession" in navigator) navigator.mediaSession.playbackState="playing"; }catch(e){} });
+    audio.addEventListener("pause", function(){ setPlayIcon(false); savePos(); try{ if("mediaSession" in navigator) navigator.mediaSession.playbackState="paused"; }catch(e){} });
+    var _resumed=false, _fadeTimer=null;
+    audio.addEventListener("playing", function(){ _fails=0; var t=queue[qi]; pushHistory(t); reportPlay(t); setMediaMeta(t); // played fine → clear failures, record history + stats
+      try{ audio.playbackRate=SET.speed||1; }catch(e){}
+      if(SET.fade){ if(_fadeTimer) clearInterval(_fadeTimer); var target=(SET.vol==null?1:SET.vol); audio.volume=0; var step=target/16; _fadeTimer=setInterval(function(){ var v=audio.volume+step; if(v>=target){ v=target; clearInterval(_fadeTimer); _fadeTimer=null; } audio.volume=v; },40); }
+    });
+    var _lastReport=0;
+    function reportPlay(t){ if(!t) return; var now=Date.now(); if(now-_lastReport<3000) return; _lastReport=now;
+      post("/api/played",{track:t.id,title:t.title||"",artist:t.artist||""}).catch(function(){}); }
+    audio.addEventListener("ended", function(){ var t=queue[qi]; if(t) clearPos(t.id); if(_sleepEnd){ _sleepEnd=false; toast("Sleep timer — paused"); syncSheet(); return; } nextTrack(); }); // keep playing one after another
+    audio.addEventListener("loadedmetadata", function(){ _dur=audio.duration||0; var d=$("shDur"); if(d) d.textContent=fmt(_dur);
+      // Resume long tracks (shiurim/stories) where you left off.
+      if(SET.resume && !_resumed){ _resumed=true; var t=queue[qi]; if(t && _dur>600){ var p=getPos(t.id); if(p>30 && p<_dur-30){ try{ audio.currentTime=p; toast("Resumed where you left off"); }catch(e){} } } } });
+    var _lastPosSave=0;
+    audio.addEventListener("timeupdate", function(){ if(audio.duration){ var pct=Math.round(audio.currentTime/audio.duration*1000); $("seek").value=String(pct); var s=$("shSeek"); if(s) s.value=String(pct); var c=$("shCur"); if(c) c.textContent=fmt(audio.currentTime);
+      var now=Date.now(); if(now-_lastPosSave>4000){ _lastPosSave=now; savePos(); } } });
+    // Remember position for long tracks only, so you can resume.
+    function posMap(){ try{ return JSON.parse(localStorage.getItem("zing_pos")||"{}")||{}; }catch(e){ return {}; } }
+    function getPos(id){ return posMap()[String(id)]||0; }
+    function savePos(){ var t=queue[qi]; if(!t||!audio.duration||audio.duration<=600) return; try{ var m=posMap(); if(audio.currentTime>30 && audio.currentTime<audio.duration-30){ m[String(t.id)]=Math.floor(audio.currentTime); } else { delete m[String(t.id)]; } var ks=Object.keys(m); if(ks.length>60){ ks.slice(0,ks.length-60).forEach(function(k){ delete m[k]; }); } localStorage.setItem("zing_pos",JSON.stringify(m)); }catch(e){} }
+    function clearPos(id){ try{ var m=posMap(); delete m[String(id)]; localStorage.setItem("zing_pos",JSON.stringify(m)); }catch(e){} }
+    // Skip forward / back by the chosen interval.
+    function skipBy(sec){ if(!audio.duration) return; audio.currentTime=Math.max(0,Math.min(audio.duration,audio.currentTime+sec)); }
+    function cycleSpeed(){ var opts=[1,1.25,1.5,1.75,2,0.75]; var i=opts.indexOf(SET.speed); SET.speed=opts[(i+1)%opts.length]; saveSettings(); try{ audio.playbackRate=SET.speed; }catch(e){} var b=$("shSpeed"); if(b) b.innerHTML=speedLabel(); toast("Speed "+SET.speed+"×"); }
+    function speedLabel(){ return (SET.speed||1)+"×"; }
+    function setVol(v){ SET.vol=Math.max(0,Math.min(1,v/100)); saveSettings(); if(!(_fadeTimer)) audio.volume=SET.vol; }
+    // Media Session: show controls + artwork on the phone lock screen / notification.
+    function setMediaMeta(t){ if(!("mediaSession" in navigator)||!t) return; try{
+        var art=imgUrl(t.coverImg); var meta={ title:t.title||"", artist:t.artist||"", album:(CFG.appName||"Zing") };
+        if(art) meta.artwork=[{src:art,sizes:"512x512",type:"image/jpeg"}];
+        navigator.mediaSession.metadata=new MediaMetadata(meta);
+      }catch(e){} }
+    if("mediaSession" in navigator){ try{
+      navigator.mediaSession.setActionHandler("play", function(){ audio.play(); });
+      navigator.mediaSession.setActionHandler("pause", function(){ audio.pause(); });
+      navigator.mediaSession.setActionHandler("previoustrack", function(){ prevTrack(); });
+      navigator.mediaSession.setActionHandler("nexttrack", function(){ nextTrack(); });
+      navigator.mediaSession.setActionHandler("seekbackward", function(){ skipBy(-(SET.skip||15)); });
+      navigator.mediaSession.setActionHandler("seekforward", function(){ skipBy(SET.skip||15); });
+    }catch(e){} }
+    // If a track won't load: retry once, then skip past a single bad track. But
+    // if several in a row fail, it's the music-server login — stop churning and
+    // show one clear message (pointing the owner to the setup).
+    function playbackDown(){ audio.pause();
+      if(ME.admin){ toast("Music won’t play — set the Music server login in ⚙ Settings → Admin."); }
+      else { toast("Music isn’t playing right now — please tell the owner."); } }
+    // Owner-only: when a track fails, capture exactly why (audio error code +
+    // the real HTTP response from the music server) so we can pinpoint the bug.
+    var _diagShown=false;
+    function diagPlay(t){ if(!ME.admin||!t||_diagShown) return; _diagShown=true;
+      var ec=(audio.error&&audio.error.code)||0; var codes={1:"aborted",2:"network",3:"decode",4:"format not supported"};
+      var info="Track: "+(t.title||"")+"\\nid="+t.id+"\\nfile="+(t.file||"(none)")+"\\naudio.error="+ec+" ("+(codes[ec]||"?")+")";
+      fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ info+="\\n/api/play → HTTP "+r.status+"  "+(r.headers.get("Content-Type")||"");
+        if(r.status>=400){ return r.text().then(function(tx){
+          try{ var j=JSON.parse(tx); if(j.error) info+="\\nerror: "+j.error; var dg=j.diag;
+            if(dg){ if(dg.build) info+="\\nBUILD: "+dg.build;
+              if(dg.firebaseKeyFound!==undefined) info+="\\nFirebase key found: "+(dg.firebaseKeyFound?"yes":"NO");
+              if(dg.firebaseLoginOk!==undefined) info+="\\nFirebase login: "+(dg.firebaseLoginOk?"OK ✓":"FAILED ✗");
+              if(dg.firebaseLoginError) info+="\\nFirebase error: "+dg.firebaseLoginError;
+              if(dg.realTrack!==undefined) info+="\\nreal track "+dg.realTrack+" → ?token range: "+dg.audio_real_range+"  full: "+dg.audio_real_full+"  Bearer: "+dg.audio_real_bearer;
+              if(dg.sampleTrack!==undefined) info+="\\nsample track "+dg.sampleTrack+" → ?token: "+dg.audio_sample;
+              if(dg.catalogSummary) info+="\\ncatalog scan (10 albums): "+JSON.stringify(dg.catalogSummary)+"  "+JSON.stringify(dg.catalogScan).slice(0,260);
+              if(dg.tokenClaims) info+="\\ntoken: iss="+(dg.tokenClaims.iss||"?")+" aud="+(dg.tokenClaims.aud||"?")+(dg.tokenClaims.user_id?(" uid="+dg.tokenClaims.user_id):"");
+              if(dg.startStreamingSession){ var ss=dg.startStreamingSession; info+="\\nstartStreamingSession: "+(ss.found?("args["+(ss.args||[]).join(", ")+"] returns "+ss.returns):JSON.stringify(ss)); }
+              if(dg.sessionResult){ var sr=dg.sessionResult; info+="\\nSessionResult fields: "+(sr.fields?sr.fields.join(", "):JSON.stringify(sr)); }
+              if(dg.sessionTry){ var tr=dg.sessionTry;
+                info+="\\nsession try: userId="+tr.userId+" profileId="+tr.profileId+" deviceId="+tr.deviceId;
+                if(tr.devices){ if(tr.devices.list) info+="\\n  devices: "+JSON.stringify(tr.devices.list).slice(0,300); if(tr.devices.tried&&tr.devices.tried.length) info+="\\n  device-query errs: "+JSON.stringify(tr.devices.tried).slice(0,300); }
+                if(tr.createDeviceInput) info+="\\n  UserDeviceCreateInput: "+(tr.createDeviceInput.fields?tr.createDeviceInput.fields.join(", "):JSON.stringify(tr.createDeviceInput)).slice(0,400);
+                if(tr.osEnum) info+="\\n  OS enum: "+(Array.isArray(tr.osEnum)?tr.osEnum.join(", "):JSON.stringify(tr.osEnum));
+                if(tr.sessionAttempts) info+="\\n  session attempts: "+JSON.stringify(tr.sessionAttempts).slice(0,400);
+                if(tr.streamQueries) info+="\\n  stream queries: "+tr.streamQueries.join(", ");
+                if(tr.streamMutations) info+="\\n  stream mutations: "+tr.streamMutations.join(", ");
+                if(tr.heartbeatArgs) info+="\\n  updateSessionHeartbeat: "+(tr.heartbeatArgs.args?("args["+tr.heartbeatArgs.args.join(", ")+"] returns "+tr.heartbeatArgs.returns):JSON.stringify(tr.heartbeatArgs));
+                if(tr.openedWith!==undefined) info+="\\n  opened with deviceId="+tr.openedWith+" session="+JSON.stringify(tr.session);
+                if(tr.heartbeatCall) info+="\\n  heartbeat: "+(tr.heartbeatErrors&&tr.heartbeatErrors.length?("ERR "+tr.heartbeatErrors.join(" | ")):("ok "+JSON.stringify(tr.heartbeatResult||{})));
+                if(tr.audioAfterSession) info+="\\n  audio after session: "+JSON.stringify(tr.audioAfterSession);
+                if(tr.error) info+="\\n  error: "+tr.error; }
+              if(dg.recon){ var rc=dg.recon; info+="\\nrecon bundles: "+((rc.bundles||[]).length); if(rc.error) info+="\\n  recon error: "+rc.error; if(rc.hits){ for(var kw in rc.hits){ info+="\\n  ["+kw+"] "+rc.hits[kw].join("  ||  "); } } }
+              if(dg.note) info+="\\nnote: "+dg.note; }
+          }catch(e){ info+="\\nbody: "+(tx||"").slice(0,400); }
+          showDiag(info); }); } showDiag(info);
+      }).catch(function(e){ info+="\\nfetch error: "+((e&&e.message)||e); showDiag(info); }); }
+    function showDiag(info){ window._copy=info; overlay("Why it won’t play", '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.8rem;margin:0">'+esc(info)+'</pre><button class="btn sm" style="margin-top:10px" onclick="copyText(this)">Copy</button><div class="muted" style="margin-top:8px">Send this to the developer.</div>'); }
+    audio.addEventListener("error", function(){ var t=queue[qi]; if(!t) return;
+      if(_retry<1){ _retry++; audio.src=trackSrc(t,true); audio.play().catch(function(){}); return; }
+      // Find out *why* it failed: a 403 means this one track is locked/unavailable
+      // (most of the catalog still plays), not that the whole player is down.
+      fetch(trackSrc(t,true),{headers:{Range:"bytes=0-1"}}).then(function(r){ return r.json().catch(function(){ return {}; }).then(function(j){ return {st:r.status, msg:(j && j.error) || ""}; }); }).catch(function(){ return {st:0, msg:""}; }).then(function(res){
+        var locked=(res.st===403);
+        var msg=res.msg || "This song isn’t available to stream right now.";
+        _fails++; var n=nextInOrder();
+        if(n>=0 && _fails<3){ if(locked) toast(msg + " — skipping."); else toast("Skipping a track that won’t play…"); playIndex(n); return; }
+        // Nothing else to try.
+        if(locked){ toast(msg); }
+        else { playbackDown(); } // real outage (login/server) ⇒ alert
+      });
+    });
+    $("seek").addEventListener("input", function(){ if(audio.duration){ audio.currentTime=this.value/1000*audio.duration; } });
+    function dlCurrent(){ var t=queue[qi]; if(t) downloadTrack(t.id, t.file); }
+
+    // ---------- Recently played (History) ----------
+    function pushHistory(t){ if(!t) return; try{ var h=JSON.parse(localStorage.getItem("zing_hist")||"[]"); if(!Array.isArray(h)) h=[];
+      h=h.filter(function(x){ return x&&x.id!==t.id; }); h.unshift({id:t.id,file:t.file||"",title:t.title||"",artist:t.artist||"",coverImg:t.coverImg||null,at:Date.now()}); h=h.slice(0,60);
+      localStorage.setItem("zing_hist",JSON.stringify(h)); }catch(e){} }
+    function getHistory(){ try{ var h=JSON.parse(localStorage.getItem("zing_hist")||"[]"); return Array.isArray(h)?h:[]; }catch(e){ return []; } }
+    function openHistory(){ var h=getHistory();
+      if(!h.length){ overlay("Recently played", '<div class="empty">Nothing played yet. Your recently played songs will show here.</div>'); return; }
+      var rows=h.map(function(t,i){ return '<div class="track" onclick="playHistory('+i+')"><div class="np-mini" style="background:'+(imgUrl(t.coverImg)?("center/cover url(\\'"+esc(imgUrl(t.coverImg))+"\\')"):grad(t.title))+'"></div>'+
+        '<div class="tk">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div><div class="np-btn" onclick="event.stopPropagation();dlFromHistory('+i+')">'+ic("play_arrow")+'</div></div>'; }).join("");
+      overlay("Recently played", '<div class="tracks">'+rows+'</div>'); }
+    function playHistory(i){ var h=getHistory(); if(!h[i]) return; startQueue(h.map(function(x){ return {id:x.id,file:x.file||"",title:x.title,artist:x.artist,cover:x.title,coverImg:x.coverImg}; }), i); closeOverlay(true); }
+    function dlFromHistory(i){ var h=getHistory(); if(h[i]) playHistory(i); }
+
+    // ---------- Liked songs (♥ per track, kept on this device) ----------
+    function getLiked(){ try{ var l=JSON.parse(localStorage.getItem("zing_liked")||"[]"); return Array.isArray(l)?l:[]; }catch(e){ return []; } }
+    function isLiked(id){ return getLiked().some(function(x){ return x.id===id; }); }
+    function toggleLike(t){ if(!t) return; var l=getLiked(); var was=l.some(function(x){ return x.id===t.id; });
+      if(was){ l=l.filter(function(x){ return x.id!==t.id; }); } else { l.unshift({id:t.id,file:t.file||"",title:t.title||"",artist:t.artist||"",coverImg:t.coverImg||null}); l=l.slice(0,300); }
+      try{ localStorage.setItem("zing_liked",JSON.stringify(l)); }catch(e){}
+      toast(was?"Removed from Liked":"Added to Liked ♥"); syncSheet(); }
+    function likeCurrent(){ toggleLike(queue[qi]); }
+    function openLiked(){ var l=getLiked();
+      if(!l.length){ overlay("Liked songs", '<div class="empty">No liked songs yet. Tap the ♥ on a song to save it here.</div>'); return; }
+      var rows=l.map(function(t,i){ return '<div class="track" onclick="playLiked('+i+')"><div class="np-mini" style="background:'+(imgUrl(t.coverImg)?("center/cover url(\\'"+esc(imgUrl(t.coverImg))+"\\')"):grad(t.title))+'"></div>'+
+        '<div class="tk">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div><div class="np-btn" onclick="event.stopPropagation();unlike('+t.id+')">'+ic("favorite")+'</div></div>'; }).join("");
+      overlay("Liked songs", '<div class="tracks">'+rows+'</div>'); }
+    function playLiked(i){ var l=getLiked(); if(!l[i]) return; startQueue(l.map(function(x){ return {id:x.id,file:x.file||"",title:x.title,artist:x.artist,cover:x.title,coverImg:x.coverImg}; }), i); closeOverlay(true); }
+    function unlike(id){ toggleLike({id:id}); openLiked(); }
+
+    // ---------- Sleep timer ----------
+    var _sleepAt=0, _sleepTimer=null;
+    function openSleep(){ var opts=[["off","Off"],["15","15 minutes"],["30","30 minutes"],["45","45 minutes"],["60","1 hour"],["end","End of this song"]];
+      var cur=_sleepAt?("in "+Math.max(1,Math.round((_sleepAt-Date.now())/60000))+" min"):(_sleepEnd?"end of song":"off");
+      overlay("Sleep timer", '<p class="muted" style="margin:0 0 12px">Music stops automatically. Currently: '+esc(cur)+'.</p>'+
+        '<div class="tracks">'+opts.map(function(o){ return '<div class="track" onclick="setSleep(\\''+o[0]+'\\')"><div class="tk">'+esc(o[1])+'</div>'+((o[0]==="off"&&!_sleepAt&&!_sleepEnd)?'<div class="np-eq">'+ic("favorite")+'</div>':'')+'</div>'; }).join("")+'</div>'); }
+    var _sleepEnd=false;
+    function setSleep(v){ if(_sleepTimer){ clearTimeout(_sleepTimer); _sleepTimer=null; } _sleepAt=0; _sleepEnd=false;
+      if(v==="off"){ toast("Sleep timer off"); }
+      else if(v==="end"){ _sleepEnd=true; toast("Will stop at end of this song"); }
+      else { var mins=parseInt(v,10); _sleepAt=Date.now()+mins*60000; _sleepTimer=setTimeout(function(){ audio.pause(); _sleepAt=0; toast("Sleep timer — paused"); syncSheet(); }, mins*60000); toast("Sleep timer set for "+mins+" min"); }
+      closeOverlay(true); syncSheet(); }
+
+    // ---------- Queue actions: play next / add to queue ----------
+    function normTrack(t){ return {id:t.id, file:t.file||"", title:t.title||trackName(t)||"", artist:t.artist||(t.artists&&t.artists.length?artNames(t.artists):""), cover:t.cover||t.title||"", coverImg:t.coverImg||((t.album&&t.album.images)?(t.album.images.cdnSmall||t.album.images.cdnMedium):null)||null}; }
+    function playNext(t){ if(!t) return; if(!queue.length){ startQueue([normTrack(t)],0); toast("Playing"); return; }
+      queue.push(normTrack(t)); var idx=queue.length-1; var pos=_order.indexOf(qi); _order.splice(pos+1,0,idx); toast("Playing next ▸"); syncSheet(); }
+    function addToQueue(t){ if(!t) return; if(!queue.length){ startQueue([normTrack(t)],0); toast("Playing"); return; }
+      queue.push(normTrack(t)); _order.push(queue.length-1); toast("Added to queue"); syncSheet(); }
+
+    // ---------- Your own playlists (kept on this device) ----------
+    function getPlaylists(){ try{ var l=JSON.parse(localStorage.getItem("zing_playlists")||"[]"); return Array.isArray(l)?l:[]; }catch(e){ return []; } }
+    function savePlaylists(l){ try{ localStorage.setItem("zing_playlists",JSON.stringify(l)); }catch(e){} }
+    function createPlaylist(name){ name=(name||"").trim(); if(!name) return null; var l=getPlaylists(); var pl={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),name:name.slice(0,60),tracks:[]}; l.unshift(pl); savePlaylists(l); return pl; }
+    function addToPlaylist(plId,t){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl||!t) return; if(pl.tracks.some(function(x){return x.id===t.id;})){ toast("Already in “"+pl.name+"”"); return; } pl.tracks.push(normTrack(t)); savePlaylists(l); toast("Added to “"+pl.name+"” ♪"); }
+    function removeFromPlaylist(plId,trackId){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl) return; pl.tracks=pl.tracks.filter(function(x){return x.id!==trackId;}); savePlaylists(l); openMyPlaylist(plId); }
+    function deletePlaylist(plId){ if(!confirm("Delete this playlist?")) return; savePlaylists(getPlaylists().filter(function(p){return p.id!==plId;})); openMyPlaylists(); }
+    function newPlaylistPrompt(){ var n=prompt("Playlist name:"); if(n===null) return; var pl=createPlaylist(n); if(pl){ toast("Playlist created"); openMyPlaylist(pl.id); } }
+    function openMyPlaylists(){ var l=getPlaylists();
+      var head='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b style="font-size:1.05rem">Your playlists</b><button class="chip" onclick="newPlaylistPrompt()">'+ic("person_add")+' New</button></div>';
+      if(!l.length){ overlay("Your playlists", head+'<div class="empty">No playlists yet. Make one, then add songs from the ⋮ menu or the player.</div>'); return; }
+      var rows=l.map(function(p){ return '<div class="track" onclick="openMyPlaylist(\\''+p.id+'\\')"><div class="np-mini" style="background:'+grad(p.name)+';display:grid;place-items:center;color:#fff">'+ic("queue_music")+'</div><div class="tk">'+esc(p.name)+'<div class="sub">'+p.tracks.length+' songs</div></div>'+ic("chevron_right")+'</div>'; }).join("");
+      overlay("Your playlists", head+'<div class="tracks">'+rows+'</div>'); }
+    function openMyPlaylist(plId){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl){ openMyPlaylists(); return; }
+      var head='<div class="back" onclick="openMyPlaylists()">'+ic("arrow_back_ios_new")+'Playlists</div>'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 10px"><div><div style="font-weight:800;font-size:1.15rem">'+esc(pl.name)+'</div><div class="muted" style="font-size:.85rem">'+pl.tracks.length+' songs</div></div>'+
+        (pl.tracks.length?'<button class="btn sm" onclick="playMyPlaylist(\\''+pl.id+'\\',0)">'+ic("play_arrow")+' Play</button>':'')+'</div>';
+      var rows=pl.tracks.length? pl.tracks.map(function(t,i){ return '<div class="track"><div class="np-mini" onclick="playMyPlaylist(\\''+pl.id+'\\','+i+')" style="background:'+(imgUrl(t.coverImg)?("center/cover url('"+esc(imgUrl(t.coverImg))+"')"):grad(t.title))+'"></div>'+
+        '<div class="tk" onclick="playMyPlaylist(\\''+pl.id+'\\','+i+')">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div>'+
+        '<button class="iconbtn" aria-label="Move song up" '+(i===0?'disabled':'')+' onclick="movePlaylistTrack('+esc(JSON.stringify(pl.id))+','+i+',-1)">'+ic("arrow_upward")+'</button><button class="iconbtn" aria-label="Move song down" '+(i===pl.tracks.length-1?'disabled':'')+' onclick="movePlaylistTrack('+esc(JSON.stringify(pl.id))+','+i+',1)">'+ic("arrow_downward")+'</button><button class="trash" title="Remove" onclick="removeFromPlaylist(\\''+pl.id+'\\','+t.id+')">'+ic("close")+'</button></div>'; }).join("") : '<div class="empty">No songs yet. Add from the ⋮ menu on a song or the player.</div>';
+      overlay("Playlist", head+'<div class="tracks">'+rows+'</div>'+'<div class="chips" style="margin-top:14px"><button class="chip" onclick="renamePlaylist('+esc(JSON.stringify(pl.id))+')">Rename</button><button class="chip" onclick="duplicatePlaylist('+esc(JSON.stringify(pl.id))+')">Duplicate</button><button class="chip" onclick="deletePlaylist(\\''+pl.id+'\\')">'+ic("delete")+' Delete playlist</button></div>'); }
+    function playMyPlaylist(plId,i){ var pl=getPlaylists().filter(function(p){return p.id===plId;})[0]; if(!pl||!pl.tracks.length) return; startQueue(pl.tracks.map(normTrack), i); closeOverlay(true); }
+    // Choose which playlist to add a song to (or make a new one).
+    function choosePlaylist(t){ if(!t) return; window._addTrack=normTrack(t); var l=getPlaylists();
+      var rows=l.map(function(p){ return '<div class="track" onclick="addToPlaylistUI(\\''+p.id+'\\')"><div class="np-mini" style="background:'+grad(p.name)+';display:grid;place-items:center;color:#fff">'+ic("queue_music")+'</div><div class="tk">'+esc(p.name)+'<div class="sub">'+p.tracks.length+' songs</div></div></div>'; }).join("");
+      overlay("Add to playlist", '<button class="btn" style="width:100%;justify-content:center;margin-bottom:12px" onclick="newPlaylistAdd()">'+ic("person_add")+' New playlist</button>'+(l.length?('<div class="tracks">'+rows+'</div>'):'<div class="empty">No playlists yet — make one above.</div>')); }
+    function addToPlaylistUI(plId){ addToPlaylist(plId, window._addTrack); closeOverlay(true); }
+    function newPlaylistAdd(){ var n=prompt("Playlist name:"); if(n===null) return; var pl=createPlaylist(n); if(pl&&window._addTrack){ addToPlaylist(pl.id, window._addTrack); } closeOverlay(true); }
+
+    // ---------- Song menu (⋮): like, add to playlist, play next, add to queue ----------
+    function songMenu(t){ if(!t) return; window._menuTrack=normTrack(t); var liked=isLiked(t.id);
+      var item=function(icn,label,fn){ return '<div class="track" onclick="'+fn+'"><div class="np-btn">'+ic(icn)+'</div><div class="tk">'+esc(label)+'</div></div>'; };
+      overlay(t.title||"Song", '<div class="muted" style="margin:-4px 0 10px">'+esc(t.artist||"")+'</div><div class="tracks">'+
+        item(liked?"favorite":"favorite_border", liked?"Remove from Liked":"Add to Liked", "menuLike()")+
+        item("queue_music","Add to playlist","menuPlaylist()")+
+        item("play_arrow","Play next","menuPlayNext()")+
+        item("queue_music","Add to queue","menuAddQueue()")+item("share","Share song","shareSong(window._menuTrack)")+
+        '</div>'); }
+    function menuLike(){ toggleLike(window._menuTrack); closeOverlay(true); }
+    function menuPlaylist(){ var t=window._menuTrack; closeOverlay(true); choosePlaylist(t); }
+    function menuPlayNext(){ playNext(window._menuTrack); closeOverlay(true); }
+    function menuAddQueue(){ addToQueue(window._menuTrack); closeOverlay(true); }
+    function songMenuAlbum(albId, idx){ var al=(window._albums||{})[albId]; if(!al) return; var t=(al.tracks||[])[idx]; if(!t) return;
+      songMenu({id:t.id,file:t.file||"",title:trackName(t),artist:(al.artists&&al.artists.length?artNames(al.artists):(window._curArtist||"")),coverImg:albImg(al)}); }
+
+    // ---------- Lyrics ----------
+    function showLyrics(){ var t=queue[qi]; if(!t){ return; } toast("Loading lyrics…");
+      gql("query { track(where:{id:"+Number(t.id)+"}) { enName heName heLyrics enLyrics } }").then(function(d){
+        var tr=d.track||{}; var lyr=tr.heLyrics||tr.enLyrics||""; if(!lyr){ toast("No lyrics for this track."); return; }
+        overlay((tr.enName||tr.heName||t.title), '<pre dir="auto">'+esc(lyr)+'</pre>');
+      }).catch(function(e){ if(e.message==="login")return; toast("Could not load lyrics."); });
+    }
+    // ---------- Now Playing sheet (full player) ----------
+    var _npTab="queue";
+    function openNowPlaying(){ var t=queue[qi]; if(!t){ return; }
+      var cu=imgUrl(t.coverImg);
+      var cover = cu ? '<div class="np-art" id="npArt" style="background-image:url(\\''+esc(cu)+'\\')"></div>'
+                     : '<div class="np-art" id="npArt" style="background:'+grad(t.cover||t.title)+'"><span class="disc"></span></div>';
+      overlay("Now Playing", cover+
+        '<div class="np-info"><div class="np-tt" id="shTitle">'+esc(t.title)+'</div><div class="muted" id="shArtist">'+esc(t.artist||"")+'</div></div>'+
+        '<div class="np-prog"><input type="range" class="np-seek big" id="shSeek" min="0" max="1000" value="0" oninput="seekTo(this.value)" /><div class="np-times"><span id="shCur">0:00</span><span id="shDur">'+(_dur?fmt(_dur):"0:00")+'</span></div></div>'+
+        '<div class="np-controls">'+
+          '<button class="np-c" id="shShuffle" title="Shuffle" onclick="toggleShuffle()">'+ic("shuffle")+'</button>'+
+          '<button class="np-c" title="Previous" onclick="prevTrack()">'+ic("skip_previous")+'</button>'+
+          '<button class="np-c play" id="shPlay" title="Play/Pause" onclick="togglePlay()">'+ic(audio.paused?"play_arrow":"pause")+'</button>'+
+          '<button class="np-c" title="Next" onclick="nextTrack()">'+ic("skip_next")+'</button>'+
+          '<button class="np-c" id="shRepeat" title="Repeat" onclick="cycleRepeat()">'+ic("repeat")+'</button>'+
+        '</div>'+
+        '<div class="np-controls2">'+
+          '<button class="np-c2" id="shSpeed" title="Playback speed" onclick="cycleSpeed()">'+speedLabel()+'</button>'+
+          '<button class="np-c2" title="Back '+SET.skip+' seconds" onclick="skipBy(-(SET.skip||15))">'+ic("fast_rewind")+SET.skip+'s</button>'+
+          '<button class="np-c2" title="Forward '+SET.skip+' seconds" onclick="skipBy(SET.skip||15)">'+SET.skip+'s'+ic("fast_forward")+'</button>'+
+        '</div>'+
+        '<div class="np-vol">'+ic("volume_up")+'<input type="range" min="0" max="100" value="'+Math.round((SET.vol==null?1:SET.vol)*100)+'" oninput="setVol(this.value)" class="np-seek" aria-label="Volume" /></div>'+
+        '<div class="np-actions"><button class="chip" id="shLike" onclick="likeCurrent()">'+ic(isLiked(t.id)?"favorite":"favorite_border")+' Like</button><button class="chip" onclick="choosePlaylist(queue[qi])">'+ic("playlist_add")+' Playlist</button><button class="chip" onclick="openSleep()">'+ic("bedtime")+' Sleep</button><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="shareSong(queue[qi])">Share song</button><button class="chip" onclick="dlCurrent()">'+ic("download")+' Download</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'+
+        '<div class="seg np-seg" style="margin:4px 0 12px"><button id="npTQ" onclick="npTab(\\'queue\\')">Up next</button><button id="npTL" onclick="npTab(\\'lyrics\\')">Lyrics</button><button id="npTS" onclick="npTab(\\'similar\\')">Similar</button></div>'+
+        '<div id="npExtra"></div>');
+      syncSheet(); npTab(_npTab);
+    }
+    function seekTo(v){ if(audio.duration){ audio.currentTime=v/1000*audio.duration; } }
+    function npTab(which){ _npTab=which; ["npTQ","npTL","npTS"].forEach(function(id){ var e=$(id); if(e) e.classList.remove("on"); });
+      var m={queue:"npTQ",lyrics:"npTL",similar:"npTS"}; var on=$(m[which]); if(on) on.classList.add("on");
+      if(which==="queue") npQueue(); else if(which==="lyrics") npLyrics(); else npSimilar(); }
+    // Keep the open sheet in sync with the player state.
+    function syncSheet(){ var t=queue[qi]; var sh=$("shTitle"); if(!sh) return; // sheet not open
+      sh.textContent=(t&&t.title)||""; var sa=$("shArtist"); if(sa) sa.textContent=(t&&t.artist)||"";
+      var art=$("npArt"); if(art&&t){ var cu=imgUrl(t.coverImg); if(cu){ art.style.background=""; art.style.backgroundImage="url('"+cu+"')"; art.style.backgroundSize="cover"; art.style.backgroundPosition="center"; art.innerHTML=""; } else { art.style.backgroundImage=""; art.style.background=grad(t.cover||t.title); art.innerHTML='<span class="disc"></span>'; } }
+      var sp=$("shPlay"); if(sp) sp.innerHTML=ic(audio.paused?"play_arrow":"pause");
+      var sf=$("shShuffle"); if(sf) sf.classList.toggle("on",_shuffle);
+      var sr=$("shRepeat"); if(sr){ sr.classList.toggle("on",_repeat!=="off"); sr.innerHTML=ic(_repeat==="one"?"repeat_one":"repeat"); }
+      var lk=$("shLike"); if(lk&&t){ var liked=isLiked(t.id); lk.classList.toggle("on",liked); lk.innerHTML=ic(liked?"favorite":"favorite_border")+" Like"; }
+      if(_npTab==="queue" && $("npExtra")) npQueue();
+    }
+    // Up-next: the tracks coming after the current one, in play order.
+    function npQueue(){ var e=$("npExtra"); if(!e) return; var pos=_order.indexOf(qi); var items=[];
+      for(var k=pos;k<_order.length;k++){ items.push(_order[k]); }
+      if(items.length<=1){ e.innerHTML='<div class="empty">Nothing else in the queue.</div>'; return; }
+      e.innerHTML='<div class="tracks">'+items.map(function(qidx){ var t=queue[qidx]; var now=(qidx===qi);
+        return '<div class="track'+(now?" playing":"")+'" onclick="jumpQueue('+qidx+')"><div class="np-mini" style="background:'+(imgUrl(t.coverImg)?("center/cover url('"+esc(imgUrl(t.coverImg))+"')"):grad(t.cover||t.title))+'"></div>'+
+          '<div class="tk">'+esc(t.title)+(t.artist?'<div class="sub">'+esc(t.artist)+'</div>':'')+'</div>'+(now?'<div class="np-eq">'+ic("graphic_eq")+'</div>':'<button class="iconbtn" aria-label="Move up in queue" onclick="event.stopPropagation();moveQueueTrack('+qidx+',-1)">'+ic("arrow_upward")+'</button><button class="iconbtn" aria-label="Move down in queue" onclick="event.stopPropagation();moveQueueTrack('+qidx+',1)">'+ic("arrow_downward")+'</button><button class="iconbtn" title="Remove from queue" onclick="event.stopPropagation();removeFromQ('+qidx+')">'+ic("close")+'</button>')+'</div>'; }).join("")+
+        '<div style="padding:10px 0;text-align:center"><button class="btn" onclick="clearUpcoming()">Clear upcoming</button></div></div>';
+    }
+    function removeFromQ(idx){ if(idx===qi||idx<0||idx>=queue.length) return; queue.splice(idx,1); if(idx<qi) qi--;
+      _order=_order.filter(function(x){ return x!==idx; }).map(function(x){ return x>idx?x-1:x; }); npQueue(); }
+    function clearUpcoming(){ var pos=_order.indexOf(qi); var keep=_order.slice(0,pos+1); var cur=queue[qi];
+      var keepSet={}; keep.forEach(function(x){ keepSet[x]=1; }); var map={}; var nq=[];
+      queue.forEach(function(t,i){ if(keepSet[i]){ map[i]=nq.length; nq.push(t); } });
+      queue=nq; _order=keep.map(function(x){ return map[x]; }); qi=map[qi]; npQueue(); toast("Cleared upcoming songs."); }
+    function jumpQueue(qidx){ playIndex(qidx); }
+    function npBox(h){ var e=$("npExtra"); if(e) e.innerHTML=h; }
+    function npLyrics(){ var t=queue[qi]; if(!t) return; npBox('<div class="empty"><span class="spinner"></span>Loading lyrics…</div>');
+      gql("query { track(where:{id:"+Number(t.id)+"}) { heLyrics enLyrics } }").then(function(d){ var tr=d.track||{};
+        var lyr=(SET.lang==="he"?(tr.heLyrics||tr.enLyrics):(tr.enLyrics||tr.heLyrics))||"";
+        npBox(lyr?'<pre dir="auto" style="white-space:pre-wrap;line-height:1.85;font-size:1.02rem;margin:0">'+esc(lyr)+'</pre>':'<div class="empty">No lyrics for this song.</div>');
+      }).catch(function(e){ if(e.message==="login")return; npBox('<div class="empty">Could not load lyrics.</div>'); });
+    }
+    function npSimilar(){ var t=queue[qi]; if(!t) return; npBox('<div class="empty"><span class="spinner"></span>Finding similar songs…</div>');
+      gql("query { relatedTracks(trackId:"+Number(t.id)+", take: 30) { track { id enName heName file duration artists { enName heName } } } }").then(function(d){
+        var list=(d.relatedTracks||[]).map(function(x){return x.track;}).filter(Boolean); window._npSimilar=list;
+        if(!list.length){ npBox('<div class="empty">No similar songs found.</div>'); return; }
+        npBox('<div class="tracks">'+list.map(function(tk,i){ return '<div class="track" onclick="playSimilar('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
+          '<div class="tk">'+esc(trackName(tk))+(tk.artists&&tk.artists.length?'<div class="sub">'+esc(artNames(tk.artists))+'</div>':'')+'</div>'+
+          (tk.duration?'<div class="time">'+fmt(tk.duration)+'</div>':'')+'</div>'; }).join("")+'</div>');
+      }).catch(function(e){ if(e.message==="login")return; npBox('<div class="empty">Could not load similar songs.</div>'); });
+    }
+    function playSimilar(i){ playTracks(window._npSimilar||[], i, ""); closeOverlay(true); }
+
+    // ---------- My Music (saved favorites) ----------
+    function browseLibrary(){ curTab=""; setTab(""); loading("Loading your music…");
+      var pArt=agql("query { myArtists { id enName heName image } }").then(function(d){return d.myArtists||[];}).catch(function(){return null;});
+      var pAlb=agql("query { myAlbums(take:60) { album { id enName heName images { cdnSmall cdnMedium medium small } artists { enName heName } tracks { id } } } }").then(function(d){return (d.myAlbums||[]).map(function(x){return x.album;}).filter(Boolean);}).catch(function(){return null;});
+      Promise.all([pArt,pAlb]).then(function(res){ setStatus("");
+        var arts=res[0], albs=res[1];
+        if(arts===null&&albs===null){ setView('<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div><div class="empty">Couldn’t load your library — your login may not be connected for saving yet. Tell the developer what this says so it can be fixed.</div>'); return; }
+        var html='<div class="back" onclick="go(\\'home\\')">'+ic("arrow_back_ios_new")+'Home</div>'+secHead("My Music")+
+          '<div class="chips" style="margin-bottom:6px"><button class="chip" onclick="openMyPlaylists()">'+ic("queue_music")+' Your playlists</button><button class="chip" onclick="openLiked()">'+ic("favorite")+' Liked songs</button><button class="chip" onclick="openHistory()">'+ic("history")+' Recently played</button></div>'; var any=false;
+        if(albs&&albs.length){ any=true; window._albums=window._albums||{}; albs.forEach(function(a){window._albums[a.id]=a;}); html+='<div class="sec">'+secHead("Saved Albums")+'<div class="grid albums">'+albs.map(function(al){return albumTile(al,artNames(al.artists));}).join("")+'</div></div>'; }
+        if(arts&&arts.length){ any=true; html+='<div class="sec">'+secHead("Saved Artists")+'<div class="grid artists">'+arts.map(artistTile).join("")+'</div></div>'; }
+        if(!any){ html+='<div class="empty">Nothing saved yet. Tap the ♥ on an album or artist to save it here.</div>'; }
+        setView(html);
+      });
+    }
+
+    function overlay(title, bodyHtml){ closeOverlay(true); var o=document.createElement("div"); o.className="ovl"; o.id="ovl";
+      o.innerHTML='<div class="obar"><h2 id="ovlTitle">'+esc(title)+'</h2><button class="iconbtn" onclick="closeOverlay()">'+ic("close")+'</button></div><div id="ovlBody">'+bodyHtml+'</div>'; document.body.appendChild(o); }
+    function ovlSet(title, bodyHtml){ var t=$("ovlTitle"), b=$("ovlBody"); if(t) t.textContent=title; if(b){ b.innerHTML=bodyHtml; b.scrollIntoView&&window.scrollTo(0,0); } }
+    function closeOverlay(quiet){ if(typeof stopPresPoll==="function") stopPresPoll(); var d=$("ovl"); if(d) d.remove(); if(quiet!==true && _dirtyView){ _dirtyView=false; go(curTab); } }
+
+    // ---------- Downloads ----------
+    function dlBtn(id,file){ if(!dlAllowed()) return ""; return '<button class="dl" onclick="event.stopPropagation();downloadTrack('+id+', '+esc(JSON.stringify(file||"")).replace(/"/g,"&quot;")+')">'+ic("download")+'</button>'; }
+    function dlUrl(id,file){ var p=new URLSearchParams({trackId:id, file:file||""}); return "/api/download?"+p.toString(); }
+    function downloadTrack(id,file){ var a=document.createElement("a"); a.href=dlUrl(id,file); a.download=""; document.body.appendChild(a); a.click(); a.remove(); toast("Download started…"); }
+    function downloadAlbum(albumId){ var al=(window._albums||{})[albumId]; if(!al) return; var tr=al.tracks||[]; var i=0;
+      (function nx(){ if(i>=tr.length){ toast("Started all "+tr.length+" downloads."); return; } downloadTrack(tr[i].id, tr[i].file||""); i++; setTimeout(nx,900); })(); }
+
+    // ---------- Settings ----------
+    function openSettings(){ overlay("Settings", settingsHtml()); }
+    function row(title, desc, right, click){ return '<div class="row"'+(click?' style="cursor:pointer" onclick="'+click+'"':'')+'><div class="rlabel"><div class="rt">'+esc(title)+'</div>'+(desc?'<div class="rd">'+esc(desc)+'</div>':'')+'</div>'+right+'</div>'; }
+    function segEl(id, opts, cur, fn){ return '<div class="seg" id="'+id+'">'+opts.map(function(o){ return '<button data-v="'+esc(o[0])+'" class="'+(o[0]===cur?"on":"")+'" onclick="'+fn+'(\\''+o[0]+'\\')">'+esc(o[1])+'</button>'; }).join("")+'</div>'; }
+    function segMark(id,val){ var s=$(id); if(!s) return; [].forEach.call(s.children,function(b){ b.classList.toggle("on", b.getAttribute("data-v")===val); }); }
+    function setLang(v){ SET.lang=(v==="he"?"he":"en"); saveSettings(); segMark("segLang",SET.lang); _dirtyView=true; }
+    function setTheme(v){ SET.theme=(v==="light"?"light":"dark"); saveSettings(); applyTheme(); segMark("segTheme",SET.theme); }
+    function setAutoplay(v){ SET.autoplay=(v==="on"); saveSettings(); segMark("segAuto",v); }
+    function setSpeed(v){ var n=parseFloat(v); if([0.75,1,1.25,1.5,1.75,2].indexOf(n)<0) n=1; SET.speed=n; saveSettings(); try{ audio.playbackRate=n; }catch(e){} segMark("segSpeed",v); var b=$("shSpeed"); if(b) b.innerHTML=speedLabel(); }
+    function setSkip(v){ var n=parseInt(v,10); if([10,15,30].indexOf(n)<0) n=15; SET.skip=n; saveSettings(); segMark("segSkip",v); }
+    function setResume(v){ SET.resume=(v==="on"); saveSettings(); segMark("segResume",v); }
+    function setFade(v){ SET.fade=(v==="on"); saveSettings(); segMark("segFade",v); if(!SET.fade && !_fadeTimer){ audio.volume=(SET.vol==null?1:SET.vol); } }
+    function setRadio(v){ SET.radio=(v==="on"); saveSettings(); segMark("segRadio",v); }
+    function clearData(key,label){ if(!confirm("Clear "+label+"?")) return; try{ localStorage.removeItem(key); }catch(e){} toast(label+" cleared"); }
+    function signOut(){ location.href="/api/logout"; }
+    function settingsHtml(){
+      var auto=SET.autoplay?"on":"off"; var radio=SET.radio?"on":"off";
+      return ''+
+        '<div class="set-sec"><h3>App</h3><div class="card">'+
+          row("Language","Show names in English or Hebrew", segEl("segLang",[["en","English"],["he","עברית"]],SET.lang,"setLang"))+
+          row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
+          row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
+          row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Playback</h3><div class="card">'+
+          row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75×"],["1","1×"],["1.25","1.25×"],["1.5","1.5×"],["2","2×"]],String(SET.speed),"setSpeed"))+
+          row("Skip buttons","How far the skip buttons jump", segEl("segSkip",[["10","10s"],["15","15s"],["30","30s"]],String(SET.skip),"setSkip"))+
+          row("Resume long tracks","Continue shiurim & stories where you stopped", segEl("segResume",[["on","On"],["off","Off"]],SET.resume?"on":"off","setResume"))+
+          row("Fade in","Ease each track in gently", segEl("segFade",[["on","On"],["off","Off"]],SET.fade?"on":"off","setFade"))+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Your library</h3><div class="card">'+
+          row("Your playlists","Playlists you\\'ve made", ic("chevron_right"), "openMyPlaylists()")+
+          row("Liked songs","Songs you\\'ve ♥\\'d", ic("chevron_right"), "openLiked()")+
+          row("Recently played","Your play history", ic("chevron_right"), "openHistory()")+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Storage on this device</h3><div class="chips" style="padding:0">'+
+          '<button class="chip" onclick="clearData(\\'zing_hist\\',\\'Recently played\\')">Clear history</button>'+
+          '<button class="chip" onclick="clearData(\\'zing_liked\\',\\'Liked songs\\')">Clear liked</button>'+
+        '</div></div>'+
+        (ME.user ? ('<div class="set-sec"><h3>Your account</h3><div class="card">'+
+          row(esc(ME.user.name||ME.user.email), esc(ME.user.email), ic("chevron_right"), "openProfile()")+
+        '</div></div>') : '')+
+        (ME.admin ? ('<div class="set-sec"><h3>Admin</h3><div class="card">'+
+          row("Admin panel","Accounts, appearance, features, who's online", ic("chevron_right"), "openAccess()")+
+        '</div></div>') : '')+
+        (ME.admin ? ('<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
+          '<button class="chip" onclick="runCheck()">Check connection</button>'+
+          '<button class="chip" onclick="showZingConfig()">Zing settings</button>'+
+          '<button class="chip" onclick="showZingActions()">Zing actions</button>'+
+          '<button class="chip" onclick="showFullSchema()">Full structure</button>'+
+          '<button class="chip" onclick="showSchema()">API structure</button>'+
+          '<button class="chip" onclick="probeNew()">New releases (debug)</button>'+
+          '<button class="chip" onclick="probeAudio()">Singles (debug)</button>'+
+          '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
+          '<div id="diag" style="margin-top:14px"></div></div>') : '')+
+        '<div class="set-sec"><h3>Account</h3><div class="card">'+
+          '<div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div>'+
+        '</div></div>';
+    }
+    function openProfile(){ if(!ME.user){ return; } var u=ME.user;
+      overlay("Profile", '<div style="text-align:center;margin-bottom:8px">'+
+        (u.photo&&/^data:image/.test(u.photo)?'<img src="'+esc(u.photo)+'" alt="" style="width:120px;height:120px;border-radius:999px;object-fit:cover" />':'<div style="width:120px;height:120px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;color:#fff;font-weight:800;font-size:2rem">'+esc((u.name||u.email||"?").slice(0,1).toUpperCase())+'</div>')+
+        '<div style="font-weight:800;font-size:1.2rem;margin-top:12px">'+esc(u.name||"")+'</div><div class="muted">'+esc(u.email||"")+'</div>'+(u.phone?'<div class="muted">'+esc(u.phone)+'</div>':'')+'</div>'+
+        '<div class="set-sec"><h3>Profile picture</h3><div class="card" style="padding:15px">'+
+          '<div id="pf_cam" style="display:none"><video id="pf_video" autoplay playsinline muted style="width:100%;max-width:280px;border-radius:14px;background:#000;display:block;margin:0 auto"></video>'+
+            '<div style="display:flex;gap:10px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="pfSnap()">Take photo</button><button class="chip" onclick="pfStop()">Cancel</button></div></div>'+
+          '<div id="pf_start"><button class="btn" style="width:100%;justify-content:center" onclick="pfCam()">Change photo</button></div>'+
+          '<canvas id="pf_canvas" style="display:none"></canvas>'+
+          '<div id="pf_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'+
+        '<div class="set-sec"><h3>Change password</h3><div class="card" style="padding:15px">'+
+          '<input id="pw_old" class="field" type="password" placeholder="Current password" autocomplete="current-password" />'+
+          '<input id="pw_new" class="field" style="margin-top:10px" type="password" placeholder="New password" autocomplete="new-password" />'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="changePw()">Change password</button>'+
+          '<div id="pw_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'+
+        '<div class="set-sec"><div class="card"><div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div></div></div>');
+    }
+    function changePw(){ var o=$("pw_old"),n=$("pw_new"),m=$("pw_msg"); if(m) m.textContent="";
+      post("/api/me/password",{old:(o||{}).value||"",new:(n||{}).value||""}).then(function(){ toast("Password changed ✓"); if(o)o.value=""; if(n)n.value=""; }).catch(function(e){ if(m) m.textContent=e.message||"Could not change."; }); }
+    var _pfStream=null;
+    function pfCam(){ var m=$("pf_msg"); if(m) m.textContent=""; if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ if(m) m.textContent="Camera not available."; return; }
+      navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}}).then(function(s){ _pfStream=s; var v=$("pf_video"); if(v){ v.srcObject=s; } var c=$("pf_cam"),st=$("pf_start"); if(c)c.style.display="block"; if(st)st.style.display="none"; }).catch(function(){ if(m) m.textContent="Could not open the camera."; }); }
+    function pfStop(){ if(_pfStream){ try{ _pfStream.getTracks().forEach(function(t){t.stop();}); }catch(e){} _pfStream=null; } var c=$("pf_cam"),st=$("pf_start"); if(c)c.style.display="none"; if(st)st.style.display=""; }
+    function pfSnap(){ var v=$("pf_video"),cv=$("pf_canvas"),m=$("pf_msg"); if(!v||!cv){ return; } var w=v.videoWidth||360,h=v.videoHeight||360; var mx=360,sc=Math.min(1,mx/Math.max(w,h)); cv.width=Math.round(w*sc); cv.height=Math.round(h*sc);
+      var ctx=cv.getContext("2d"); ctx.drawImage(v,0,0,cv.width,cv.height); var data=cv.toDataURL("image/jpeg",0.6); pfStop();
+      if(m) m.textContent="Saving…"; post("/api/me/photo",{photo:data}).then(function(){ ME.user.photo=data; var im=$("meImg"),a=$("meAvatar"); if(im)im.src=data; if(a)a.hidden=false; toast("Photo updated ✓"); openProfile(); }).catch(function(e){ if(m){ m.className="err"; m.textContent=e.message||"Could not save."; } }); }
+
+    // ---------- Single device: one account = one device ----------
+    var _tkPoll=null;
+    function showTakeover(){ var el=$("takeover"); if(el){ el.hidden=false; return; }
+      el=document.createElement("div"); el.id="takeover"; el.style.cssText="position:fixed;inset:0;z-index:9999;background:var(--bg);display:grid;place-items:center;padding:24px;text-align:center";
+      el.innerHTML='<div style="max-width:380px"><div style="width:64px;height:64px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;margin-bottom:16px">'+ic("lock")+'</div>'+
+        '<h2 style="margin:0 0 8px">You are signed in on another device</h2>'+
+        '<p class="muted" style="margin:0 0 18px">Your account can only be signed in on one device at a time. To use it here, sign out the other device.</p>'+
+        '<button class="btn" id="tkBtn" style="width:100%;justify-content:center" onclick="claimDevice()">Use this device</button>'+
+        '<div id="tkMsg" class="err" style="margin-top:10px;min-height:16px"></div>'+
+        '<div class="row" style="cursor:pointer;justify-content:center;margin-top:14px" onclick="signOut()"><div class="rt" style="color:var(--err)">Sign out</div></div></div>';
+      document.body.appendChild(el);
+    }
+    function hideTakeover(){ var el=$("takeover"); if(el){ el.hidden=true; } }
+    function claimDevice(){ var m=$("tkMsg"); if(m) m.textContent="";
+      post("/api/claim-device",{}).then(function(){ hideTakeover(); loadMe().then(function(){ go(curTab||"home"); }); }).catch(function(e){ if(m) m.textContent=(e&&e.message)||"Could not switch."; }); }
+
+    // ---------- Access management (who can access) ----------
+    function backToSettings(){ stopPresPoll(); ovlSet("Settings", settingsHtml()); }
+    function accessUnlockHtml(msg){ return '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>'+
+      '<div class="card" style="padding:16px">'+
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'+ic("lock")+'<b>Admin panel</b></div>'+
+      '<p class="muted" style="margin:0 0 12px">Enter the main password (the one set in Cloudflare) to continue.</p>'+
+      '<input id="admpw" class="field" type="password" placeholder="Main password" autocomplete="off" />'+
+      '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="unlockAccess()">Unlock</button>'+
+      '<div id="accmsg" class="err" style="margin-top:10px;min-height:18px">'+esc(msg||"")+'</div></div>'; }
+    function openAccess(){ if(_admPw||ME.admin){ loadAccess(); } else { ovlSet("Admin", accessUnlockHtml()); var i=$("admpw"); if(i) i.focus(); } }
+    function unlockAccess(){ var i=$("admpw"); var pw=i?i.value:""; if(!pw){ return; } _admPw=pw; loadAccess(); }
+    function loadAccess(){ ovlSet("Admin", '<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div><div id="acc"><span class="spinner"></span>Loading…</div>');
+      Promise.all([ post("/api/admin/list",{admin:_admPw}),
+        post("/api/admin/config",{admin:_admPw}).then(function(d){return d.config||{};}).catch(function(){return {};}),
+        post("/api/admin/users",{admin:_admPw}).catch(function(){return {users:null};}),
+        post("/api/admin/presence",{admin:_admPw}).catch(function(){return {online:[]};}) ])
+        .then(function(res){ renderAdmin(res[0], res[1]||{}, res[2]||{}, res[3]||{}); })
+        .catch(function(e){ _admPw=""; ovlSet("Admin", accessUnlockHtml(e.message||"Wrong password.")); var i=$("admpw"); if(i) i.focus(); }); }
+    var _presTimer=null;
+    function presenceRow(o, now){ var ago=Math.max(0,Math.round((now-(o.seen||0))/1000)); var when=ago<10?"now":(ago<60?ago+"s ago":Math.round(ago/60)+"m ago");
+      return '<div class="code-item"><div style="width:40px;height:40px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((o.name||"?").slice(0,1).toUpperCase())+'</div>'+
+        '<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(o.name||"Guest")+'</div><div class="ci-code">'+esc(o.view||"—")+' · '+when+'</div></div>'+
+        '<span style="width:10px;height:10px;border-radius:999px;background:'+(ago<40?"#34d399":"#fbbf24")+';flex:none"></span></div>'; }
+    function presenceListHtml(pres){ var now=(pres&&pres.now)||Date.now(); var on=(pres&&pres.online)||[];
+      return on.length ? on.map(function(o){ return presenceRow(o, now); }).join("") : '<p class="muted" style="margin:0;padding:12px 15px">Nobody is on right now.</p>'; }
+    function stopPresPoll(){ if(_presTimer){ clearInterval(_presTimer); _presTimer=null; } }
+    function refreshPres(){ post("/api/admin/presence",{admin:_admPw}).then(function(p){ var el=$("presList"); if(!el){ stopPresPoll(); return; }
+      el.innerHTML=presenceListHtml(p); var c=$("presCount"); if(c) c.textContent=((p.online||[]).length); }).catch(function(){}); }
+    function userAvatar(u){ return (u.photo && /^data:image/.test(u.photo))
+      ? '<img src="'+esc(u.photo)+'" alt="" style="width:46px;height:46px;border-radius:999px;object-fit:cover;flex:none" />'
+      : '<div style="width:46px;height:46px;border-radius:999px;background:var(--grad);display:grid;place-items:center;color:#fff;font-weight:700;flex:none">'+esc((u.email||"?").slice(0,1).toUpperCase())+'</div>'; }
+    function userAction(id, action, extra){ var body={admin:_admPw,action:action,id:id}; if(extra){ for(var k in extra) body[k]=extra[k]; }
+      post("/api/admin/user",body).then(function(){ toast(action==="approve"?"Approved ✓":"Done."); loadAccess(); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function userReset(id){ var p=prompt("Enter a new password for this account:"); if(p===null) return; if(p.length<8){ toast("Password must be at least 8 characters."); return; }
+      post("/api/admin/user",{admin:_admPw,action:"resetpw",id:id,password:p}).then(function(){ toast("Password reset ✓"); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function userCreate(){ var nm=$("nu_n"),e=$("nu_e"),p=$("nu_p"),w=$("nu_w"),m=$("nu_msg"); if(m) m.textContent="";
+      post("/api/admin/user",{admin:_admPw,action:"create",name:(nm||{}).value||"",email:(e||{}).value||"",phone:(p||{}).value||"",password:(w||{}).value||""}).then(function(){ toast("Account created."); loadAccess(); }).catch(function(err){ if(m) m.textContent=err.message||"Could not create."; }); }
+    var _cfgEdit={features:{}};
+    function toggleRow(k,label){ var on=_cfgEdit.features[k]!==false;
+      return '<div class="row"><div class="rlabel"><div class="rt">'+esc(label)+'</div></div><div class="seg" id="cf_'+k+'">'+
+        '<button data-v="on" class="'+(on?"on":"")+'" onclick="cfgSet(\\''+k+'\\',\\'on\\')">On</button>'+
+        '<button data-v="off" class="'+(on?"":"on")+'" onclick="cfgSet(\\''+k+'\\',\\'off\\')">Off</button></div></div>'; }
+    function cfgSet(k,v){ _cfgEdit.features[k]=(v==="on"); segMark("cf_"+k, v); }
+    function cfgPick(key,v){ _cfgEdit[key]=v; segMark("cfp_"+key, v); }
+    function optBtn(key,v,label){ var on=(_cfgEdit[key]||"")===v; return '<button data-v="'+esc(v)+'" class="'+(on?"on":"")+'" onclick="cfgPick(\\''+key+'\\',\\''+v+'\\')">'+esc(label)+'</button>'; }
+    function cfgAccent(k){ _cfgEdit.accent=k; var box=$("cfgAccent"); if(box){ [].forEach.call(box.children,function(b){ b.style.borderColor=(b.getAttribute("data-v")===k)?"#fff":"transparent"; }); }
+      var rs=document.documentElement.style; if(k&&CFG_ACCENTS[k]){ rs.setProperty("--accent",CFG_ACCENTS[k][0]); rs.setProperty("--accent-2",CFG_ACCENTS[k][1]); } else { rs.removeProperty("--accent"); rs.removeProperty("--accent-2"); } }
+    function accentRow(){ var opts=[""].concat(Object.keys(CFG_ACCENTS));
+      return '<label class="muted" style="font-size:.8rem">Accent color</label><div id="cfgAccent" style="display:flex;gap:9px;flex-wrap:wrap;margin:6px 0 0">'+
+        opts.map(function(k){ var bg=k?('linear-gradient(135deg,'+CFG_ACCENTS[k][0]+','+CFG_ACCENTS[k][1]+')'):'var(--surface-3)'; var sel=(_cfgEdit.accent||"")===k;
+          return '<button data-v="'+esc(k)+'" onclick="cfgAccent(\\''+k+'\\')" title="'+esc(k||"Default")+'" style="width:34px;height:34px;border-radius:999px;border:2px solid '+(sel?"#fff":"transparent")+';background:'+bg+';cursor:pointer;flex:none"></button>'; }).join("")+'</div>'; }
+    var FEAT_LABELS={banners:"Featured banners",albums:"Albums",popular:"Popular",search:"Search",genres:"Genres",categories:"Categories",playlists:"Playlists",artists:"Artists",stories:"Stories",downloads:"Downloads",favorites:"Favorites (♥)"};
+    function saveAdminConfig(){ var an=$("cfgApp"), am=$("cfgAnn"), ow=$("cfgOwner"), m=$("cfgMsg"); if(m) m.textContent="";
+      if(an) _cfgEdit.appName=an.value; if(am) _cfgEdit.announcement=am.value; if(ow) _cfgEdit.ownerEmail=ow.value;
+      post("/api/admin/config",{admin:_admPw,config:_cfgEdit}).then(function(d){ _setSaved=true; _adm.cfg=d.config||_cfgEdit; applyConfig(d.config||_cfgEdit); toast("Saved ✓"); })
+        .catch(function(e){ if(m){ m.textContent=e.message||"Could not save."; } else toast(e.message||"Could not save."); }); }
+
+    // ---- Admin: hub + separate section pages ----
+    var _adm={};
+    function sectRow(key,icon,title,sub,badge){ return '<div class="arow" onclick="adminSection(\\''+key+'\\')">'+
+      '<div class="aic">'+ic(icon)+'</div><div class="rlabel" style="flex:1;min-width:0"><div class="rt">'+esc(title)+(badge?' <span class="abadge">'+esc(String(badge))+'</span>':'')+'</div><div class="rd">'+esc(sub||"")+'</div></div>'+ic("chevron_right")+'</div>'; }
+    function renderAdmin(d, cfg, usersData, presData){
+      _adm={d:d, cfg:cfg||{}, users:usersData||{}, pres:presData||{}};
+      var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
+      if(!d.kv){ ovlSet("Admin", back+kvSetupHtml()); return; }
+      _cfgEdit={appName:_adm.cfg.appName||"",announcement:_adm.cfg.announcement||"",theme:_adm.cfg.theme||"",lang:_adm.cfg.lang||"",accent:_adm.cfg.accent||"",ownerEmail:_adm.cfg.ownerEmail||"",features:{}};
+      CFG_FEATURES.forEach(function(k){ _cfgEdit.features[k]=(_adm.cfg.features&&_adm.cfg.features[k])!==false; });
+      adminHub();
+    }
+    function adminHub(){
+      stopPresPoll();
+      var back='<div class="back" onclick="backToSettings()">'+ic("arrow_back_ios_new")+'Settings</div>';
+      var cfg=_adm.cfg||{}, users=(_adm.users&&_adm.users.users)||[], pres=_adm.pres||{};
+      var hasUsers=!(users===null||users===undefined);
+      var pending=hasUsers?users.filter(function(u){return u.status==="pending";}).length:0;
+      var active=hasUsers?users.filter(function(u){return u.status!=="pending"&&u.status!=="rejected";}).length:0;
+      var online=((pres.online)||[]).length;
+      var nFeat=((cfg.featured)||[]).length, nHid=((cfg.hidden)||[]).length;
+      var rows='<div class="set-sec"><h3>Admin center</h3><div class="card" style="padding:6px">'+
+        sectRow('dashboard','graphic_eq','Dashboard','Plays, listeners & charts')+
+        sectRow('online','home','Who’s online',online?(online+' online now'):'Nobody right now',online||"")+
+        sectRow('accounts','artist','Accounts',active+' active'+(pending?(' · '+pending+' waiting'):''),pending||"")+
+        sectRow('content','star','Content',(nFeat||nHid)?(nFeat+' pinned · '+nHid+' hidden'):'Feature or hide albums')+
+        sectRow('music','music_note','Music server login','Zing account for playback')+
+        sectRow('appearance','settings','Appearance','Name, color, theme, language')+
+        sectRow('features','category','Features & sections','Show or hide parts of the app')+
+        sectRow('codes','lock','Access codes','Simple sign-in codes')+
+        sectRow('system','featured_play_list','System & info','Version, storage & status')+
+        '</div></div>';
+      ovlSet("Admin", back+rows);
+    }
+    function adminSection(key){
+      stopPresPoll();
+      var back='<div class="back" onclick="adminHub()">'+ic("arrow_back_ios_new")+'Admin center</div>';
+      var html="", after=null;
+      if(key==="dashboard"){ html=secWrap("Dashboard",'<div id="statsBox"></div><div class="chips" style="padding:0;margin-top:12px"><button class="chip" onclick="loadStats()">'+ic("history")+' Refresh</button><button class="chip" onclick="exportCsv(\\'plays\\')">'+ic("download")+' Export plays</button><button class="chip" onclick="resetStats()">'+ic("delete")+' Reset history</button></div>'); after=loadStats; }
+      else if(key==="online"){ html=secWrap("Who’s online (<span id=\\"presCount\\">"+(((_adm.pres&&_adm.pres.online)||[]).length)+"</span>)",'<div id="presList">'+presenceListHtml(_adm.pres)+'</div>'); after=function(){ _presTimer=setInterval(refreshPres,10000); }; }
+      else if(key==="accounts"){ html=accountsSection(); }
+      else if(key==="content"){ html=contentSection(); }
+      else if(key==="music"){ html=musicSection(); after=loadMusicStatus; }
+      else if(key==="appearance"){ html=appearanceSection(); }
+      else if(key==="features"){ html=featuresSection(); }
+      else if(key==="codes"){ html=codesSection(); }
+      else if(key==="system"){ html=systemSection(); after=loadSystemInfo; }
+      ovlSet("Admin", back+html);
+      if(after) after();
+    }
+    function secWrap(title,inner){ return '<div class="set-sec"><h3>'+title+'</h3><div class="card" style="padding:15px">'+inner+'</div></div>'; }
+    function accountsSection(){
+      var oemail=((_adm.users&&_adm.users.ownerEmail)||"").toLowerCase();
+      var users=(_adm.users&&_adm.users.users);
+      if(users===null||users===undefined){ return secWrap("Accounts",'<p class="muted" style="margin:0">Sign-up accounts need the storage set up first. Then people can request access with email, phone and a selfie.</p>'); }
+      var out="";
+      var pending=users.filter(function(u){return u.status==="pending";});
+      var others=users.filter(function(u){return u.status!=="pending"&&u.status!=="rejected";});
+      if(pending.length){
+        out+='<div class="set-sec"><h3>Requests waiting ('+pending.length+')</h3><div class="card">'+pending.map(function(u){
+          return '<div class="code-item">'+userAvatar(u)+'<div style="min-width:0;flex:1;margin-left:2px"><div class="ci-name">'+esc(u.name||u.email)+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div></div>'+
+            '<button class="btn sm" style="margin:0" onclick="userAction('+u.id+',\\'approve\\')">Approve</button>'+
+            '<button class="trash" title="Reject" onclick="userAction('+u.id+',\\'reject\\')">'+ic("close")+'</button></div>'; }).join("")+'</div></div>';
+      }
+      var alist = others.length
+        ? '<input id="acctSearch" class="field" placeholder="Search by name, email, phone…" autocomplete="off" oninput="filterAccounts()" style="margin-bottom:10px" /><div id="acctList">'+others.map(function(u){ var susp=(u.status==="suspended"); var isOwner=(oemail&&(u.email||"").toLowerCase()===oemail);
+            var sk=esc(((u.name||"")+" "+(u.email||"")+" "+(u.phone||"")).toLowerCase());
+            var meta='<span>'+(u.plays||0)+' plays</span>'+(u.lastSeen?' · <span>seen '+timeAgo(u.lastSeen)+'</span>':'')+(u.created?' · <span>joined '+timeAgo(u.created)+'</span>':'');
+            return '<div class="card acct" data-search="'+sk+'" style="padding:12px;margin-bottom:8px">'+
+              '<div style="display:flex;align-items:center;gap:12px">'+userAvatar(u)+'<div style="flex:1;min-width:0"><div class="ci-name">'+esc(u.name||u.email)+(isOwner?' <span style="color:var(--accent)">(owner)</span>':(u.role==="admin"?' <span style="color:var(--accent)">(admin)</span>':''))+(susp?' <span class="muted">(suspended)</span>':'')+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div><div class="ci-code" style="color:var(--muted);margin-top:2px">'+meta+'</div></div></div>'+
+              '<div class="chips" style="padding:0;margin-top:10px">'+
+                '<button class="chip" onclick="openUserDetail('+u.id+')">'+ic("graphic_eq")+' Listening</button>'+
+                (susp?'<button class="chip" onclick="userAction('+u.id+',\\'unsuspend\\')">Unsuspend</button>':'<button class="chip" onclick="userAction('+u.id+',\\'suspend\\')">Suspend</button>')+
+                (isOwner?'':'<button class="chip" onclick="userAction('+u.id+',\\'setrole\\',{value:'+(u.role==="admin"?0:1)+'})">'+(u.role==="admin"?"Remove admin":"Make admin")+'</button>')+
+                '<button class="chip" onclick="userReset('+u.id+')">Reset password</button>'+
+                '<button class="chip" onclick="userAction('+u.id+',\\'nodl\\',{value:'+(u.nodl?0:1)+'})">'+(u.nodl?'Enable downloads':'Disable downloads')+'</button>'+
+                '<button class="chip" onclick="userAction('+u.id+',\\'remove\\')">Remove</button>'+
+              '</div></div>'; }).join("")+'<div id="acctNone" class="muted" style="display:none;padding:6px 2px">No accounts match.</div></div>'
+        : '<p class="muted" style="margin:2px 0 10px">No accounts yet.</p>';
+      out+='<div class="set-sec"><h3>Accounts ('+others.length+')</h3>'+
+        (others.length?'<div class="chips" style="padding:0;margin-bottom:10px"><button class="chip" onclick="exportCsv(\\'accounts\\')">'+ic("download")+' Export accounts (CSV)</button></div>':'')+alist+
+        '<div class="card" style="padding:15px;margin-top:2px">'+
+          '<div style="font-weight:600;margin-bottom:8px">Create an account</div>'+
+          '<input id="nu_n" class="field" placeholder="Full name" autocomplete="off" />'+
+          '<input id="nu_e" class="field" style="margin-top:10px" type="email" placeholder="Email address" autocomplete="off" />'+
+          '<input id="nu_p" class="field" style="margin-top:10px" type="tel" placeholder="Phone number" autocomplete="off" />'+
+          '<input id="nu_w" class="field" style="margin-top:10px" type="password" placeholder="Password" autocomplete="new-password" />'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="userCreate()">'+ic("person_add")+' Create account</button>'+
+          '<div id="nu_msg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>';
+      return out;
+    }
+    function contentSection(){ var cfg=_adm.cfg||{}; var nFeat=((cfg.featured)||[]).length, nHid=((cfg.hidden)||[]).length;
+      return secWrap("Content — featured &amp; hidden",
+        '<p class="muted" style="margin:0 0 10px">Open any album and use the <b>Admin</b> buttons there to <b>Pin to Home</b> (shows in a “Featured” row) or <b>Hide</b> it from everyone.</p>'+
+        '<div style="display:flex;gap:8px;text-align:center">'+statTile(nFeat,"Pinned to Home",'var(--accent)')+statTile(nHid,"Hidden")+'</div>'+
+        ((nFeat||nHid)?('<div class="chips" style="padding:0;margin-top:10px">'+(nFeat?'<button class="chip" onclick="clearCurate(\\'featured\\')">Clear pinned</button>':'')+(nHid?'<button class="chip" onclick="clearCurate(\\'hidden\\')">Clear hidden</button>':'')+'</div>'):''));
+    }
+    function musicSection(){ return secWrap("Music server login",
+        '<div id="musicStatus" class="muted" style="margin-bottom:12px"><span class="spinner"></span>Checking…</div>'+
+        '<div style="font-weight:600;margin-bottom:6px">Sign in with your Zing account (keeps working — refreshes itself)</div>'+
+        '<input id="mzEmail" class="field" type="email" placeholder="Zing email" autocomplete="off" />'+
+        '<input id="mzPass" class="field" style="margin-top:10px" type="password" placeholder="Zing password" autocomplete="new-password" />'+
+        '<div class="muted" style="font-size:.78rem;margin:10px 0 0">Or paste a one-time session token instead:</div>'+
+        '<input id="mzToken" class="field" style="margin-top:6px" placeholder="Session token (optional)" autocomplete="off" />'+
+        '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn" style="flex:1;justify-content:center" onclick="saveMusic()">Save &amp; test</button><button class="chip" onclick="testMusic()">Test</button></div>'+
+        '<div id="musicMsg" style="margin-top:8px;min-height:16px;font-size:.85rem"></div>'+
+        '<div style="margin-top:6px;display:flex;gap:8px"><button class="chip" onclick="clearMusic()">Clear login</button><button class="chip" onclick="reconMusic()">Stream recon (dev)</button></div>');
+    }
+    function appearanceSection(){ return '<div class="set-sec"><h3>Appearance</h3><div class="card" style="padding:15px">'+
+        '<label class="muted" style="font-size:.8rem">App name</label>'+
+        '<input id="cfgApp" class="field" style="margin:5px 0 14px" placeholder="Zing" value="'+esc(_cfgEdit.appName)+'" />'+
+        accentRow()+
+        '<div style="height:12px"></div><label class="muted" style="font-size:.8rem">Announcement (shown at the top for everyone)</label>'+
+        '<input id="cfgAnn" class="field" style="margin:5px 0 0" placeholder="(none)" value="'+esc(_cfgEdit.announcement)+'" />'+
+        '</div>'+
+        '<div class="card" style="margin-top:10px">'+
+          '<div class="row"><div class="rlabel"><div class="rt">Default theme</div><div class="rd">For people who haven\\'t chosen</div></div><div class="seg" id="cfp_theme">'+optBtn("theme","","Off")+optBtn("theme","dark","Dark")+optBtn("theme","light","Light")+'</div></div>'+
+          '<div class="row"><div class="rlabel"><div class="rt">Default language</div><div class="rd">Names in English or Hebrew</div></div><div class="seg" id="cfp_lang">'+optBtn("lang","","Off")+optBtn("lang","en","EN")+optBtn("lang","he","עברית")+'</div></div>'+
+        '</div>'+
+        '<div class="card" style="margin-top:10px;padding:15px"><label class="muted" style="font-size:.8rem">Owner email — this account (and anyone you make an admin) sees the admin settings</label>'+
+        '<input id="cfgOwner" class="field" style="margin:5px 0 0" type="email" placeholder="you@example.com" value="'+esc(_cfgEdit.ownerEmail)+'" autocomplete="off" /></div>'+
+        '<div style="margin:12px 0"><button class="btn" style="width:100%;justify-content:center" onclick="saveAdminConfig()">Save appearance</button><div id="cfgMsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'; }
+    function featuresSection(){ return '<div class="set-sec"><h3>Features &amp; sections — show / hide for everyone</h3><div class="card">'+
+        CFG_FEATURES.map(function(k){ return toggleRow(k, FEAT_LABELS[k]||k); }).join("")+
+        '</div>'+
+        '<div style="margin:12px 0"><button class="btn" style="width:100%;justify-content:center" onclick="saveAdminConfig()">Save features</button><div id="cfgMsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'; }
+    function codesSection(){ var codes=(_adm.d&&_adm.d.codes)||[];
+      var list = codes.length
+        ? '<div class="card">'+codes.map(function(c){ return '<div class="code-item"><div style="min-width:0"><div class="ci-name">'+esc(c.name||"Someone")+'</div><div class="ci-code">'+esc(c.code)+'</div></div>'+
+            '<button class="trash" title="Remove" data-code="'+esc(c.code)+'" onclick="removeCode(this)">'+ic("delete")+'</button></div>'; }).join("")+'</div>'
+        : '<p class="muted" style="margin:2px 0 0">No codes yet. Add one below.</p>';
+      return '<div class="set-sec"><h3>Quick access codes (optional)</h3>'+
+        '<p class="muted" style="margin:0 0 10px;font-size:.85rem">A simple code to sign in with (no account needed). Your main password always works.</p>'+
+        list+
+        '<div class="card" style="padding:15px;margin-top:10px">'+
+          '<input id="cn" class="field" placeholder="Name (for example: Yossi)" autocomplete="off" />'+
+          '<input id="cc" class="field" style="margin-top:10px" placeholder="Access code / password" autocomplete="off" />'+
+          '<button class="btn" style="margin-top:12px;width:100%;justify-content:center" onclick="addCode()">'+ic("person_add")+' Add code</button>'+
+          '<div id="addmsg" class="err" style="margin-top:8px;min-height:16px"></div></div></div>'; }
+    function systemSection(){ return secWrap("System & info",'<div id="sysBox"><span class="spinner"></span>Checking…</div>'); }
+    function sysRow(label,val,ok){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(label)+'</div></div><div style="font-weight:700;flex:none;color:'+(ok===true?'var(--ok)':ok===false?'var(--err)':'var(--text)')+'">'+esc(String(val))+'</div></div>'; }
+    function loadSystemInfo(){ var box=$("sysBox"); if(!box) return;
+      var users=(_adm.users&&_adm.users.users)||[]; var cfg=_adm.cfg||{};
+      fetch("/api/status").then(function(r){return r.json();}).then(function(s){
+        if(!$("sysBox")) return;
+        var h=sysRow("App version", s.build||"—")+
+          sysRow("Music library (API)", s.apiUrl?"Connected":"Not set", !!s.apiUrl)+
+          sysRow("Audio server", s.audioBase?"Connected":"Not set", !!s.audioBase)+
+          sysRow("Music login", s.token?"Signed in":"Not signed in", !!s.token)+
+          sysRow("Auto-refresh login", s.autoLogin?"On":"Off", !!s.autoLogin)+
+          sysRow("Database (D1)", s.d1?"Connected":"Not set", !!s.d1)+
+          sysRow("Storage", s.kv?"Ready":"Not set", !!s.kv)+
+          sysRow("Accounts", users.length)+
+          sysRow("Pinned albums", ((cfg.featured)||[]).length)+
+          sysRow("Hidden albums", ((cfg.hidden)||[]).length);
+        box.innerHTML=h;
+      }).catch(function(){ if($("sysBox")) box.innerHTML='<div class="empty">Could not load.</div>'; }); }
+    function renderMusicStatus(h){ h=h||{}; var el=$("musicStatus"); if(!el) return; var parts=[];
+      if(h.autologin) parts.push("✓ Signed in"+(h.email?(" ("+esc(h.email)+")"):"")); if(h.token) parts.push("✓ Token set");
+      el.innerHTML=parts.length?('<span style="color:var(--ok)">'+parts.join(" · ")+'</span>'):'<span style="color:var(--warn)">Not set — songs won\\'t play until you sign in here.</span>';
+      var em=$("mzEmail"); if(em&&h.email&&!em.value) em.value=h.email; }
+    function loadMusicStatus(){ post("/api/admin/music",{admin:_admPw,action:"status"}).then(function(d){ renderMusicStatus(d.has); }).catch(function(){}); }
+    function musicMsg(txt,color){ var m=$("musicMsg"); if(m){ m.style.color=color||"var(--muted)"; m.textContent=txt||""; } }
+    function saveMusic(){ musicMsg("Saving & testing…","var(--muted)");
+      post("/api/admin/music",{admin:_admPw,action:"save",email:($("mzEmail")||{}).value||"",password:($("mzPass")||{}).value||"",token:($("mzToken")||{}).value||""}).then(function(d){ renderMusicStatus(d.has); var p=$("mzPass"); if(p)p.value=""; testMusic(); }).catch(function(e){ musicMsg(e.message||"Could not save.","var(--err)"); }); }
+    function testMusic(){ musicMsg("Testing the music server… (up to ~30 seconds)","var(--muted)");
+      var done=false, to=setTimeout(function(){ if(!done) musicMsg("The music server didn’t answer in time — it may be unreachable, or the login is wrong. Try again, or use a token.","var(--err)"); }, 40000);
+      post("/api/admin/music",{admin:_admPw,action:"test"}).then(function(d){ done=true; clearTimeout(to); if(d.has) renderMusicStatus(d.has);
+        if(d.ok){ musicMsg("✓ Works! Music should play now.","var(--ok)"); }
+        else { var extra=""; var dt=d.detail||{};
+          if(dt.loginError) extra+="\\nLogin error: "+dt.loginError;
+          if(dt.audioStatus) extra+="\\nAudio server: HTTP "+dt.audioStatus;
+          if(dt.authMutations&&dt.authMutations.candidates) extra+="\\nAvailable logins: "+(dt.authMutations.candidates.join(", ")||"(none found)");
+          var msg=(d.error||"Test failed.")+extra;
+          var m=$("musicMsg"); if(m){ m.style.color="var(--err)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;margin:0;font-size:.8rem">'+esc(msg)+'</pre><button class="btn sm" style="margin-top:6px" onclick="window._copy='+JSON.stringify(JSON.stringify(msg))+';copyText(this)">Copy</button>'; }
+        } }).catch(function(e){ done=true; clearTimeout(to); musicMsg(e.message||"Test failed.","var(--err)"); }); }
+    function clearMusic(){ if(!confirm("Clear the saved music-server login?")) return; post("/api/admin/music",{admin:_admPw,action:"clear"}).then(function(d){ renderMusicStatus(d.has); musicMsg("Cleared.","var(--muted)"); }).catch(function(){}); }
+    function reconMusic(){ musicMsg("Reading the Zing player… (up to ~30 seconds)","var(--muted)");
+      post("/api/admin/music",{admin:_admPw,action:"recon"}).then(function(d){ var rc=(d&&d.recon)||{}; var info="recon bundles: "+((rc.bundles||[]).length);
+        if(rc.error) info+="\\nerror: "+rc.error;
+        if(rc.pages){ info+="\\npages:"; rc.pages.forEach(function(p){ info+="\\n  "+p.url+" → "+(p.error?("ERR "+p.error):("HTTP "+p.status+" len="+p.len+" | "+(p.head||""))); }); }
+        if(rc.bundles&&rc.bundles.length) info+="\\nbundles:\\n"+rc.bundles.join("\\n");
+        if(rc.hits){ for(var kw in rc.hits){ info+="\\n\\n["+kw+"]\\n"+rc.hits[kw].join("\\n"); } }
+        window._copy=info; var m=$("musicMsg"); if(m){ m.style.color="var(--text)"; m.innerHTML='<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.75rem;max-height:50vh;overflow:auto">'+esc(info)+'</pre><button class="btn sm" style="margin-top:6px" onclick="copyText(this)">Copy</button>'; }
+      }).catch(function(e){ musicMsg(e.message||"Recon failed.","var(--err)"); }); }
+    function statTile(n,label,accent){ return '<div style="flex:1;min-width:0;background:var(--surface-2);border-radius:14px;padding:13px 6px"><div style="font-size:1.5rem;font-weight:800;color:'+(accent||'var(--text)')+'">'+(n||0)+'</div><div class="muted" style="font-size:.7rem;line-height:1.2">'+esc(label)+'</div></div>'; }
+    function timeAgo(at){ if(!at) return "—"; var s=Math.max(0,Math.round((Date.now()-(at||0))/1000)); if(s<60)return s+"s ago"; var m=Math.round(s/60); if(m<60)return m+"m ago"; var h=Math.round(m/60); if(h<24)return h+"h ago"; return Math.round(h/24)+"d ago"; }
+    function barChart(daily){ if(!daily||!daily.length) return "";
+      var max=1; daily.forEach(function(d){ if(d.count>max) max=d.count; });
+      var bars=daily.map(function(d){ var h=Math.round((d.count/max)*54); return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0">'+
+        '<div class="muted" style="font-size:.66rem">'+d.count+'</div>'+
+        '<div style="width:70%;max-width:26px;height:'+Math.max(h,3)+'px;background:linear-gradient(180deg,var(--accent),var(--accent2,var(--accent)));border-radius:5px 5px 2px 2px"></div>'+
+        '<div class="muted" style="font-size:.64rem">'+esc(d.label)+'</div></div>'; }).join("");
+      return '<div style="font-weight:700;margin:16px 0 8px">Plays — last 7 days</div><div style="display:flex;align-items:flex-end;gap:5px;background:var(--surface-2);border-radius:14px;padding:12px 10px;height:104px">'+bars+'</div>'; }
+    function rankRow(i,name,sub,count){ return '<div class="code-item"><div style="width:22px;color:var(--muted);font-weight:700;flex:none">'+(i+1)+'</div><div style="min-width:0;flex:1"><div class="ci-name">'+esc(name)+'</div>'+(sub?'<div class="ci-code">'+esc(sub)+'</div>':'')+'</div><div style="font-weight:800;color:var(--accent);flex:none">'+count+'</div></div>'; }
+    function statsHtml(s){
+      if(s.d1===false||s.error){ return '<div class="empty">'+esc(s.error||"Not available.")+'</div>'; }
+      if(!s.total){ return '<div class="empty">No plays yet. Once people start listening, you\\'ll see what\\'s popular here.</div>'; }
+      var tiles='<div style="display:flex;gap:7px;text-align:center;margin-bottom:9px">'+statTile(s.total,"All-time plays")+statTile(s.month,"This month")+statTile(s.week,"This week")+statTile(s.today,"Today")+'</div>'+
+        '<div style="display:flex;gap:7px;text-align:center;margin-bottom:6px">'+statTile(s.listeners,"Listeners",'var(--accent)')+statTile(s.activeWeek,"Active this week",'var(--accent)')+statTile(s.activeToday,"Active today",'var(--accent)')+'</div>';
+      var chart=barChart(s.daily);
+      var top=(s.topTracks||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Top songs</div>'+(s.topTracks||[]).slice(0,12).map(function(t,i){ return rankRow(i,t.title||("Track "+t.track),t.artist||"",t.count); }).join("")):'';
+      var arts=(s.topArtists||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Top artists</div>'+(s.topArtists||[]).slice(0,10).map(function(a,i){ return rankRow(i,a.artist,"",a.count); }).join("")):'';
+      var users=(s.topUsers||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Most active listeners</div>'+(s.topUsers||[]).map(function(u,i){ return rankRow(i,u.name,"",u.count); }).join("")):'';
+      var recent=(s.recent||[]).length?('<div style="font-weight:700;margin:16px 0 6px">Recent plays</div>'+(s.recent||[]).slice(0,25).map(function(r){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(r.title||"—")+'</div><div class="ci-code">'+esc(r.name)+(r.artist?' · '+esc(r.artist):'')+' · '+timeAgo(r.at)+'</div></div></div>'; }).join("")):'';
+      return tiles+chart+top+arts+users+recent;
+    }
+    function filterAccounts(){ var q=(($("acctSearch")||{}).value||"").trim().toLowerCase(); var list=$("acctList"); if(!list) return; var cards=list.querySelectorAll(".acct"); var shown=0;
+      cards.forEach(function(c){ var ok=!q||(c.getAttribute("data-search")||"").indexOf(q)>=0; c.style.display=ok?"":"none"; if(ok)shown++; });
+      var none=$("acctNone"); if(none) none.style.display=shown?"none":"block"; }
+    function exportCsv(what){ toast("Preparing…");
+      fetch("/api/admin/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admin:_admPw,what:what})}).then(function(r){ if(!r.ok) throw new Error("Export failed ("+r.status+")"); return r.blob(); }).then(function(blob){
+        var url=URL.createObjectURL(blob); var a=document.createElement("a"); a.href=url; a.download=(what==="accounts"?"accounts.csv":"plays.csv"); document.body.appendChild(a); a.click();
+        setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); },1500); toast("Downloaded ✓");
+      }).catch(function(e){ toast(e.message||"Export failed"); }); }
+    function resetStats(){ if(!confirm("Clear ALL listening history? This cannot be undone.")) return;
+      post("/api/admin/stats",{admin:_admPw,action:"reset"}).then(function(){ toast("History cleared."); loadStats(); }).catch(function(e){ toast(e.message||"Failed."); }); }
+    function openUserDetail(id){
+      var users=(_adm.users&&_adm.users.users)||[]; var u=null; for(var i=0;i<users.length;i++){ if(users[i].id===id){ u=users[i]; break; } }
+      var back='<div class="back" onclick="adminSection(\\'accounts\\')">'+ic("arrow_back_ios_new")+'Accounts</div>';
+      ovlSet("Admin", back+secWrap(u?esc(u.name||u.email):"Account",'<div id="udBox"><span class="spinner"></span>Loading…</div>'));
+      post("/api/admin/userplays",{admin:_admPw,id:id}).then(function(d){ var box=$("udBox"); if(!box) return;
+        var head=u?('<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">'+userAvatar(u)+'<div style="min-width:0"><div class="ci-name">'+esc(u.name||u.email)+'</div><div class="ci-code">'+esc(u.email)+' · '+esc(u.phone||"")+'</div>'+(u.lastSeen?'<div class="ci-code" style="color:var(--muted)">Last seen '+timeAgo(u.lastSeen)+'</div>':'')+'</div></div>'):'';
+        var tiles='<div style="display:flex;gap:8px;text-align:center;margin-bottom:6px">'+statTile(d.total,"Total plays")+statTile(d.week,"This week")+'</div>';
+        var top=(d.top||[]).length?('<div style="font-weight:700;margin:14px 0 6px">Their top songs</div>'+(d.top||[]).map(function(t,i){ return rankRow(i,t.title||("Track "+t.track),t.artist||"",t.count); }).join("")):'';
+        var rec=(d.recent||[]).length?('<div style="font-weight:700;margin:14px 0 6px">Recent plays</div>'+(d.recent||[]).map(function(r){ return '<div class="code-item"><div style="min-width:0;flex:1"><div class="ci-name">'+esc(r.title||"—")+'</div><div class="ci-code">'+esc(r.artist||"")+' · '+timeAgo(r.at)+'</div></div></div>'; }).join("")):'<div class="empty">No plays yet.</div>';
+        box.innerHTML=head+tiles+top+rec;
+      }).catch(function(e){ var box=$("udBox"); if(box) box.innerHTML='<div class="empty">'+esc(e.message||"Could not load.")+'</div>'; }); }
+    function loadStats(){ var box=$("statsBox"); if(!box) return; box.innerHTML='<div class="empty" style="padding:16px"><span class="spinner"></span>Loading…</div>';
+      post("/api/admin/stats",{admin:_admPw}).then(function(s){ box.innerHTML=statsHtml(s); }).catch(function(e){ if(e&&e.message==="login")return; box.innerHTML='<div class="empty">'+esc((e&&e.message)||"Could not load.")+'</div>'; }); }
+    function addCode(){ var n=($("cn")||{}).value||"", c=($("cc")||{}).value||""; var m=$("addmsg"); if(m) m.textContent="";
+      if(!c.trim()){ if(m) m.textContent="Enter a code."; return; }
+      post("/api/admin/add",{admin:_admPw,name:n,code:c}).then(function(){ toast("Added."); loadAccess(); })
+        .catch(function(e){ if(m) m.textContent=e.message||"Could not add."; }); }
+    function removeCode(btn){ var code=btn.getAttribute("data-code")||"";
+      post("/api/admin/remove",{admin:_admPw,code:code}).then(function(){ toast("Removed."); loadAccess(); })
+        .catch(function(e){ toast(e.message||"Could not remove."); }); }
+    function kvSetupHtml(){ return '<div class="card" style="padding:16px;line-height:1.6">'+
+      '<div style="font-weight:700;margin-bottom:8px">One quick setup step</div>'+
+      '<p class="muted" style="margin:0 0 12px">To manage accounts and app settings, the app needs a small storage area (free). You can use a <b>D1 SQL database</b> or a <b>KV namespace</b> — either one.</p>'+
+      '<div style="font-weight:600;margin:2px 0 4px">Option A — D1 (SQL database)</div>'+
+      '<ol class="steps muted">'+
+        '<li>In Cloudflare, open <b>Storage &amp; Databases → D1</b> → <b>Create</b>. Give it any name.</li>'+
+        '<li>Open your Worker → <b>Settings → Bindings</b> → <b>Add binding</b> → <b>D1 database</b>. Set the variable name to <code>DB</code> and choose the database you just made.</li>'+
+        '<li>Deploy again, then come back. (The tables are created automatically.)</li>'+
+      '</ol>'+
+      '<div style="font-weight:600;margin:10px 0 4px">Option B — KV</div>'+
+      '<ol class="steps muted">'+
+        '<li><b>Storage &amp; Databases → KV</b> → <b>Create instance</b>.</li>'+
+        '<li>Worker → <b>Settings → Bindings</b> → <b>KV namespace</b>, variable name <code>ZING_KV</code>.</li>'+
+        '<li>Deploy again.</li>'+
+      '</ol>'+
+      '<p class="muted" style="margin:12px 0 0">Until then, everyone signs in with the one main password — that keeps working.</p></div>'; }
+
+    // ---------- Diagnostics ----------
+    function diagBox(html){ var d=$("diag"); if(d) d.innerHTML = html? '<div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px">'+html+'</div>':''; }
+    function runCheck(){ diagBox('<span class="spinner"></span>Checking…');
+      fetch("/api/check").then(function(r){ if(r.status===401){location.href="/";throw new Error("login");} return r.json(); }).then(function(s){
+        var api=s.api||{},audio=s.audio||{},login=s.login||{},L=[];
+        L.push((api.reachable===false?"❌ ":(api.status===200?"✅ ":"⚠️ "))+"Music API"+(api.error?": "+esc(api.error):""));
+        if(login.configured!==false) L.push((login.ok?"✅ ":"❌ ")+"Auto-login"+(login.error?": "+esc(login.error):" works"));
+        L.push((audio.reachable===false?"❌ ":(audio.status===403?"❌ ":"✅ "))+"Audio"+(audio.status?" ("+audio.status+")":"")+(audio.error?": "+esc(audio.error):""));
+        var ti=s.tokenInfo, extra=""; if(ti&&ti.iss) extra='<div style="margin-top:8px;font-size:.8rem" class="muted">Token: '+esc(ti.iss)+'</div>';
+        diagBox('<b>Connection</b><div style="margin-top:8px;line-height:1.9">'+L.join("<br>")+'</div>'+extra);
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    function showSchema(){ diagBox('<span class="spinner"></span>Reading…');
+      fetch("/api/schema").then(function(r){return r.json();}).then(function(s){ if(s.error){diagBox("Error: "+esc(s.error));return;}
+        var f=s.queryFields||[]; var txt="QUERIES:\\n"+f.map(function(x){return "- "+x.name+"("+(x.args||[]).join(", ")+") -> "+(x.returns||"?");}).join("\\n");
+        var types=s.types||{}; txt+="\\n\\nTYPES:\\n"; Object.keys(types).forEach(function(k){ txt+=k+": "+types[k].join(", ")+"\\n\\n"; });
+        window._copy=txt; diagBox('<b>API structure</b> <button class="btn sm" onclick="copyText(this)">Copy</button><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.75rem;margin-top:8px">'+esc(txt)+'</pre>');
+      }).catch(function(e){ diagBox("Error: "+esc(e.message||e)); });
+    }
+    function downloadText(name, text){
+      try{ var blob=new Blob([text||""],{type:"text/plain;charset=utf-8"}); var url=URL.createObjectURL(blob);
+        var a=document.createElement("a"); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 4000); toast("Saved "+name); }catch(e){ toast("Could not download."); }
+    }
+    function showFullSchema(){ diagBox('<span class="spinner"></span>Reading the whole structure…');
+      fetch("/api/schema/full").then(function(r){ if(r.status===401){location.href="/";throw new Error("login");} return r.json(); }).then(function(s){
+        if(s.error){ diagBox("Error: "+esc(s.error)); return; }
+        window._copy=s.text||""; var c=s.counts||{};
+        diagBox('<b>Full structure</b>'+
+          '<div class="muted" style="margin:8px 0;font-size:.85rem">'+(c.queries||0)+' queries · '+(c.types||0)+' types · '+(c.inputs||0)+' filters · '+(c.enums||0)+' enums'+(c.mutations?(' · '+c.mutations+' mutations'):'')+'</div>'+
+          '<div class="chips" style="padding:0"><button class="chip" onclick="copyText(this)">Copy</button><button class="chip" onclick="downloadText(\\'zing-structure.txt\\', window._copy)">Download file</button></div>'+
+          '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:10px;max-height:52vh;overflow:auto">'+esc(s.text||"")+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    function showZingConfig(){ diagBox('<span class="spinner"></span>Reading Zing settings…');
+      gql("query { appConfigs(take: 500, orderBy: [{ priority: desc }]) { id key category value description os zingPlayer isActive appVersion minApiVersion priority updatedAt } }").then(function(d){
+        var items=d.appConfigs||[];
+        if(!items.length){ diagBox('<b>Zing settings</b><div class="muted" style="margin-top:8px">No settings were returned (they may be admin-only).</div>'); return; }
+        var byCat={}; items.forEach(function(c){ var k=c.category||"other"; (byCat[k]=byCat[k]||[]).push(c); });
+        var text="ZING SETTINGS (appConfigs) — "+items.length+" entries\\n\\n"; var html='<b>Zing settings</b> ('+items.length+')';
+        html+='<div class="chips" style="padding:0;margin:8px 0"><button class="chip" onclick="copyText(this)">Copy</button><button class="chip" onclick="downloadText(\\'zing-settings.txt\\', window._copy)">Download file</button></div>';
+        Object.keys(byCat).sort().forEach(function(cat){
+          text+="===== "+cat+" =====\\n";
+          html+='<div class="set-sec"><h3>'+esc(cat)+'</h3>';
+          byCat[cat].forEach(function(c){
+            var val; try{ val=JSON.stringify(c.value); }catch(e){ val=String(c.value); }
+            text+="- "+c.key+(c.os?(" ["+c.os+"]"):"")+(c.isActive===false?" (inactive)":"")+" = "+val+(c.description?("   // "+c.description):"")+"\\n";
+            html+='<div class="card" style="padding:12px;margin-bottom:8px"><div style="font-weight:700;word-break:break-word">'+esc(c.key)+(c.os?' <span class="muted" style="font-weight:400">['+esc(c.os)+']</span>':'')+(c.isActive===false?' <span class="muted">(inactive)</span>':'')+'</div>'+
+              (c.description?'<div class="muted" style="font-size:.82rem;margin:3px 0">'+esc(c.description)+'</div>':'')+
+              '<pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.74rem;margin:6px 0 0">'+esc(val)+'</pre></div>';
+          });
+          text+="\\n"; html+='</div>';
+        });
+        window._copy=text; diagBox(html);
+      }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    function showZingActions(){ diagBox('<span class="spinner"></span>Reading Zing actions…');
+      gql("query { __schema { mutationType { fields { name args { name } } } } }").then(function(d){
+        var fields=((((d.__schema)||{}).mutationType)||{}).fields||[];
+        if(!fields.length){ diagBox('<b>Zing actions</b><div class="muted" style="margin-top:8px">No actions were returned (they may be admin-only).</div>'); return; }
+        function verb(n){ var m=n.match(/^(createOne|updateOne|deleteOne|upsertOne|createMany|updateMany|deleteMany|create|update|delete|upsert|set|add|remove|send|generate|import|approve|reject|toggle|assign|revoke|link|unlink|move|reorder|sync|refresh|start|stop|cancel|restore|claim|submit|review)/); return m?m[1]:"other"; }
+        var groups={}; fields.forEach(function(f){ var v=verb(f.name); (groups[v]=groups[v]||[]).push(f); });
+        var text="ZING ACTIONS (operations you can do on the system) — "+fields.length+"\\n\\n"; var html='<b>Zing actions</b> ('+fields.length+')';
+        html+='<div class="muted" style="font-size:.82rem;margin:6px 0">These are the operations Zing\\'s system supports. Shown for reference only.</div>';
+        html+='<div class="chips" style="padding:0;margin:8px 0"><button class="chip" onclick="copyText(this)">Copy</button><button class="chip" onclick="downloadText(\\'zing-actions.txt\\', window._copy)">Download file</button></div>';
+        Object.keys(groups).sort().forEach(function(g){ text+="===== "+g+" ("+groups[g].length+") =====\\n";
+          html+='<div class="set-sec"><h3>'+esc(g)+' ('+groups[g].length+')</h3><div class="card" style="padding:8px 14px">';
+          groups[g].forEach(function(f){ var line=f.name+"("+(f.args||[]).map(function(a){return a.name;}).join(", ")+")"; text+="- "+line+"\\n";
+            html+='<div style="font-size:.8rem;padding:4px 0;border-bottom:1px solid var(--line);word-break:break-word">'+esc(line)+'</div>'; });
+          text+="\\n"; html+='</div></div>'; });
+        window._copy=text; diagBox(html);
+      }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    function showImageInfo(){ diagBox('<span class="spinner"></span>Reading…');
+      gql('query { t: __type(name:"Images"){ fields { name type { kind name ofType { kind name } } } } }').then(function(d){
+        var fs=(d.t&&d.t.fields)||[]; var scalar=fs.filter(function(f){ var t=f.type||{}; return t.kind==="SCALAR"||(t.kind==="NON_NULL"&&t.ofType&&t.ofType.kind==="SCALAR"); }).map(function(f){return f.name;});
+        var sub=scalar.length?"images { "+scalar.join(" ")+" }":"";
+        return gql("query { artists(take:1){ image "+sub+" } playlists(take:1){ image cdnImage } albums(take:1){ "+sub+" } }").then(function(dd){
+          var txt="scalar: "+scalar.join(", ")+"\\nartist.image="+JSON.stringify(dd.artists&&dd.artists[0]&&dd.artists[0].image)+"\\nplaylist.cdnImage="+JSON.stringify(dd.playlists&&dd.playlists[0]&&dd.playlists[0].cdnImage)+"\\nalbum.images="+JSON.stringify(dd.albums&&dd.albums[0]&&dd.albums[0].images);
+          window._copy=txt; diagBox('<b>Image format</b> <button class="btn sm" onclick="copyText(this)">Copy</button><pre dir="ltr" style="white-space:pre-wrap;word-break:break-all;font-size:.75rem;margin-top:8px">'+esc(txt)+'</pre>');
+        });
+      }).catch(function(e){ if(e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    function probeNew(){ diagBox('<span class="spinner"></span>Checking what the server returns for new music…');
+      post("/api/probe/new",{admin:_admPw}).then(function(d){ var p=(d&&d.probe)||[]; if(!p.length){ diagBox("No result."); return; }
+        var txt=p.map(function(v){ if(v.error) return "• "+v.label+" → ERROR: "+v.error;
+          var lines=(v.rows||[]).map(function(r){ return "    #"+r.id+"  "+(r.name||"")+"   released:"+(r.releasedAt||"-")+(r.createdAt?("   created:"+r.createdAt):""); });
+          return "• "+v.label+" ("+v.count+")\\n"+lines.join("\\n"); }).join("\\n\\n");
+        window._copy=txt;
+        diagBox('<b>New releases (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this (or a screenshot) so I can fix which list the newest music comes from.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    function probeAudio(){ diagBox('<span class="spinner"></span>Testing a single vs. an album on the music server…');
+      post("/api/probe/audio",{admin:_admPw}).then(function(d){ if(d.error){ diagBox("Error: "+esc(d.error)); return; }
+        function fmtT(x){ if(!x||!x.track){ return "(none found)"; } var t=x.track;
+          var lines=(t.results||[]).map(function(r){ return "    "+r.label+" → "+(r.error?("ERROR "+r.error):("HTTP "+r.status+(r.type?(" "+r.type):"")+(r.len?(" len="+r.len):""))); });
+          return x.album+"  ("+x.tracks+" tracks)\\n    id="+t.id+"  file="+(t.file||"(none)")+"\\n"+lines.join("\\n"); }
+        var txt="SINGLE:\\n"+fmtT(d.single)+"\\n\\nALBUM:\\n"+fmtT(d.album);
+        window._copy=txt;
+        diagBox('<b>Singles (debug)</b> <button class="btn sm" onclick="copyText(this)">Copy</button><div class="muted" style="margin:6px 0">Send me this — it shows how a single differs from an album on the music server.</div><pre dir="ltr" style="white-space:pre-wrap;word-break:break-word;font-size:.72rem;margin-top:8px">'+esc(txt)+'</pre>');
+      }).catch(function(e){ if(e&&e.message==="login")return; diagBox("Error: "+esc(e.message||e)); });
+    }
+    window.probeAudio=probeAudio;
+    function copyText(btn){ var t=window._copy||""; try{ navigator.clipboard.writeText(t).then(function(){btn.textContent="Copied!";},function(){fb();}); }catch(e){ fb(); }
+      function fb(){ var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand("copy");}catch(e){} ta.remove(); btn.textContent="Copied!"; } }
+
+    // expose
+    window.go=go; window.openArtist=openArtist; window.openAlbum=openAlbum; window.openGenre=openGenre; window.openPlaylist=openPlaylist;
+    window.openCategory=openCategory; window.openBannerUrl=openBannerUrl; window.openStory=openStory; window.openArticle=openArticle;
+    window.browseAlbums=browseAlbums; window.loadMoreAlbums=loadMoreAlbums; window.playSearchTrack=playSearchTrack;
+    window.playAlbum=playAlbum; window.playList=playList; window.downloadTrack=downloadTrack; window.downloadAlbum=downloadAlbum;
+    window.togglePlay=togglePlay; window.nextTrack=nextTrack; window.prevTrack=prevTrack; window.dlCurrent=dlCurrent;
+    window.showLyrics=showLyrics; window.closeOverlay=closeOverlay; window.openSettings=openSettings;
+    window.runCheck=runCheck; window.showSchema=showSchema; window.showImageInfo=showImageInfo; window.copyText=copyText; window.probeNew=probeNew;
+    window.showFullSchema=showFullSchema; window.downloadText=downloadText; window.showZingConfig=showZingConfig; window.showZingActions=showZingActions;
+    window.openNowPlaying=openNowPlaying; window.npLyrics=npLyrics; window.npSimilar=npSimilar; window.playSimilar=playSimilar;
+    window.toggleShuffle=toggleShuffle; window.cycleRepeat=cycleRepeat; window.seekTo=seekTo; window.npTab=npTab; window.jumpQueue=jumpQueue;
+    window.openHistory=openHistory; window.playHistory=playHistory; window.dlFromHistory=dlFromHistory;
+    window.likeCurrent=likeCurrent; window.toggleLike=toggleLike; window.openLiked=openLiked; window.playLiked=playLiked; window.unlike=unlike;
+    window.openSleep=openSleep; window.setSleep=setSleep; window.setRadio=setRadio; window.clearData=clearData;
+    window.playNext=playNext; window.addToQueue=addToQueue;
+    window.openMyPlaylists=openMyPlaylists; window.openMyPlaylist=openMyPlaylist; window.playMyPlaylist=playMyPlaylist; window.newPlaylistPrompt=newPlaylistPrompt; window.deletePlaylist=deletePlaylist; window.removeFromPlaylist=removeFromPlaylist;
+    window.choosePlaylist=choosePlaylist; window.addToPlaylistUI=addToPlaylistUI; window.newPlaylistAdd=newPlaylistAdd;
+    window.songMenu=songMenu; window.songMenuAlbum=songMenuAlbum; window.menuLike=menuLike; window.menuPlaylist=menuPlaylist; window.menuPlayNext=menuPlayNext; window.menuAddQueue=menuAddQueue;
+    window.browseLibrary=browseLibrary; window.saveArtist=saveArtist; window.saveAlbum=saveAlbum;
+    window.setLang=setLang; window.setTheme=setTheme; window.setAutoplay=setAutoplay; window.signOut=signOut;
+    window.openAccess=openAccess; window.backToSettings=backToSettings; window.unlockAccess=unlockAccess; window.addCode=addCode; window.removeCode=removeCode;
+    window.cfgSet=cfgSet; window.saveAdminConfig=saveAdminConfig; window.cfgPick=cfgPick; window.cfgAccent=cfgAccent;
+    window.userAction=userAction; window.userCreate=userCreate; window.userReset=userReset; window.openProfile=openProfile; window.changePw=changePw; window.loadStats=loadStats;
+    window.saveMusic=saveMusic; window.testMusic=testMusic; window.clearMusic=clearMusic; window.loadMusicStatus=loadMusicStatus;
+    window.pfCam=pfCam; window.pfStop=pfStop; window.pfSnap=pfSnap; window.showTakeover=showTakeover; window.hideTakeover=hideTakeover; window.claimDevice=claimDevice;
+
+
+    // ---------- Recent searches, keyboard shortcuts, lock-screen seek ----------
+    function getRecentQ(){ try{ var a=JSON.parse(localStorage.getItem("zing_recentq")||"[]"); return Array.isArray(a)?a.slice(0,8):[]; }catch(e){ return []; } }
+    function saveRecentQ(q){ try{ var a=getRecentQ().filter(function(x){ return x.toLowerCase()!==q.toLowerCase(); }); a.unshift(q); localStorage.setItem("zing_recentq",JSON.stringify(a.slice(0,8))); }catch(e){} }
+    function clearRecentQ(){ try{ localStorage.removeItem("zing_recentq"); }catch(e){} doSearch(""); }
+    function pickRecentQ(i){ var v=getRecentQ()[i]; if(!v) return; var q=$("q"); if(q) q.value=v; doSearch(v); }
+    window.removeFromQ=removeFromQ; window.clearUpcoming=clearUpcoming; window.clearRecentQ=clearRecentQ; window.pickRecentQ=pickRecentQ;
+    document.addEventListener("keydown", function(e){
+      var tg=e.target&&e.target.tagName; if(tg==="INPUT"||tg==="TEXTAREA"||tg==="SELECT"||(e.target&&e.target.isContentEditable)) return;
+      if(e.ctrlKey||e.metaKey||e.altKey) return;
+      var k=e.key;
+      if(k===" "||k==="k"){ if(queue.length){ e.preventDefault(); togglePlay(); } }
+      else if(k==="ArrowRight"){ if(queue.length){ e.preventDefault(); if(e.shiftKey) nextTrack(); else skipBy(SET.skip||15); } }
+      else if(k==="ArrowLeft"){ if(queue.length){ e.preventDefault(); if(e.shiftKey) prevTrack(); else skipBy(-(SET.skip||15)); } }
+      else if(k==="ArrowUp"){ if(queue.length){ e.preventDefault(); setVol(Math.min(100,(audio.volume*100)+5)); } }
+      else if(k==="ArrowDown"){ if(queue.length){ e.preventDefault(); setVol(Math.max(0,(audio.volume*100)-5)); } }
+      else if(k==="s"){ toggleShuffle(); }
+      else if(k==="r"){ cycleRepeat(); }
+      else if(k==="l"){ if(queue.length) likeCurrent(); }
+      else if(k==="m"){ audio.muted=!audio.muted; toast(audio.muted?"Muted":"Unmuted"); }
+      else if(k==="/"){ e.preventDefault(); go("search"); }
+    });
+    if("mediaSession" in navigator){ try{
+      navigator.mediaSession.setActionHandler("seekto", function(d){ if(d&&d.seekTime!=null&&audio.duration){ audio.currentTime=Math.max(0,Math.min(audio.duration,d.seekTime)); } });
+      navigator.mediaSession.setActionHandler("stop", function(){ audio.pause(); });
+    }catch(e){} }
+    var _lastPS=0;
+    audio.addEventListener("timeupdate", function(){ var n=Date.now(); if(n-_lastPS<1500) return; _lastPS=n;
+      try{ if("mediaSession" in navigator&&navigator.mediaSession.setPositionState&&audio.duration&&isFinite(audio.duration)){
+        navigator.mediaSession.setPositionState({duration:audio.duration,playbackRate:audio.playbackRate||1,position:Math.min(audio.currentTime,audio.duration)}); } }catch(e){} });
+
+
+    // ---------- Shuffle button, page title, offline notice ----------
+    function shufflePlay(kind,id){
+      var n=0; if(kind==="album"){ var al=(window._albums||{})[id]; n=al&&al.tracks?al.tracks.length:0; } else { n=(window._listTracks||[]).length; }
+      if(!n) return; _shuffle=true; try{ localStorage.setItem("zing_shuffle","1"); }catch(e){}
+      var i=Math.floor(Math.random()*n); if(kind==="album") playAlbum(id,i); else playList(i); syncSheet(); }
+    function shuffleAlbum(id){ shufflePlay('album',id); } function shuffleList(){ shufflePlay('list'); }
+    try{ if("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function(){}); }catch(e){}
+    window.shuffleAlbum=shuffleAlbum; window.shuffleList=shuffleList;
+    var _baseTitle=document.title;
+    audio.addEventListener("playing", function(){ var t=queue[qi]; if(t) document.title="\u25B6 "+(t.title||"")+(t.artist?" \u2014 "+t.artist:""); });
+    audio.addEventListener("pause", function(){ document.title=_baseTitle; });
+    window.addEventListener("offline", function(){ toast("You're offline. Playback will resume when you're back online."); });
+    window.addEventListener("online", function(){ toast("Back online."); });
+
+    document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
+    hydrateIcons(); checkStatus(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000);
+    // Personal workspace. Device-local, with no changes to connected favorites.
+    var UXKEY="zing_workspace", UX={accent:"site",density:"comfortable",motion:"system",confirmDownloads:true};
+    try{Object.assign(UX,JSON.parse(localStorage.getItem(UXKEY)||"{}"));}catch(e){}
+    function uxSave(){try{localStorage.setItem(UXKEY,JSON.stringify(UX));}catch(e){toast("Could not save this preference.");}}
+    function applyUX(){var r=document.documentElement;r.dataset.density=UX.density;r.dataset.motion=UX.motion;var c={purple:["#7c5cff","#ff4d8d"],green:["#159c72","#29b8ca"],blue:["#3478f6","#9b5cff"],rose:["#d83d78","#a65cf5"]};if(c[UX.accent]){r.style.setProperty("--accent",c[UX.accent][0]);r.style.setProperty("--accent-2",c[UX.accent][1]);}}
+    function setUX(k,v){if(k==="confirmDownloads")v=v==="on";UX[k]=v;uxSave();if(k==="accent"&&v==="site")applyConfig(CFG);applyUX();openSettings();}
+    applyUX();
+    function localList(k){try{var a=JSON.parse(localStorage.getItem(k)||"[]");return Array.isArray(a)?a:[];}catch(e){return [];}}
+    function localWrite(k,a){try{localStorage.setItem(k,JSON.stringify(a));return true;}catch(e){toast("Storage is full or unavailable. Nothing was saved.");return false;}}
+    function libraryHub(){return '<div class="workspace-banner"><div class="kicker">YOUR SPACE</div><h2>Music, your way.</h2><p class="muted">Your favorites, playlists and listening tools, one tap away.</p><div class="chips"><button class="chip" onclick="browseLibrary()">'+ic("favorite")+' Library</button><button class="chip" onclick="openMyPlaylists()">'+ic("queue_music")+' Playlists</button><button class="chip" onclick="openHistory()">'+ic("history")+' History</button><button class="chip" onclick="openSettings()">'+ic("settings")+' Settings</button></div></div>';}
+    var remoteLibrary=browseLibrary;
+    function browseConnectedLibrary(){remoteLibrary();}
+    var _libFilter="all",_libQuery="",_libSort="name";
+    browseLibrary=function(){curTab="library";setTab("");var t=$("tabLibrary");if(t)t.classList.add("active");setStatus("");
+      setView('<div class="workspace-banner"><div class="kicker">YOUR MUSIC</div><h2>Library</h2><p class="muted">Saved on this browser. Not synced between devices. Export a backup in Settings.</p><div class="chips"><button class="chip" onclick="newPlaylistPrompt()">+ New playlist</button><button class="chip" onclick="openLiked()">Liked songs ('+getLiked().length+')</button><button class="chip" onclick="openHistory()">History</button><button class="chip" onclick="browseConnectedLibrary()">Connected library</button></div></div><div class="library-tools"><input class="field" id="libQ" placeholder="Filter your library..." aria-label="Filter your library" oninput="_libQuery=this.value;renderLibraryItems()"><div class="chips">'+["all","playlists","albums","artists"].map(function(k){return '<button class="chip '+(_libFilter===k?'on':'')+'" data-lib="'+k+'" onclick="setLibraryFilter(\\''+k+'\\')">'+k[0].toUpperCase()+k.slice(1)+'</button>';}).join("")+'</div></div><div id="libraryItems"></div>');_libQuery="";renderLibraryItems();};
+    function setLibraryFilter(k){_libFilter=k;document.querySelectorAll("[data-lib]").forEach(function(b){b.classList.toggle("on",b.dataset.lib===k);});renderLibraryItems();}
+    function renderLibraryItems(){var box=$("libraryItems");if(!box)return;var q=_libQuery.toLowerCase(),rows=[];
+      getPlaylists().forEach(function(p){rows.push({type:"playlists",name:p.name,sub:p.tracks.length+" songs",action:"openMyPlaylist('"+p.id+"')"});});
+      localList("zing_saved_albums").forEach(function(a){rows.push({type:"albums",name:albName(a),sub:artNames(a.artists),action:"openAlbum("+Number(a.id)+")",img:albImg(a)});});
+      localList("zing_followed_artists").forEach(function(a){rows.push({type:"artists",name:pick(a.enName,a.heName)||"Artist",sub:"Following",action:"openArtist("+Number(a.id)+")",img:a.image});});
+      rows=rows.filter(function(r){return (_libFilter==="all"||r.type===_libFilter)&&(r.name+" "+r.sub).toLowerCase().indexOf(q)>=0;});rows.sort(function(a,b){return a.name.localeCompare(b.name);});
+      box.innerHTML=rows.length?'<div class="grid albums">'+rows.map(function(r){return '<button class="tile library-tile" onclick="'+esc(r.action)+'">'+coverHtml(r.name,{img:r.img,round:r.type==="artists"})+'<div class="c-name">'+esc(r.name)+'</div><div class="c-sub">'+esc(r.sub)+'</div><div class="kicker">'+esc(r.type)+'</div></button>';}).join("")+'</div>':'<div class="empty"><h3>'+(q?'No matches':'Make this space yours')+'</h3>'+(q?'Try another name or filter.':'Save an album, follow an artist, or make a playlist. Your liked songs and history are above.')+'</div>';}
+    function savedAlbum(id){return localList("zing_saved_albums").some(function(x){return String(x.id)===String(id);});}
+    function followedArtist(id){return localList("zing_followed_artists").some(function(x){return String(x.id)===String(id);});}
+    function saveLocalAlbum(id){var a=(window._albums||{})[id];if(!a)return;var l=localList("zing_saved_albums"),has=savedAlbum(id);if(localWrite("zing_saved_albums",has?l.filter(function(x){return String(x.id)!==String(id);}):[a].concat(l))){toast(has?"Removed from this device":"Album saved on this device");renderAlbum(id,a);}}
+    function followLocalArtist(id){var a=(window._artistRecords||{})[id]||artists.filter(function(x){return String(x.id)===String(id);})[0];if(!a)return;var l=localList("zing_followed_artists"),has=followedArtist(id);if(localWrite("zing_followed_artists",has?l.filter(function(x){return String(x.id)!==String(id);}):[a].concat(l))){toast(has?"Artist unfollowed":"Following on this device");var b=$("followArtist");if(b)b.textContent=has?"Follow artist":"Following - unfollow";}}
+    function renamePlaylist(id){var l=getPlaylists(),p=l.filter(function(p){return p.id===id;})[0];if(!p)return;var n=prompt("Playlist name:",p.name);if(n===null||!n.trim())return;p.name=n.trim().slice(0,60);savePlaylists(l);openMyPlaylist(id);}
+    function movePlaylistTrack(id,i,d){var l=getPlaylists(),p=l.filter(function(p){return p.id===id;})[0];if(!p||i+d<0||i+d>=p.tracks.length)return;var t=p.tracks.splice(i,1)[0];p.tracks.splice(i+d,0,t);savePlaylists(l);openMyPlaylist(id);}
+    function duplicatePlaylist(id){var p=getPlaylists().filter(function(p){return p.id===id;})[0];if(!p)return;var n=createPlaylist(p.name+" (copy)"),l=getPlaylists();l[0].tracks=p.tracks.slice();savePlaylists(l);openMyPlaylist(n.id);}
+    function moveQueueTrack(idx,d){var p=_order.indexOf(idx),n=p+d,c=_order.indexOf(qi);if(p<=c||n<=c||n>=_order.length)return;var t=_order[p];_order[p]=_order[n];_order[n]=t;npQueue();}
+    function keyboardHelp(){overlay("Keyboard shortcuts",'<div class="card">'+[["Space / K","Play or pause"],["Left / Right","Seek backward / forward"],["Shift + Left / Right","Previous / next song"],["Up / Down","Volume"],["S / R","Shuffle / repeat"],["L / M","Like / mute"],["/","Search"],["?","This help"]].map(function(x){return row(x[0],x[1],"");}).join("")+'</div><p class="muted">Shortcuts are paused while typing in an input.</p>');}
+    function sharePage(){var url=location.origin+location.pathname+location.hash;if(navigator.share){navigator.share({title:document.title,url:url}).catch(function(){});}else if(navigator.clipboard){navigator.clipboard.writeText(url).then(function(){toast("Link copied");}).catch(function(){prompt("Copy this link:",url);});}else prompt("Copy this link:",url);}
+    function exportLibrary(){var keys=["zing_liked","zing_playlists","zing_hist","zing_saved_albums","zing_followed_artists","zing_settings",UXKEY],data={app:"Zing",version:1,exportedAt:new Date().toISOString(),data:{}};keys.forEach(function(k){try{var s=localStorage.getItem(k);if(s)data.data[k]=JSON.parse(s);}catch(e){}});var blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="zing-library-backup.json";a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},3000);toast("Library backup downloaded. Keep it private.");}
+    var baseSettingsHtml=settingsHtml;
+    settingsHtml=function(){return '<div class="workspace-banner"><div class="kicker">MAKE IT YOURS</div><h2>Settings & listening tools</h2><p class="muted">Personal preferences are saved on this browser.</p><div class="chips"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openPersonalMixes()">Personal mixes</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="keyboardHelp()">Keyboard shortcuts</button><button class="chip" onclick="sharePage()">Share page</button></div></div><div class="set-sec"><h3>Appearance</h3><div class="card">'+
+      row("Accent","Your personal color; does not change the site for others",segEl("uxAccent",[["site","Site"],["purple","Purple"],["green","Green"],["blue","Blue"],["rose","Rose"]],UX.accent,"setAccent"))+
+      row("Density","Roomy or compact song lists",segEl("uxDensity",[["comfortable","Roomy"],["compact","Compact"]],UX.density,"setDensity"))+
+      row("Motion","Use your device preference or turn animations off",segEl("uxMotion",[["system","System"],["reduced","Reduced"]],UX.motion,"setMotion"))+'</div></div>'+baseSettingsHtml()+'<div class="set-sec"><h3>Audio & downloads</h3><div class="card">'+
+      row("Audio quality","Original quality provided by the music source. No extra bitrate or offline tier is available.","")+
+      row("Album download confirmation","Ask before starting multiple downloads",segEl("uxDownload",[["on","On"],["off","Off"]],UX.confirmDownloads?"on":"off","setDownloadConfirm"))+
+      row("Download location","Your browser controls the download folder and file prompts","")+'</div><p class="muted">Fade-in is available above. Crossfade and true gapless playback are not supported by this streaming player. Premium restrictions still apply.</p></div><div class="set-sec"><h3>Backup & privacy</h3><div class="card">'+row("Export your library","Download likes, playlists, follows, albums, history and preferences",ic("download"),"exportLibrary()")+row("Restore a backup","Merge a private JSON backup from another browser",ic("upload"),"pickLibraryBackup()")+row("Library storage","Stored on this device. Clearing browser data removes it; backups are not automatic.","")+'</div></div>';};
+    function setAccent(v){setUX("accent",v);}function setDensity(v){setUX("density",v);}function setMotion(v){setUX("motion",v);}function setDownloadConfirm(v){setUX("confirmDownloads",v);}
+    var baseDownloadAlbum=downloadAlbum;
+    downloadAlbum=function(id){var a=(window._albums||{})[id];if(!a||!dlAllowed())return;if(UX.confirmDownloads&&!confirm("Download all "+(a.tracks||[]).length+" tracks? Your browser may ask to allow multiple files."))return;baseDownloadAlbum(id);};
+    document.addEventListener("keydown",function(e){if(e.key==="?"&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/INPUT|TEXTAREA|SELECT/.test((e.target||{}).tagName||"")&&!e.target.isContentEditable){e.preventDefault();keyboardHelp();}});
+
+    // Optional Web Audio equalizer. No second stream or upstream request.
+    var EQF=[60,170,350,1000,3500,10000],EQCTX=null,EQSRC=null,EQGAIN=null,EQNODES=[],EQON=false,EQFAILED=false;
+    var EQPRESETS={flat:[0,0,0,0,0,0],bass:[6,4,1,0,-1,-1],voice:[-3,-2,1,4,3,0],soft:[0,0,-1,-2,-3,-4]};
+    var EQVALUES=Array.isArray(UX.eq)&&UX.eq.length===6?UX.eq.map(function(v){return Math.max(-12,Math.min(12,Number(v)||0));}):EQPRESETS.flat.slice();
+    function updateEQ(){if(!EQGAIN)return;var headroom=EQON?Math.pow(10,-Math.max.apply(null,[0].concat(EQVALUES))/20):1;EQGAIN.gain.setTargetAtTime(headroom,EQCTX.currentTime,.02);EQNODES.forEach(function(n,i){n.gain.setTargetAtTime(EQON?EQVALUES[i]:0,EQCTX.currentTime,.02);});}
+    async function enableEQ(){if(EQFAILED){toast("Equalizer unavailable in this session. Reload to try again.");return;}if(EQON){EQON=false;updateEQ();openEqualizer();return;}
+      var C=window.AudioContext||window.webkitAudioContext;if(!C){toast("Equalizer is not supported by this browser.");return;}
+      try{if(!EQCTX)EQCTX=new C();await EQCTX.resume();if(EQCTX.state!=="running"){toast("Play a song, then enable the equalizer.");return;}
+        if(!EQSRC){EQGAIN=EQCTX.createGain();EQNODES=EQF.map(function(f){var n=EQCTX.createBiquadFilter();n.type="peaking";n.frequency.value=f;n.Q.value=1;return n;});
+          var last=EQGAIN;EQNODES.forEach(function(n){last.connect(n);last=n;});last.connect(EQCTX.destination);EQSRC=EQCTX.createMediaElementSource(audio);EQSRC.connect(EQGAIN);}
+        EQON=true;updateEQ();openEqualizer();
+      }catch(e){EQON=false;if(EQSRC){try{EQSRC.disconnect();EQSRC.connect(EQCTX.destination);}catch(_){}EQFAILED=true;}toast("Equalizer unavailable. Standard playback remains selected.");}}
+    function eqBand(i,v){EQVALUES[i]=Math.max(-12,Math.min(12,Number(v)||0));UX.eq=EQVALUES.slice();uxSave();updateEQ();var n=$("eqValue"+i);if(n)n.textContent=(EQVALUES[i]>0?"+":"")+EQVALUES[i]+" dB";}
+    function eqPreset(k){if(!EQPRESETS[k])return;EQVALUES=EQPRESETS[k].slice();UX.eq=EQVALUES.slice();uxSave();updateEQ();openEqualizer();}
+    function openEqualizer(){overlay("Equalizer",'<div class="workspace-banner"><div class="kicker">SOUND, YOUR WAY</div><h2>Equalizer</h2><p class="muted">Six bands with automatic headroom to reduce clipping. This changes playback on this browser, not the source file or downloads.</p><button class="btn" onclick="enableEQ()">'+(EQON?'Turn off':'Enable equalizer')+'</button></div><div class="chips">'+Object.keys(EQPRESETS).map(function(k){return '<button class="chip '+(EQVALUES.join(',')===EQPRESETS[k].join(',')?'on':'')+'" onclick="eqPreset(\\''+k+'\\')">'+k[0].toUpperCase()+k.slice(1)+'</button>';}).join("")+'</div><div class="eq-grid">'+EQF.map(function(f,i){return '<div class="eq-band"><label for="eqBand'+i+'">'+(f>=1000?f/1000+" kHz":f+" Hz")+'</label><input id="eqBand'+i+'" aria-label="'+f+' Hz gain" type="range" min="-12" max="12" step="1" value="'+EQVALUES[i]+'" oninput="eqBand('+i+',this.value)"><output id="eqValue'+i+'">'+(EQVALUES[i]>0?'+':'')+EQVALUES[i]+' dB</output></div>';}).join("")+'</div><p class="muted">'+(EQON?'Equalizer is active.':'Presets are saved; enable the equalizer to hear them. Enable again after reopening the browser.')+'</p>');}
+    audio.addEventListener("play",function(){if(EQCTX&&EQCTX.state==="suspended")EQCTX.resume().catch(function(){});});
+    function cleanMix(list){var seen={};return list.filter(function(t){if(!t||seen[t.id])return false;seen[t.id]=true;return true;});}
+    function getPersonalMix(k){return cleanMix(k==="favorites"?getLiked():getHistory().concat(getLiked()));}
+    function personalMixesHtml(){var a=getPersonalMix("rotation"),b=getPersonalMix("favorites");return '<div class="sec">'+secHead("Made from your music")+'<p class="muted" style="margin:0 18px 12px">Mixes from your likes and history on this browser. Based on songs you already played or liked.</p><div class="mix-grid">'+[["rotation","Your rotation",a.length,"Your recent songs and favorites"],["favorites","Favorites mix",b.length,"Shuffle the songs you love"]].map(function(x){return '<button class="mix-card" onclick="playPersonalMix(\\''+x[0]+'\\')"><span class="kicker">PERSONAL MIX</span><strong>'+x[1]+'</strong><span>'+x[3]+'</span><small>'+(x[2]?x[2]+' songs':'Start listening and liking songs')+'</small></button>';}).join("")+'</div></div>';}
+    function playPersonalMix(k){var l=getPersonalMix(k).map(normTrack);if(!l.length){toast("Play and like songs to build your personal mixes.");return;}for(var i=l.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1)),t=l[i];l[i]=l[j];l[j]=t;}startQueue(l,0);toast(k==="favorites"?"Playing Favorites mix":"Playing Your rotation");}
+    function customSleep(){var e=$("sleepMins"),n=e?Number(e.value):0;if(!Number.isInteger(n)||n<1||n>720){toast("Choose between 1 and 720 minutes.");return;}setSleep(String(n));}
+    var originalSleep=openSleep;
+    openSleep=function(){originalSleep();var b=$("ovlBody");if(b)b.insertAdjacentHTML("beforeend",'<div class="card" style="padding:14px;margin-top:14px"><label for="sleepMins">Custom timer (minutes)</label><div style="display:flex;gap:10px;margin-top:8px"><input class="field" id="sleepMins" type="number" min="1" max="720" value="20"><button class="btn" onclick="customSleep()">Set timer</button></div></div>');};
+    function filterSongRows(input){var box=input.closest("#ovlBody");if(!box)return;var q=input.value.toLowerCase();box.querySelectorAll(".tracks .track").forEach(function(r){r.hidden=r.textContent.toLowerCase().indexOf(q)<0;});}
+    function addSongFilter(){var b=$("ovlBody");if(b&&b.querySelector(".track"))b.insertAdjacentHTML("afterbegin",'<input class="field" aria-label="Filter songs" placeholder="Filter songs..." oninput="filterSongRows(this)" style="margin-bottom:14px">');}
+    var originalLiked=openLiked,originalHistory=openHistory,originalPersonalPlaylist=openMyPlaylist;
+    openLiked=function(){originalLiked();addSongFilter();};openHistory=function(){originalHistory();addSongFilter();};openMyPlaylist=function(id){originalPersonalPlaylist(id);addSongFilter();};
+    var beforeAudioSettings=settingsHtml;
+    settingsHtml=function(){return beforeAudioSettings()+'<div class="set-sec"><h3>Listening desk</h3><div class="card">'+row("Equalizer","Six bands: Flat, Bass, Voice and Soft presets",ic("graphic_eq"),"openEqualizer()")+row("Personal mixes","Build mixes from your likes and recent songs",ic("shuffle"),"openPersonalMixes()")+'</div></div>';};
+    function openPersonalMixes(){overlay("Personal mixes",personalMixesHtml());}
+
+    // Merge only whitelisted, validated music data. Never execute backup fields.
+    function backupText(v,n){return typeof v==="string"?v.slice(0,n||500):"";}
+    function backupImage(v){return typeof v==="string"&&/^https:\\/\\//.test(v)&&!/["'<>\\\\\\x00-\\x20]/.test(v)?v.slice(0,2048):null;}
+    function backupId(v){var n=Number(v);return Number.isSafeInteger(n)&&n>0?n:0;}
+    function backupTrack(t){if(!t||!backupId(t.id))return null;return {id:backupId(t.id),title:backupText(t.title),artist:backupText(t.artist),file:backupText(t.file,2048),coverImg:backupImage(t.coverImg),at:Math.max(0,Math.min(Date.now(),Number(t.at)||0))};}
+    function backupArtist(a){if(!a||!backupId(a.id))return null;return {id:backupId(a.id),enName:backupText(a.enName),heName:backupText(a.heName),image:backupImage(a.image)};}
+    function backupAlbum(a){if(!a||!backupId(a.id))return null;var im=a.images||{};return {id:backupId(a.id),enName:backupText(a.enName),heName:backupText(a.heName),artists:Array.isArray(a.artists)?a.artists.slice(0,20).map(function(x){return {enName:backupText(x&&x.enName),heName:backupText(x&&x.heName)};}):[],images:{cdnMedium:backupImage(im.cdnMedium||im.medium||im.cdnSmall||im.small)}};}
+    function validatedBackupArray(a,fn,limit){return Array.isArray(a)?a.slice(0,limit).map(fn).filter(Boolean):[];}
+    function mergeBackupArray(key,a,limit){var seen={};var l=localList(key).concat(a).filter(function(x){if(!x||seen[String(x.id)])return false;seen[String(x.id)]=true;return true;});return l.slice(0,Math.max(localList(key).length,limit));}
+    function pickLibraryBackup(){overlay("Restore library backup",'<div class="workspace-banner"><h2>Bring your music back</h2><p class="muted">Choose a Zing JSON backup, up to 5 MB. Songs, albums, artists and playlists are merged with this browser, never deleted. Playback and appearance preferences are restored. Backups stay on this device and are not uploaded.</p><label class="btn" for="backupFile">Choose backup</label><input id="backupFile" type="file" accept="application/json,.json" onchange="readLibraryBackup(this)" style="display:block;margin-top:14px"></div><div id="backupPreview"></div>');}
+    var pendingLibraryBackup=null;
+    async function readLibraryBackup(input){var f=input.files&&input.files[0];if(!f)return;var box=$("backupPreview");pendingLibraryBackup=null;
+      if(f.size>5*1024*1024){box.textContent="This file is over 5 MB.";return;}
+      try{var o=JSON.parse(await f.text());if(!o||o.app!=="Zing"||o.version!==1||!o.data||typeof o.data!=="object")throw new Error();var d=o.data;
+        var p={liked:validatedBackupArray(d.zing_liked,backupTrack,300),history:validatedBackupArray(d.zing_hist,backupTrack,60),albums:validatedBackupArray(d.zing_saved_albums,backupAlbum,500),artists:validatedBackupArray(d.zing_followed_artists,backupArtist,1000),playlists:[]};
+        if(Array.isArray(d.zing_playlists))d.zing_playlists.slice(0,100).forEach(function(x){if(!x||!backupText(x.name,60).trim())return;p.playlists.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,10),name:backupText(x.name,60),tracks:validatedBackupArray(x.tracks,backupTrack,2000)});});
+        var settings=d.zing_settings||{},workspace=d[UXKEY]||{};p.settings={};p.workspace={};
+        if(["en","he"].indexOf(settings.lang)>=0)p.settings.lang=settings.lang;if(["dark","light"].indexOf(settings.theme)>=0)p.settings.theme=settings.theme;
+        ["autoplay","radio","resume","fade"].forEach(function(k){if(typeof settings[k]==="boolean")p.settings[k]=settings[k];});
+        if([.75,1,1.25,1.5,1.75,2].indexOf(settings.speed)>=0)p.settings.speed=settings.speed;if([10,15,30].indexOf(settings.skip)>=0)p.settings.skip=settings.skip;if(typeof settings.vol==="number"&&settings.vol>=0&&settings.vol<=1)p.settings.vol=settings.vol;
+        if(["site","purple","green","blue","rose"].indexOf(workspace.accent)>=0)p.workspace.accent=workspace.accent;if(["comfortable","compact"].indexOf(workspace.density)>=0)p.workspace.density=workspace.density;if(["system","reduced"].indexOf(workspace.motion)>=0)p.workspace.motion=workspace.motion;if(typeof workspace.confirmDownloads==="boolean")p.workspace.confirmDownloads=workspace.confirmDownloads;
+        if(Array.isArray(workspace.eq)&&workspace.eq.length===6)p.workspace.eq=workspace.eq.map(function(v){return Math.max(-12,Math.min(12,Number(v)||0));});
+        pendingLibraryBackup=p;box.innerHTML='<div class="card" style="padding:18px"><h3>Ready to merge</h3><p>'+p.liked.length+' liked songs, '+p.history.length+' history entries, '+p.albums.length+' albums, '+p.artists.length+' artists and '+p.playlists.length+' playlists.</p><p class="muted">Duplicate songs, albums and artists are skipped. Playlists with identical names and song order are skipped. Preferences in the backup replace only matching personal preferences.</p><button class="btn" onclick="restoreLibraryBackup()">Merge and restore</button></div>';
+      }catch(e){box.textContent="This is not a valid Zing backup. Nothing was changed.";}}
+    function restoreLibraryBackup(){var p=pendingLibraryBackup;if(!p)return;var all=getPlaylists().slice();p.playlists.forEach(function(x){var ids=x.tracks.map(function(t){return t.id;}).join(',');if(!all.some(function(y){return y.name===x.name&&y.tracks.map(function(t){return t.id;}).join(',')===ids;}))all.push(x);});
+      if(all.length>300){toast("Too many playlists to restore. Nothing changed.");return;}
+      var values={zing_liked:mergeBackupArray("zing_liked",p.liked,300),zing_hist:mergeBackupArray("zing_hist",p.history,60),zing_saved_albums:mergeBackupArray("zing_saved_albums",p.albums,500),zing_followed_artists:mergeBackupArray("zing_followed_artists",p.artists,1000),zing_playlists:all};values[SET_KEY]=Object.assign({},SET,p.settings);values[UXKEY]=Object.assign({},UX,p.workspace);
+      var before={};try{Object.keys(values).forEach(function(k){before[k]=localStorage.getItem(k);});Object.keys(values).forEach(function(k){localStorage.setItem(k,JSON.stringify(values[k]));});}catch(e){Object.keys(before).forEach(function(k){try{if(before[k]===null)localStorage.removeItem(k);else localStorage.setItem(k,before[k]);}catch(_){}});toast("Not enough browser storage. Restore was not completed.");return;}
+      Object.assign(SET,p.settings);Object.assign(UX,p.workspace);if(p.workspace.eq)EQVALUES=p.workspace.eq.slice();applyTheme();if(UX.accent==="site")applyConfig(CFG);applyUX();updateEQ();try{audio.playbackRate=SET.speed;audio.volume=SET.vol;}catch(e){}pendingLibraryBackup=null;ovlSet("Backup restored",'<div class="empty"><h2>Your library is restored</h2><p>Existing music was kept. New music was merged on this browser.</p><button class="btn" onclick="closeOverlay();browseLibrary()">Open Library</button></div>');}
+
+    function sendShareLink(url,title){if(navigator.share){navigator.share({title:title||document.title,url:url}).catch(function(){});}else if(navigator.clipboard){navigator.clipboard.writeText(url).then(function(){toast("Link copied");}).catch(function(){prompt("Copy this link:",url);});}else prompt("Copy this link:",url);}
+    function shareSong(t){if(!t||!Number.isSafeInteger(Number(t.id))||Number(t.id)<=0){toast("Choose a song first.");return;}sendShareLink(location.origin+location.pathname+"#/track/"+Number(t.id),t.title||"Song on Zing");}
+    sharePage=function(){if(/!playlist\\//.test(location.hash)){toast("Personal playlists live on this browser. Export a backup to move them.");return;}if(/!np$/.test(location.hash)&&queue[qi]){shareSong(queue[qi]);return;}sendShareLink(location.origin+location.pathname+location.hash.split("!")[0]);};
+    function openTrackRoute(id){id=Number(id);if(!Number.isSafeInteger(id)||id<=0){setView('<div class="empty">Song not found.</div>');return;}saveRoute("track",id);setStatus("");setView(skDetail());
+      gql("query { track(where:{id:"+id+"}) { id enName heName file duration artists { enName heName } album { images { cdnSmall cdnMedium medium small } } } }").then(function(d){var t=d.track;if(!t){setView('<div class="empty">This song is not available.</div>');return;}renderTrackList(trackName(t),artNames(t.artists),[t],function(){go("home");},t.album?albImg(t.album):null,"Song");var v=$("view");if(v)v.insertAdjacentHTML("beforeend",'<div class="chips" style="margin:14px 18px"><button class="chip" onclick="shareSong(window._listTracks[0])">Share song</button></div>');}).catch(function(e){if(e.message!=="login")setView('<div class="empty">Could not load this song. Try again from Search.</div>');});}
+
+    // ---------- Navigation history: refresh stays put, Back returns where you were ----------
+    (function(){
+      var cur={b:"#nil#",o:"",i:0,d:0}, applying=false, opening=0, ready=false, restoring=false, userMoved=false, lastSV=0, saveT=null;
+      var BASES={track:1,home:1,albums:1,search:1,genres:1,playlists:1,artists:1,library:1,album:1,artist:1,playlist:1,genre:1,category:1,story:1};
+      function enc(a){ return encodeURIComponent(a==null?"":String(a)); }
+      function mkB(k,a){ return k+((a!==""&&a!=null)?"/"+enc(a):""); }
+      function mkHash(b,o){ return "#/"+b+(o?"!"+o:""); }
+      function parseHash(){ var h=location.hash||""; if(h.indexOf("#/")!==0) return null; var s=h.slice(2), p=s.indexOf("!"), b=p<0?s:s.slice(0,p), o=p<0?"":s.slice(p+1);
+        if(!b||!BASES[b.split("/")[0]]) return null; return {b:b,o:o}; }
+      function bParts(b){ var p=b.indexOf("/"); var k=p<0?b:b.slice(0,p), a=""; if(p>=0){ try{ a=decodeURIComponent(b.slice(p+1)); }catch(e){ a=b.slice(p+1); } } return [k,a]; }
+      function dec(x){ try{ return decodeURIComponent(x||""); }catch(e){ return x||""; } }
+      function numify(a){ return (a!==""&&!isNaN(+a)&&String(+a)===a)?+a:a; }
+      function stateNow(){ var s=history.state; return (s&&typeof s.i==="number")?s:null; }
+      function setState(s,b,o,replace){ try{ if(replace) history.replaceState(s,"",mkHash(b,o)); else history.pushState(s,"",mkHash(b,o)); }catch(e){} }
+      function saveY(){ if(applying||restoring||!ready) return; var s=stateNow(); if(!s) return; var y=Math.round(window.pageYOffset||0); if(s.y===y) return;
+        try{ history.replaceState({i:s.i,d:s.d,y:y},"",location.href); }catch(e){} }
+      window.addEventListener("scroll", function(){ if(restoring) return; clearTimeout(saveT); saveT=setTimeout(saveY,200); }, {passive:true});
+      ["touchstart","wheel","mousedown","keydown"].forEach(function(ev){ window.addEventListener(ev, function(){ userMoved=true; }, {passive:true,capture:true}); });
+      window.addEventListener("pagehide", function(){ saveY(); });
+      try{ history.scrollRestoration="manual"; }catch(e){}
+
+      function commit(b,o,forceReplace){
+        if(applying||!ready) return;
+        if(b===cur.b&&o===cur.o) return;
+        var sameSearch=(!o&&!cur.o&&b.split("/")[0]==="search"&&cur.b.split("/")[0]==="search");
+        var d=o?(cur.o?cur.d+1:1):0;
+        if(forceReplace||sameSearch){ setState({i:cur.i,d:d,y:Math.round(window.pageYOffset||0)},b,o,true); }
+        else { saveY(); cur.i++; setState({i:cur.i,d:d,y:0},b,o,false); }
+        cur.b=b; cur.o=o; cur.d=d;
+      }
+      function waitFor(test,ms,fn){ var t0=Date.now(); (function tick(){ var ok=false; try{ ok=test(); }catch(e){} if(ok){ fn(); } else if(Date.now()-t0<ms){ setTimeout(tick,150); } })(); }
+
+      function renderBase(b){ var p=bParts(b), k=p[0], a=p[1];
+        if(k==="search"){ curTab="search"; setTab("tabSearch"); window._origSaveRoute("search",a); searchView(); var q=$("q"); if(q){ q.value=a; if(a) doSearch(a); } return; }
+        if(k==="library"){ browseLibrary(); return; }
+        var tabs={home:1,albums:1,genres:1,playlists:1,artists:1};
+        if(tabs[k]){ go(k); return; }
+        var opens={track:openTrackRoute,album:openAlbum,artist:openArtist,playlist:openPlaylist,genre:openGenre,category:openCategory,story:openStory};
+        if(opens[k]){ try{ opens[k](numify(a)); }catch(e){ go("home"); } return; }
+        go("home"); }
+      function openOverlayRoute(o){ var p=o.split("/"), k=p[0], a=dec(p.slice(1).join("/"));
+        if(k==="liked") openLiked();
+        else if(k==="history") openHistory();
+        else if(k==="playlists") openMyPlaylists();
+        else if(k==="playlist") openMyPlaylist(a);
+        else if(k==="equalizer") openEqualizer();
+        else if(k==="mixes") openPersonalMixes();
+        else if(k==="sleep") openSleep();
+        else if(k==="shortcuts") keyboardHelp();
+        else if(k==="backup") pickLibraryBackup();
+        else if(k==="settings") openSettings();
+        else if(k==="profile") openProfile();
+        else if(k==="np"){ if(queue[qi]) openNowPlaying(); }
+        else if(k==="admin"){ openSettings(); openAccess();
+          if(p[1]){ var sec=dec(p[1]), uid=p[1]==="user"?dec(p.slice(2).join("/")):null;
+            waitFor(function(){ return _adm&&_adm.d; },8000,function(){ applying=true; try{
+              if(uid!==null){ var us=(_adm.users&&_adm.users.users)||[], id=uid; us.forEach(function(u){ if(String(u.id)===uid) id=u.id; }); openUserDetail(id); }
+              else adminSection(sec); }catch(e){} finally{ applying=false; } }); } } }
+      function startRestore(y){ if(!y){ return; } restoring=true; userMoved=false; var t0=Date.now();
+        (function tick(){ if(userMoved||Date.now()-t0>4500){ restoring=false; saveY(); return; }
+          var cy=window.pageYOffset||0;
+          if(y>cy+3&&(document.documentElement.scrollHeight-window.innerHeight)<y&&cur.b==="albums"&&$("albMore")&&typeof loadMoreAlbums==="function"){ try{ loadMoreAlbums(); }catch(e){} }
+          if(Math.abs(cy-y)>3){ try{ window.scrollTo({top:y,left:0,behavior:"auto"}); }catch(e){ window.scrollTo(0,y); } }
+          else if(Date.now()-lastSV>600&&Date.now()-t0>500){ restoring=false; saveY(); return; }
+          setTimeout(tick,100); })(); }
+      function apply(t,y,st,force){ var wasApplying=applying; applying=true;
+        try{
+          var changedBase=force||t.b!==cur.b;
+          if(changedBase){ if($("ovl")) origClose(true); renderBase(t.b); }
+          if(!t.o){ if($("ovl")){ origClose(true); if(_dirtyView){ _dirtyView=false; go(curTab); } } }
+          else if(t.o!==cur.o||!$("ovl")){ openOverlayRoute(t.o); }
+          cur.b=t.b; cur.o=t.o; cur.i=st.i; cur.d=t.o?(st.d||1):0;
+        } finally { applying=wasApplying; }
+        if(changedBase) startRestore(y); }
+
+      var origSave=window.saveRoute, origClose=window.closeOverlay, origSetView=window.setView, origOverlay=window.overlay;
+      window._origSaveRoute=origSave;
+      window.setView=function(){ lastSV=Date.now(); return origSetView.apply(this,arguments); };
+      window.overlay=function(){ opening++; try{ return origOverlay.apply(this,arguments); } finally { opening--; } };
+      function init(){ if(ready) return; var h=parseHash(), s=stateNow();
+        if(!h){ var r=null; try{ r=JSON.parse(localStorage.getItem("zing_route")||"null"); }catch(e){}
+          h=(r&&r.k&&BASES[r.k])?{b:mkB(r.k,r.a),o:""}:{b:"home",o:""}; s=null; }
+        if(!s){ s={i:0,d:0,y:0}; h.o=""; }
+        if(h.o==="np") h.o="";
+        ready=true; cur={b:"#nil#",o:"",i:s.i,d:s.d};
+        setState({i:s.i,d:h.o?s.d:0,y:s.y||0},h.b,h.o,true);
+        return {h:h,s:s}; }
+      window.saveRoute=function(k,a){ origSave(k,a); if(applying||!BASES[k]) return; if(!ready){ var x=init(); if(x){ cur.b=x.h.b; cur.o=x.h.o; } }
+        var b=mkB(k,a), had=!!cur.o; if($("ovl")&&opening===0&&had){ origClose(true); }
+        if(had){ cur.b="#nil#"; cur.o=""; cur.d=0; }
+        commit(b,""); };
+      var origLib=window.browseLibrary;
+      window.browseLibrary=function(){ if(!applying){ window.saveRoute("library",""); } return origLib.apply(this,arguments); };
+      window.restoreRoute=function(){
+        if(!ready){ var x=init(); apply(x.h,x.s.y||0,x.s,true); return; }
+        apply({b:cur.b,o:cur.o},Math.round(window.pageYOffset||0),{i:cur.i,d:cur.d},true); };
+
+      function wrapO(name,routeFn){ var orig=window[name]; if(typeof orig!=="function") return;
+        window[name]=function(){ if(applying||!ready){ return orig.apply(this,arguments); }
+          var top=(opening===0), r=top?routeFn.apply(null,arguments):null;
+          opening++; var out; try{ out=orig.apply(this,arguments); } finally { opening--; }
+          if(top&&r&&$("ovl")) commit(cur.b,r);
+          return out; }; }
+      wrapO("openEqualizer",function(){return "equalizer";});
+      wrapO("openPersonalMixes",function(){return "mixes";});
+      wrapO("openSleep",function(){return "sleep";});
+      wrapO("keyboardHelp",function(){return "shortcuts";});
+      wrapO("pickLibraryBackup",function(){return "backup";});
+      wrapO("openLiked",function(){ return "liked"; });
+      wrapO("openHistory",function(){ return "history"; });
+      wrapO("openMyPlaylists",function(){ return "playlists"; });
+      wrapO("openMyPlaylist",function(id){ return "playlist/"+enc(id); });
+      wrapO("openSettings",function(){ return "settings"; });
+      wrapO("backToSettings",function(){ return "settings"; });
+      wrapO("openProfile",function(){ return "profile"; });
+      wrapO("openAccess",function(){ return "admin"; });
+      wrapO("adminHub",function(){ return "admin"; });
+      wrapO("adminSection",function(k){ return "admin/"+enc(k); });
+      wrapO("openUserDetail",function(id){ return "admin/user/"+enc(id); });
+      wrapO("openNowPlaying",function(){ return queue[qi]?"np":""; });
+
+      var unwindT=null;
+      window.closeOverlay=function(quiet){
+        if(applying||!ready||opening>0||!cur.o) return origClose.apply(this,arguments);
+        if(quiet!==true){ if(cur.d>0&&cur.i>=cur.d){ history.go(-cur.d); return; } return origClose.apply(this,arguments); }
+        origClose(true); clearTimeout(unwindT);
+        unwindT=setTimeout(function(){ if(!$("ovl")&&cur.o&&!applying&&cur.d>0&&cur.i>=cur.d) history.go(-cur.d); },60); };
+
+      // In-app Back buttons follow browser history when there is a previous in-app page.
+      document.addEventListener("click", function(e){ var t=e.target; var b=t&&t.closest?t.closest(".back"):null; if(!b||!ready||applying) return;
+        var s=stateNow(); if(s&&s.i>0){ e.preventDefault(); e.stopPropagation(); history.back(); } }, true);
+
+      window.addEventListener("popstate", function(e){ if(!ready) return; clearTimeout(unwindT);
+        var st=(e.state&&typeof e.state.i==="number")?e.state:null, h=parseHash()||{b:"home",o:""};
+        if(!st){ st={i:cur.i+1,d:0,y:0}; h.o=""; setState(st,h.b,h.o,true); }
+        apply(h,st.y||0,st,false); });
+    })();
+
+    // Load who-I-am and the shared config BEFORE rendering, so download controls
+    // and features are right, then restore the page you were on (refresh stays put).
+    Promise.all([loadMe(), loadConfig()]).then(function(){ applyUX(); if(!$("takeover")||$("takeover").hidden){ restoreRoute(); } });
+  </script>
+</body>
+</html>`;
+
