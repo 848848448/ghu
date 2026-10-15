@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b98-installable-offline-2026-10-15";
+const BUILD = "b99-history-routing-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -4222,6 +4222,134 @@ const PAGE = `<!DOCTYPE html>
 
     document.addEventListener("visibilitychange", function(){ if(!document.hidden) refreshNew(); });
     hydrateIcons(); checkStatus(); sendPresence(); setInterval(sendPresence, 25000); setInterval(function(){ if(!ME.admin){ loadMe(); } }, 30000); setInterval(refreshNew, 60000);
+    // ---------- Navigation history: refresh stays put, Back returns where you were ----------
+    (function(){
+      var cur={b:"#nil#",o:"",i:0,d:0}, applying=false, opening=0, ready=false, restoring=false, userMoved=false, lastSV=0, saveT=null;
+      var BASES={home:1,albums:1,search:1,genres:1,playlists:1,artists:1,library:1,album:1,artist:1,playlist:1,genre:1,category:1,story:1};
+      function enc(a){ return encodeURIComponent(a==null?"":String(a)); }
+      function mkB(k,a){ return k+((a!==""&&a!=null)?"/"+enc(a):""); }
+      function mkHash(b,o){ return "#/"+b+(o?"!"+o:""); }
+      function parseHash(){ var h=location.hash||""; if(h.indexOf("#/")!==0) return null; var s=h.slice(2), p=s.indexOf("!"), b=p<0?s:s.slice(0,p), o=p<0?"":s.slice(p+1);
+        if(!b||!BASES[b.split("/")[0]]) return null; return {b:b,o:o}; }
+      function bParts(b){ var p=b.indexOf("/"); var k=p<0?b:b.slice(0,p), a=""; if(p>=0){ try{ a=decodeURIComponent(b.slice(p+1)); }catch(e){ a=b.slice(p+1); } } return [k,a]; }
+      function dec(x){ try{ return decodeURIComponent(x||""); }catch(e){ return x||""; } }
+      function numify(a){ return (a!==""&&!isNaN(+a)&&String(+a)===a)?+a:a; }
+      function stateNow(){ var s=history.state; return (s&&typeof s.i==="number")?s:null; }
+      function setState(s,b,o,replace){ try{ if(replace) history.replaceState(s,"",mkHash(b,o)); else history.pushState(s,"",mkHash(b,o)); }catch(e){} }
+      function saveY(){ if(applying||restoring||!ready) return; var s=stateNow(); if(!s) return; var y=Math.round(window.pageYOffset||0); if(s.y===y) return;
+        try{ history.replaceState({i:s.i,d:s.d,y:y},"",location.href); }catch(e){} }
+      window.addEventListener("scroll", function(){ if(restoring) return; clearTimeout(saveT); saveT=setTimeout(saveY,200); }, {passive:true});
+      ["touchstart","wheel","mousedown","keydown"].forEach(function(ev){ window.addEventListener(ev, function(){ userMoved=true; }, {passive:true,capture:true}); });
+      window.addEventListener("pagehide", function(){ saveY(); });
+      try{ history.scrollRestoration="manual"; }catch(e){}
+
+      function commit(b,o,forceReplace){
+        if(applying||!ready) return;
+        if(b===cur.b&&o===cur.o) return;
+        var sameSearch=(!o&&!cur.o&&b.split("/")[0]==="search"&&cur.b.split("/")[0]==="search");
+        var d=o?(cur.o?cur.d+1:1):0;
+        if(forceReplace||sameSearch){ setState({i:cur.i,d:d,y:Math.round(window.pageYOffset||0)},b,o,true); }
+        else { saveY(); cur.i++; setState({i:cur.i,d:d,y:0},b,o,false); }
+        cur.b=b; cur.o=o; cur.d=d;
+      }
+      function waitFor(test,ms,fn){ var t0=Date.now(); (function tick(){ var ok=false; try{ ok=test(); }catch(e){} if(ok){ fn(); } else if(Date.now()-t0<ms){ setTimeout(tick,150); } })(); }
+
+      function renderBase(b){ var p=bParts(b), k=p[0], a=p[1];
+        if(k==="search"){ curTab="search"; setTab("tabSearch"); window._origSaveRoute("search",a); searchView(); var q=$("q"); if(q){ q.value=a; if(a) doSearch(a); } return; }
+        if(k==="library"){ browseLibrary(); return; }
+        var tabs={home:1,albums:1,genres:1,playlists:1,artists:1};
+        if(tabs[k]){ go(k); return; }
+        var opens={album:openAlbum,artist:openArtist,playlist:openPlaylist,genre:openGenre,category:openCategory,story:openStory};
+        if(opens[k]){ try{ opens[k](numify(a)); }catch(e){ go("home"); } return; }
+        go("home"); }
+      function openOverlayRoute(o){ var p=o.split("/"), k=p[0], a=dec(p.slice(1).join("/"));
+        if(k==="liked") openLiked();
+        else if(k==="history") openHistory();
+        else if(k==="playlists") openMyPlaylists();
+        else if(k==="playlist") openMyPlaylist(a);
+        else if(k==="settings") openSettings();
+        else if(k==="profile") openProfile();
+        else if(k==="np"){ if(queue[qi]) openNowPlaying(); }
+        else if(k==="admin"){ openSettings(); openAccess();
+          if(p[1]){ var sec=dec(p[1]), uid=p[1]==="user"?dec(p.slice(2).join("/")):null;
+            waitFor(function(){ return _adm&&_adm.d; },8000,function(){ applying=true; try{
+              if(uid!==null){ var us=(_adm.users&&_adm.users.users)||[], id=uid; us.forEach(function(u){ if(String(u.id)===uid) id=u.id; }); openUserDetail(id); }
+              else adminSection(sec); }catch(e){} finally{ applying=false; } }); } } }
+      function startRestore(y){ if(!y){ return; } restoring=true; userMoved=false; var t0=Date.now();
+        (function tick(){ if(userMoved||Date.now()-t0>4500){ restoring=false; saveY(); return; }
+          var cy=window.pageYOffset||0;
+          if(y>cy+3&&(document.documentElement.scrollHeight-window.innerHeight)<y&&cur.b==="albums"&&$("albMore")&&typeof loadMoreAlbums==="function"){ try{ loadMoreAlbums(); }catch(e){} }
+          if(Math.abs(cy-y)>3){ try{ window.scrollTo({top:y,left:0,behavior:"auto"}); }catch(e){ window.scrollTo(0,y); } }
+          else if(Date.now()-lastSV>600&&Date.now()-t0>500){ restoring=false; saveY(); return; }
+          setTimeout(tick,100); })(); }
+      function apply(t,y,st,force){ var wasApplying=applying; applying=true;
+        try{
+          var changedBase=force||t.b!==cur.b;
+          if(changedBase){ if($("ovl")) origClose(true); renderBase(t.b); }
+          if(!t.o){ if($("ovl")){ origClose(true); if(_dirtyView){ _dirtyView=false; go(curTab); } } }
+          else if(t.o!==cur.o||!$("ovl")){ openOverlayRoute(t.o); }
+          cur.b=t.b; cur.o=t.o; cur.i=st.i; cur.d=t.o?(st.d||1):0;
+        } finally { applying=wasApplying; }
+        if(changedBase) startRestore(y); }
+
+      var origSave=window.saveRoute, origClose=window.closeOverlay, origSetView=window.setView, origOverlay=window.overlay;
+      window._origSaveRoute=origSave;
+      window.setView=function(){ lastSV=Date.now(); return origSetView.apply(this,arguments); };
+      window.overlay=function(){ opening++; try{ return origOverlay.apply(this,arguments); } finally { opening--; } };
+      function init(){ if(ready) return; var h=parseHash(), s=stateNow();
+        if(!h){ var r=null; try{ r=JSON.parse(localStorage.getItem("zing_route")||"null"); }catch(e){}
+          h=(r&&r.k&&BASES[r.k])?{b:mkB(r.k,r.a),o:""}:{b:"home",o:""}; s=null; }
+        if(!s){ s={i:0,d:0,y:0}; h.o=""; }
+        if(h.o==="np") h.o="";
+        ready=true; cur={b:"#nil#",o:"",i:s.i,d:s.d};
+        setState({i:s.i,d:h.o?s.d:0,y:s.y||0},h.b,h.o,true);
+        return {h:h,s:s}; }
+      window.saveRoute=function(k,a){ origSave(k,a); if(applying||!BASES[k]) return; if(!ready){ var x=init(); if(x){ cur.b=x.h.b; cur.o=x.h.o; } }
+        var b=mkB(k,a), had=!!cur.o; if($("ovl")&&opening===0&&had){ origClose(true); }
+        if(had){ cur.b="#nil#"; cur.o=""; cur.d=0; }
+        commit(b,""); };
+      var origLib=window.browseLibrary;
+      window.browseLibrary=function(){ if(!applying){ window.saveRoute("library",""); } return origLib.apply(this,arguments); };
+      window.restoreRoute=function(){
+        if(!ready){ var x=init(); apply(x.h,x.s.y||0,x.s,true); return; }
+        apply({b:cur.b,o:cur.o},Math.round(window.pageYOffset||0),{i:cur.i,d:cur.d},true); };
+
+      function wrapO(name,routeFn){ var orig=window[name]; if(typeof orig!=="function") return;
+        window[name]=function(){ if(applying||!ready){ return orig.apply(this,arguments); }
+          var top=(opening===0), r=top?routeFn.apply(null,arguments):null;
+          opening++; var out; try{ out=orig.apply(this,arguments); } finally { opening--; }
+          if(top&&r&&$("ovl")) commit(cur.b,r);
+          return out; }; }
+      wrapO("openLiked",function(){ return "liked"; });
+      wrapO("openHistory",function(){ return "history"; });
+      wrapO("openMyPlaylists",function(){ return "playlists"; });
+      wrapO("openMyPlaylist",function(id){ return "playlist/"+enc(id); });
+      wrapO("openSettings",function(){ return "settings"; });
+      wrapO("backToSettings",function(){ return "settings"; });
+      wrapO("openProfile",function(){ return "profile"; });
+      wrapO("openAccess",function(){ return "admin"; });
+      wrapO("adminHub",function(){ return "admin"; });
+      wrapO("adminSection",function(k){ return "admin/"+enc(k); });
+      wrapO("openUserDetail",function(id){ return "admin/user/"+enc(id); });
+      wrapO("openNowPlaying",function(){ return queue[qi]?"np":""; });
+
+      var unwindT=null;
+      window.closeOverlay=function(quiet){
+        if(applying||!ready||opening>0||!cur.o) return origClose.apply(this,arguments);
+        if(quiet!==true){ if(cur.d>0&&cur.i>=cur.d){ history.go(-cur.d); return; } return origClose.apply(this,arguments); }
+        origClose(true); clearTimeout(unwindT);
+        unwindT=setTimeout(function(){ if(!$("ovl")&&cur.o&&!applying&&cur.d>0&&cur.i>=cur.d) history.go(-cur.d); },60); };
+
+      // In-app Back buttons follow browser history when there is a previous in-app page.
+      document.addEventListener("click", function(e){ var t=e.target; var b=t&&t.closest?t.closest(".back"):null; if(!b||!ready||applying) return;
+        var s=stateNow(); if(s&&s.i>0){ e.preventDefault(); e.stopPropagation(); history.back(); } }, true);
+
+      window.addEventListener("popstate", function(e){ if(!ready) return; clearTimeout(unwindT);
+        var st=(e.state&&typeof e.state.i==="number")?e.state:null, h=parseHash()||{b:"home",o:""};
+        if(!st){ st={i:cur.i+1,d:0,y:0}; h.o=""; setState(st,h.b,h.o,true); }
+        apply(h,st.y||0,st,false); });
+    })();
+
     // Load who-I-am and the shared config BEFORE rendering, so download controls
     // and features are right, then restore the page you were on (refresh stays put).
     Promise.all([loadMe(), loadConfig()]).then(function(){ if(!$("takeover")||$("takeover").hidden){ restoreRoute(); } });
