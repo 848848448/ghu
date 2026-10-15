@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b107-next-track-buffer-2026-10-15";
+const BUILD = "b107-next-track-buffer-r2-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3314,7 +3314,7 @@ const PAGE = `<!DOCTYPE html>
     function playIndex(i){ if(i<0||i>=queue.length) return; savePos(); qi=i; var t=queue[i]; _retry=0; _dur=0; _resumed=false;
       setActivity("Playing: "+(t.title||""));
       var usedWarm=!!(_warm&&_warm.src===trackSrc(t,false)&&!_warm.el.error&&_warm.el.readyState>=2); selectAudio(t); try{ audio.playbackRate=SET.speed||1; }catch(e){} audio.volume=(SET.fade?0:(SET.vol==null?1:SET.vol));
-      var active=audio; audio.play().catch(function(){ if(audio!==active||!usedWarm) return; audio=_players[0]===active?_players[1]:_players[0]; active.pause(); active.removeAttribute("src"); active.load(); audio.src=trackSrc(t,false); audio.playbackRate=SET.speed||1; audio.volume=SET.vol==null?1:SET.vol; audio.muted=active.muted; audio.play().catch(function(){}); });
+      var active=audio; audio.play().catch(function(){ if(audio!==active||queue[qi]!==t||!usedWarm) return; audio=_players[0]===active?_players[1]:_players[0]; active.pause(); active.removeAttribute("src"); active.load(); audio.src=trackSrc(t,false); audio.playbackRate=SET.speed||1; audio.volume=SET.vol==null?1:SET.vol; audio.muted=active.muted; audio.play().catch(function(){}); });
       $("player").hidden=false; $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
       var cu=imgUrl(t.coverImg);
       if(cu){ $("npCover").style.background=""; $("npCover").style.backgroundImage="url('"+cu+"')"; $("npCover").style.backgroundSize="cover"; $("npCover").style.backgroundPosition="center"; $("npCover").innerHTML=""; }
