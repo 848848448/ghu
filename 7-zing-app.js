@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b106-perf-caching-2026-10-15";
+const BUILD = "b107-next-track-buffer-2026-10-15";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3296,7 +3296,7 @@ const PAGE = `<!DOCTYPE html>
     function playList(i){ playTracks(window._listTracks||[], i, ""); }
 
     // ---------- Player ----------
-    var audio=$("audio");
+    var audio=$("audio"), _players=[audio,document.createElement("audio")], _warm=null, _warmTimer=null; _players[1].id="audioNext"; _players[1].preload="none"; document.body.appendChild(_players[1]); var _audioAdd=audio.addEventListener; audio.addEventListener=function(k,fn,opt){ _players.forEach(function(p){ _audioAdd.call(p,k,function(e){ if(p===audio) fn.call(p,e); },opt); }); }; function warmNext(){ clearTimeout(_warmTimer); _warmTimer=setTimeout(function(){ if(audio.paused||!queue.length||(navigator.connection&&navigator.connection.saveData)) return; var p=_order.indexOf(qi), n=_repeat==="one"?qi:(p+1<_order.length?_order[p+1]:(_repeat==="all"&&!_shuffle?_order[0]:-1)), t=queue[n]; if(!t) return; var src=trackSrc(t,false); if(_warm&&_warm.src===src) return; var spare=_players[0]===audio?_players[1]:_players[0]; _warm={el:spare,src:src}; spare.preload="auto"; spare.src=src; spare.load(); },600); } _players.forEach(function(p){ _audioAdd.call(p,"playing",function(){ if(p===audio) warmNext(); }); }); function selectAudio(t){ var src=trackSrc(t,false), old=audio, ready=_warm&&_warm.src===src&&!_warm.el.error&&_warm.el.readyState>=2; clearTimeout(_warmTimer); if(_fadeTimer){clearInterval(_fadeTimer);_fadeTimer=null;} if(ready){ audio=_warm.el; _warm=null; audio.muted=old.muted; old.pause(); old.removeAttribute("src"); old.load(); if(audio.readyState>=1) audio.dispatchEvent(new Event("loadedmetadata")); } else { _warm=null; var spare=_players[0]===audio?_players[1]:_players[0]; spare.removeAttribute("src"); spare.load(); audio.preload="auto"; audio.src=src; } }
     var _retry=0, _fails=0;
     var _shuffle=false, _repeat="off", _order=[], _dur=0;
     try{ _shuffle=localStorage.getItem("zing_shuffle")==="1"; _repeat=localStorage.getItem("zing_repeat")||"off"; }catch(e){}
@@ -3311,10 +3311,10 @@ const PAGE = `<!DOCTYPE html>
       startQueue(tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:artistName, cover:albName(al), coverImg:aimg}; }), index); }
     function playTracks(tracks, index, ctx){ startQueue(tracks.map(function(t){ return {id:t.id, file:t.file||"", title:trackName(t), artist:(t.artists&&t.artists.length?artNames(t.artists):(ctx||"")), cover:ctx||trackName(t), coverImg:(t.album&&t.album.images)?(t.album.images.cdnSmall||t.album.images.cdnMedium||t.album.images.small):null}; }), index); }
     function trackSrc(t,bust){ return "/api/play?trackId="+encodeURIComponent(t.id)+"&file="+encodeURIComponent(t.file)+(bust?("&r="+Date.now()):""); }
-    function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i]; _retry=0; _dur=0; _resumed=false;
+    function playIndex(i){ if(i<0||i>=queue.length) return; savePos(); qi=i; var t=queue[i]; _retry=0; _dur=0; _resumed=false;
       setActivity("Playing: "+(t.title||""));
-      audio.src=trackSrc(t,false); try{ audio.playbackRate=SET.speed||1; }catch(e){} audio.volume=(SET.fade?0:(SET.vol==null?1:SET.vol));
-      audio.play().catch(function(){});
+      var usedWarm=!!(_warm&&_warm.src===trackSrc(t,false)&&!_warm.el.error&&_warm.el.readyState>=2); selectAudio(t); try{ audio.playbackRate=SET.speed||1; }catch(e){} audio.volume=(SET.fade?0:(SET.vol==null?1:SET.vol));
+      var active=audio; audio.play().catch(function(){ if(audio!==active||!usedWarm) return; audio=_players[0]===active?_players[1]:_players[0]; active.pause(); active.removeAttribute("src"); active.load(); audio.src=trackSrc(t,false); audio.playbackRate=SET.speed||1; audio.volume=SET.vol==null?1:SET.vol; audio.muted=active.muted; audio.play().catch(function(){}); });
       $("player").hidden=false; $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
       var cu=imgUrl(t.coverImg);
       if(cu){ $("npCover").style.background=""; $("npCover").style.backgroundImage="url('"+cu+"')"; $("npCover").style.backgroundSize="cover"; $("npCover").style.backgroundPosition="center"; $("npCover").innerHTML=""; }
@@ -4289,7 +4289,7 @@ const PAGE = `<!DOCTYPE html>
     document.addEventListener("keydown",function(e){if(e.key==="?"&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/INPUT|TEXTAREA|SELECT/.test((e.target||{}).tagName||"")&&!e.target.isContentEditable){e.preventDefault();keyboardHelp();}});
 
     // Optional Web Audio equalizer. No second stream or upstream request.
-    var EQF=[60,170,350,1000,3500,10000],EQCTX=null,EQSRC=null,EQGAIN=null,EQNODES=[],EQON=false,EQFAILED=false;
+    var EQF=[60,170,350,1000,3500,10000],EQCTX=null,EQSRC=null,EQSRC2=null,EQGAIN=null,EQNODES=[],EQON=false,EQFAILED=false;
     var EQPRESETS={flat:[0,0,0,0,0,0],bass:[6,4,1,0,-1,-1],voice:[-3,-2,1,4,3,0],soft:[0,0,-1,-2,-3,-4]};
     var EQVALUES=Array.isArray(UX.eq)&&UX.eq.length===6?UX.eq.map(function(v){return Math.max(-12,Math.min(12,Number(v)||0));}):EQPRESETS.flat.slice();
     function updateEQ(){if(!EQGAIN)return;var headroom=EQON?Math.pow(10,-Math.max.apply(null,[0].concat(EQVALUES))/20):1;EQGAIN.gain.setTargetAtTime(headroom,EQCTX.currentTime,.02);EQNODES.forEach(function(n,i){n.gain.setTargetAtTime(EQON?EQVALUES[i]:0,EQCTX.currentTime,.02);});}
@@ -4297,9 +4297,9 @@ const PAGE = `<!DOCTYPE html>
       var C=window.AudioContext||window.webkitAudioContext;if(!C){toast("Equalizer is not supported by this browser.");return;}
       try{if(!EQCTX)EQCTX=new C();await EQCTX.resume();if(EQCTX.state!=="running"){toast("Play a song, then enable the equalizer.");return;}
         if(!EQSRC){EQGAIN=EQCTX.createGain();EQNODES=EQF.map(function(f){var n=EQCTX.createBiquadFilter();n.type="peaking";n.frequency.value=f;n.Q.value=1;return n;});
-          var last=EQGAIN;EQNODES.forEach(function(n){last.connect(n);last=n;});last.connect(EQCTX.destination);EQSRC=EQCTX.createMediaElementSource(audio);EQSRC.connect(EQGAIN);}
+          var last=EQGAIN;EQNODES.forEach(function(n){last.connect(n);last=n;});last.connect(EQCTX.destination);EQSRC=EQCTX.createMediaElementSource(_players[0]);EQSRC.connect(EQGAIN);EQSRC2=EQCTX.createMediaElementSource(_players[1]);EQSRC2.connect(EQGAIN);}
         EQON=true;updateEQ();openEqualizer();
-      }catch(e){EQON=false;if(EQSRC){try{EQSRC.disconnect();EQSRC.connect(EQCTX.destination);}catch(_){}EQFAILED=true;}toast("Equalizer unavailable. Standard playback remains selected.");}}
+      }catch(e){EQON=false;if(EQSRC){try{EQSRC.disconnect();EQSRC.connect(EQCTX.destination);if(EQSRC2){EQSRC2.disconnect();EQSRC2.connect(EQCTX.destination);}}catch(_){}EQFAILED=true;}toast("Equalizer unavailable. Standard playback remains selected.");}}
     function eqBand(i,v){EQVALUES[i]=Math.max(-12,Math.min(12,Number(v)||0));UX.eq=EQVALUES.slice();uxSave();updateEQ();var n=$("eqValue"+i);if(n)n.textContent=(EQVALUES[i]>0?"+":"")+EQVALUES[i]+" dB";}
     function eqPreset(k){if(!EQPRESETS[k])return;EQVALUES=EQPRESETS[k].slice();UX.eq=EQVALUES.slice();uxSave();updateEQ();openEqualizer();}
     function openEqualizer(){overlay("Equalizer",'<div class="workspace-banner"><div class="kicker">SOUND, YOUR WAY</div><h2>Equalizer</h2><p class="muted">Six bands with automatic headroom to reduce clipping. This changes playback on this browser, not the source file or downloads.</p><button class="btn" onclick="enableEQ()">'+(EQON?'Turn off':'Enable equalizer')+'</button></div><div class="chips">'+Object.keys(EQPRESETS).map(function(k){return '<button class="chip '+(EQVALUES.join(',')===EQPRESETS[k].join(',')?'on':'')+'" onclick="eqPreset(\\''+k+'\\')">'+k[0].toUpperCase()+k.slice(1)+'</button>';}).join("")+'</div><div class="eq-grid">'+EQF.map(function(f,i){return '<div class="eq-band"><label for="eqBand'+i+'">'+(f>=1000?f/1000+" kHz":f+" Hz")+'</label><input id="eqBand'+i+'" aria-label="'+f+' Hz gain" type="range" min="-12" max="12" step="1" value="'+EQVALUES[i]+'" oninput="eqBand('+i+',this.value)"><output id="eqValue'+i+'">'+(EQVALUES[i]>0?'+':'')+EQVALUES[i]+' dB</output></div>';}).join("")+'</div><p class="muted">'+(EQON?'Equalizer is active.':'Presets are saved; enable the equalizer to hear them. Enable again after reopening the browser.')+'</p>');}
