@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b107-next-track-buffer-r3-2026-10-15";
+const BUILD = "b108-simple-playback-2026-10-31";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3296,7 +3296,7 @@ const PAGE = `<!DOCTYPE html>
     function playList(i){ playTracks(window._listTracks||[], i, ""); }
 
     // ---------- Player ----------
-    var audio=$("audio"), _players=[audio,document.createElement("audio")], _warm=null, _warmTimer=null; _players[1].id="audioNext"; _players[1].preload="none"; document.body.appendChild(_players[1]); var _audioAdd=audio.addEventListener; audio.addEventListener=function(k,fn,opt){ _players.forEach(function(p){ _audioAdd.call(p,k,function(e){ if(p===audio) fn.call(p,e); },opt); }); }; function warmNext(){ clearTimeout(_warmTimer); _warmTimer=setTimeout(function(){ if(audio.paused||!queue.length||(navigator.connection&&navigator.connection.saveData)) return; var p=_order.indexOf(qi), n=_repeat==="one"?qi:(p+1<_order.length?_order[p+1]:(_repeat==="all"&&!_shuffle?_order[0]:-1)), t=queue[n]; if(!t) return; var src=trackSrc(t,false); if(_warm&&_warm.src===src) return; var spare=_players[0]===audio?_players[1]:_players[0]; _warm={el:spare,src:src}; spare.preload="auto"; spare.src=src; spare.load(); },600); } _players.forEach(function(p){ _audioAdd.call(p,"playing",function(){ if(p===audio) warmNext(); }); }); function selectAudio(t){ var src=trackSrc(t,false), old=audio, ready=_warm&&_warm.src===src&&!_warm.el.error&&_warm.el.readyState>=2; clearTimeout(_warmTimer); if(_fadeTimer){clearInterval(_fadeTimer);_fadeTimer=null;} if(ready){ audio=_warm.el; _warm=null; audio.muted=old.muted; old.pause(); old.removeAttribute("src"); old.load(); if(audio.readyState>=1) audio.dispatchEvent(new Event("loadedmetadata")); } else { _warm=null; var spare=_players[0]===audio?_players[1]:_players[0]; spare.removeAttribute("src"); spare.load(); audio.preload="auto"; audio.src=src; } }
+    var audio=$("audio"), _players=[audio,document.createElement("audio")], _warm=null, _warmTimer=null; _players[1].id="audioNext"; _players[1].preload="none"; document.body.appendChild(_players[1]); var _audioAdd=audio.addEventListener; audio.addEventListener=function(k,fn,opt){ _players.forEach(function(p){ _audioAdd.call(p,k,function(e){ if(p===audio) fn.call(p,e); },opt); }); }; function warmNext(){ return; /* prefetch disabled: next-track swap removed, kept simple single-element playback */ clearTimeout(_warmTimer); _warmTimer=setTimeout(function(){ if(audio.paused||!queue.length||(navigator.connection&&navigator.connection.saveData)) return; var p=_order.indexOf(qi), n=_repeat==="one"?qi:(p+1<_order.length?_order[p+1]:(_repeat==="all"&&!_shuffle?_order[0]:-1)), t=queue[n]; if(!t) return; var src=trackSrc(t,false); if(_warm&&_warm.src===src) return; var spare=_players[0]===audio?_players[1]:_players[0]; _warm={el:spare,src:src}; spare.preload="auto"; spare.src=src; spare.load(); },600); } _players.forEach(function(p){ _audioAdd.call(p,"playing",function(){ if(p===audio) warmNext(); }); }); function selectAudio(t){ var src=trackSrc(t,false), old=audio, ready=_warm&&_warm.src===src&&!_warm.el.error&&_warm.el.readyState>=2; clearTimeout(_warmTimer); if(_fadeTimer){clearInterval(_fadeTimer);_fadeTimer=null;} if(ready){ audio=_warm.el; _warm=null; audio.muted=old.muted; old.pause(); old.removeAttribute("src"); old.load(); if(audio.readyState>=1) audio.dispatchEvent(new Event("loadedmetadata")); } else { _warm=null; var spare=_players[0]===audio?_players[1]:_players[0]; spare.removeAttribute("src"); spare.load(); audio.preload="auto"; audio.src=src; } }
     var _retry=0, _fails=0;
     var _shuffle=false, _repeat="off", _order=[], _dur=0;
     try{ _shuffle=localStorage.getItem("zing_shuffle")==="1"; _repeat=localStorage.getItem("zing_repeat")||"off"; }catch(e){}
@@ -3313,8 +3313,8 @@ const PAGE = `<!DOCTYPE html>
     function trackSrc(t,bust){ return "/api/play?trackId="+encodeURIComponent(t.id)+"&file="+encodeURIComponent(t.file)+(bust?("&r="+Date.now()):""); }
     function playIndex(i){ if(i<0||i>=queue.length) return; qi=i; var t=queue[i]; _retry=0; _dur=0; _resumed=false;
       setActivity("Playing: "+(t.title||""));
-      var usedWarm=!!(_warm&&_warm.src===trackSrc(t,false)&&!_warm.el.error&&_warm.el.readyState>=2); selectAudio(t); try{ audio.playbackRate=SET.speed||1; }catch(e){} audio.volume=(SET.fade?0:(SET.vol==null?1:SET.vol));
-      var active=audio; audio.play().catch(function(){ if(audio!==active||queue[qi]!==t||!usedWarm) return; audio=_players[0]===active?_players[1]:_players[0]; active.pause(); active.removeAttribute("src"); active.load(); audio.src=trackSrc(t,false); audio.playbackRate=SET.speed||1; audio.volume=SET.vol==null?1:SET.vol; audio.muted=active.muted; audio.play().catch(function(){}); });
+      audio=_players[0]; try{ _players[1].pause(); }catch(e){} _warm=null; audio.src=trackSrc(t,false); try{ audio.playbackRate=SET.speed||1; }catch(e){} audio.volume=(SET.fade?0:(SET.vol==null?1:SET.vol));
+      audio.play().catch(function(){});
       $("player").hidden=false; $("npTitle").textContent=t.title; $("npArtist").textContent=t.artist||"";
       var cu=imgUrl(t.coverImg);
       if(cu){ $("npCover").style.background=""; $("npCover").style.backgroundImage="url('"+cu+"')"; $("npCover").style.backgroundSize="cover"; $("npCover").style.backgroundPosition="center"; $("npCover").innerHTML=""; }
