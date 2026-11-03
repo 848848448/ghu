@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b125-plname-2026-11-03";
+const BUILD = "b126-playnext-order-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3588,7 +3588,7 @@ const PAGE = `<!DOCTYPE html>
     // ---------- Queue actions: play next / add to queue ----------
     function normTrack(t){ return {id:t.id, file:t.file||"", title:t.title||trackName(t)||"", artist:t.artist||(t.artists&&t.artists.length?artNames(t.artists):""), cover:t.cover||t.title||"", coverImg:t.coverImg||((t.album&&t.album.images)?(t.album.images.cdnSmall||t.album.images.cdnMedium):null)||null}; }
     function playNext(t){ if(!t) return; if(!queue.length){ startQueue([normTrack(t)],0); toast("Playing"); return; }
-      queue.push(normTrack(t)); var idx=queue.length-1; var pos=_order.indexOf(qi); _order.splice(pos+1,0,idx); toast("Playing next ▸"); syncSheet(); }
+      queue.push(normTrack(t)); var idx=queue.length-1; var pos=_order.indexOf(qi); window._pnIdx=window._pnIdx||[]; var ins=pos+1; while(ins<_order.length && window._pnIdx.indexOf(_order[ins])>=0) ins++; _order.splice(ins,0,idx); window._pnIdx.push(idx); toast("Playing next ▸"); syncSheet(); }
     function addToQueue(t){ if(!t) return; if(!queue.length){ startQueue([normTrack(t)],0); toast("Playing"); return; }
       queue.push(normTrack(t)); _order.push(queue.length-1); toast("Added to queue"); syncSheet(); }
 
