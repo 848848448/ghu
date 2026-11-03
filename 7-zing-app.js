@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b121-settings-2026-11-03";
+const BUILD = "b122-playback-group-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3772,6 +3772,8 @@ const PAGE = `<!DOCTYPE html>
       return ''+
         '<div class="set-tools"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="openPersonalMixes()">Mixes</button><button class="chip" onclick="keyboardHelp()">Shortcuts</button><button class="chip" onclick="sharePage()">Share</button></div>'+
         '<div class="set-sec"><h3>Playback</h3><div class="card">'+
+          row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
+          row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
           row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75\u00d7"],["1","1\u00d7"],["1.25","1.25\u00d7"],["1.5","1.5\u00d7"],["2","2\u00d7"]],String(SET.speed),"setSpeed"))+
           row("Skip buttons","How far the skip buttons jump", segEl("segSkip",[["10","10s"],["15","15s"],["30","30s"]],String(SET.skip),"setSkip"))+
           row("Resume long tracks","Continue shiurim & stories where you stopped", segEl("segResume",[["on","On"],["off","Off"]],SET.resume?"on":"off","setResume"))+
@@ -3785,8 +3787,6 @@ const PAGE = `<!DOCTYPE html>
         '<div class="set-sec"><h3>App</h3><div class="card">'+
           row("Language","Show names in English or Hebrew", segEl("segLang",[["en","English"],["he","\u05e2\u05d1\u05e8\u05d9\u05ea"]],SET.lang,"setLang"))+
           row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
-          row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
-          row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
         '</div></div>'+
         appUpdateHtml()+
         '<div class="set-sec"><h3>Audio & downloads</h3><div class="card">'+
