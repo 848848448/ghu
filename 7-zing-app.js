@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b118-kbdfocus-2026-11-03";
+const BUILD = "b119-shell-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2651,6 +2651,19 @@ const PAGE = `<!DOCTYPE html>
     .tab{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; background:none; border:none; color:var(--muted); cursor:pointer; font-family:inherit; }
     .tab .ms{ font-size:25px; } .tab span.lbl{ font-size:.66rem; font-weight:600; }
     .tab.active{ color:var(--text); }
+
+    /* b119 shell */
+    .tab .ms{ font-size:24px; } .tab span.lbl{ font-size:.68rem; }
+    .player{ left:8px; right:8px; bottom:calc(var(--tabs-h) + 6px + env(safe-area-inset-bottom,0px)); border-radius:14px; border:1px solid var(--line); background:#1b1b2e; padding:7px 10px; box-shadow:0 8px 24px rgba(0,0,0,.45); -webkit-backdrop-filter:none; backdrop-filter:none; overflow:hidden; }
+    :root[data-theme="light"] .player{ background:#fff; }
+    .np-cover{ width:42px; height:42px; border-radius:8px; }
+    .np-btn.main{ width:40px; height:40px; box-shadow:0 4px 12px rgba(124,92,255,.35); } .np-btn.main .ms{ font-size:24px; }
+    .np-seek-wrap{ left:10px; right:10px; top:auto; bottom:0; height:2px; } .np-seek{ height:2px; } .np-seek::-webkit-slider-thumb{ width:0; height:0; }
+    .xp-head{ padding:6px 18px 0; } .xp-head h1{ margin:6px 0 2px; font-size:1.6rem; }
+    .xp-grid{ display:flex; flex-wrap:wrap; padding:14px 12px; }
+    .xp-tile{ position:relative; width:calc(50% - 12px); margin:6px; min-height:112px; border:none; border-radius:16px; padding:14px; color:#fff; text-align:left; font-family:inherit; cursor:pointer; overflow:hidden; display:block; }
+    .xp-t{ display:block; font-weight:800; font-size:1.15rem; } .xp-s{ display:block; font-size:.76rem; opacity:.9; margin-top:4px; max-width:78%; }
+    .xp-i{ position:absolute; right:10px; bottom:8px; opacity:.55; } .xp-i svg{ width:44px; height:44px; fill:#fff; }
     .tab.active .ms{ background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
 
     /* Overlay (lyrics / settings) */
@@ -2768,12 +2781,9 @@ const PAGE = `<!DOCTYPE html>
   <!-- Bottom tabs -->
   <nav class="tabs">
     <button class="tab active" id="tabHome" onclick="go('home')"><span class="ms">home</span><span class="lbl">Home</span></button>
-    <button class="tab" id="tabAlbums" onclick="go('albums')"><span class="ms">album</span><span class="lbl">Albums</span></button>
     <button class="tab" id="tabSearch" onclick="go('search')"><span class="ms">search</span><span class="lbl">Search</span></button>
-    <button class="tab" id="tabGenres" onclick="go('genres')"><span class="ms">category</span><span class="lbl">Genres</span></button>
-    <button class="tab" id="tabPlaylists" onclick="go('playlists')"><span class="ms">featured_play_list</span><span class="lbl">Playlists</span></button>
+    <button class="tab" id="tabExplore" onclick="go('explore')"><span class="ms">category</span><span class="lbl">Explore</span></button>
     <button class="tab" id="tabLibrary" onclick="browseLibrary()"><span class="ms">favorite</span><span class="lbl">Library</span></button>
-    <button class="tab" id="tabArtists" onclick="go('artists')"><span class="ms">artist</span><span class="lbl">Artists</span></button>
   </nav>
 
   <audio id="audio" preload="none"></audio>
@@ -3005,23 +3015,34 @@ const PAGE = `<!DOCTYPE html>
     }
 
     // ---------- Tabs ----------
-    function setTab(id){ ["tabHome","tabAlbums","tabSearch","tabGenres","tabPlaylists","tabArtists","tabLibrary"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
-    var GO_LABEL={home:"Home",albums:"Albums",search:"Searching",genres:"Genres",playlists:"Playlists",artists:"Artists"};
+    function setTab(id){ if(id==="tabAlbums"||id==="tabGenres"||id==="tabPlaylists"||id==="tabArtists") id="tabExplore"; ["tabHome","tabSearch","tabExplore","tabLibrary"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
+    var GO_LABEL={explore:"Exploring",home:"Home",albums:"Albums",search:"Searching",genres:"Genres",playlists:"Playlists",artists:"Artists"};
     function go(where){
       curTab=where; setActivity(GO_LABEL[where]||"Home"); saveRoute(where);
       if(where==="home"){ setTab("tabHome"); home(); }
+      else if(where==="explore"){ setTab("tabExplore"); exploreView(); }
       else if(where==="albums"){ setTab("tabAlbums"); browseAlbums(); }
       else if(where==="search"){ setTab("tabSearch"); searchView(); }
       else if(where==="genres"){ setTab("tabGenres"); browseGenres(); }
       else if(where==="playlists"){ setTab("tabPlaylists"); browsePlaylists(); }
       else if(where==="artists"){ setTab("tabArtists"); browseArtists(); }
     }
+
+    function exploreView(){
+      var items=[["albums","Albums","album","All albums, newest first","#7c5cff,#c04cff","albums"],["genres","Genres","category","Browse by style","#ff7a59,#ff4f8b","genres"],["artists","Artists","artist","Singers and composers","#19b5a5,#2e7dd7","artists"],["playlists","Playlists","featured_play_list","Hand-picked playlists","#f2a93b,#e8603c","playlists"]];
+      var h='<div class="xp-head"><h1>Explore</h1><p class="muted">Find something new to listen to.</p></div><div class="xp-grid">';
+      items.forEach(function(it){ if(typeof feat==="function"&&!feat(it[5])) return;
+        var c=it[4].split(",");
+        h+='<button class="xp-tile" style="background:linear-gradient(135deg,'+c[0]+','+c[1]+')" onclick="go(\\''+it[0]+'\\')"><span class="xp-t">'+it[1]+'</span><span class="xp-s">'+it[3]+'</span><span class="xp-i">'+ic(it[2])+'</span></button>'; });
+      h+='</div>';
+      setView(h);
+    }
     // Remember where you are so a refresh brings you right back to the same
     // place instead of jumping to Home.
     function saveRoute(k,a){ try{ localStorage.setItem("zing_route", JSON.stringify({k:k,a:(a==null?"":a)})); }catch(e){} }
     function restoreRoute(){ var r=null; try{ r=JSON.parse(localStorage.getItem("zing_route")||"null"); }catch(e){}
       if(!r||!r.k){ go("home"); return; }
-      var tabs={home:1,albums:1,search:1,genres:1,playlists:1,artists:1};
+      var tabs={explore:1,home:1,albums:1,search:1,genres:1,playlists:1,artists:1};
       if(tabs[r.k]){ if(r.k==="search"&&r.a){ curTab="search"; setTab("tabSearch"); saveRoute("search",r.a); searchView(); var q=$("q"); if(q){ q.value=r.a; doSearch(r.a); } } else { go(r.k); } return; }
       var opens={track:openTrackRoute,album:openAlbum,artist:openArtist,playlist:openPlaylist,genre:openGenre,category:openCategory,story:openStory};
       if(opens[r.k]){ try{ opens[r.k](r.a); }catch(e){ go("home"); } return; }
@@ -4427,7 +4448,7 @@ const PAGE = `<!DOCTYPE html>
     // ---------- Navigation history: refresh stays put, Back returns where you were ----------
     (function(){
       var cur={b:"#nil#",o:"",i:0,d:0}, applying=false, opening=0, ready=false, restoring=false, userMoved=false, lastSV=0, saveT=null;
-      var BASES={track:1,home:1,albums:1,search:1,genres:1,playlists:1,artists:1,library:1,album:1,artist:1,playlist:1,genre:1,category:1,story:1};
+      var BASES={explore:1,track:1,home:1,albums:1,search:1,genres:1,playlists:1,artists:1,library:1,album:1,artist:1,playlist:1,genre:1,category:1,story:1};
       function enc(a){ return encodeURIComponent(a==null?"":String(a)); }
       function mkB(k,a){ return k+((a!==""&&a!=null)?"/"+enc(a):""); }
       function mkHash(b,o){ return "#/"+b+(o?"!"+o:""); }
@@ -4461,7 +4482,7 @@ const PAGE = `<!DOCTYPE html>
       function renderBase(b){ var p=bParts(b), k=p[0], a=p[1];
         if(k==="search"){ curTab="search"; setTab("tabSearch"); window._origSaveRoute("search",a); searchView(); var q=$("q"); if(q){ q.value=a; if(a) doSearch(a); } return; }
         if(k==="library"){ browseLibrary(); return; }
-        var tabs={home:1,albums:1,genres:1,playlists:1,artists:1};
+        var tabs={explore:1,home:1,albums:1,genres:1,playlists:1,artists:1};
         if(tabs[k]){ go(k); return; }
         var opens={track:openTrackRoute,album:openAlbum,artist:openArtist,playlist:openPlaylist,genre:openGenre,category:openCategory,story:openStory};
         if(opens[k]){ try{ opens[k](numify(a)); }catch(e){ go("home"); } return; }
