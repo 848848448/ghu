@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b115-ovlscroll-2026-11-03";
+const BUILD = "b116-solidovl-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2434,17 +2434,18 @@ const PAGE = `<!DOCTYPE html>
       --grad:linear-gradient(135deg,var(--accent),var(--accent-2));
       --font:"Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       --tabs-h:64px; --player-h:66px;
-      --bar:rgba(10,10,18,.82); --bar-player:rgba(20,20,34,.94); --bar-tabs:rgba(14,14,24,.96); --ovl-bg:rgba(10,10,18,.97);
+      --bar:rgba(10,10,18,.82); --bar-player:rgba(20,20,34,.94); --bar-tabs:rgba(14,14,24,.96); --ovl-bg:#0b0b14;
     }
     :root[data-theme="light"]{
       color-scheme: light;
       --bg:#f4f4fb; --bg-2:#ececf4; --surface:#ffffff; --surface-2:#f1f1f8; --surface-3:#e7e7f1;
       --text:#191933; --muted:#6a6a86; --line:rgba(0,0,0,.10);
-      --bar:rgba(255,255,255,.85); --bar-player:rgba(255,255,255,.95); --bar-tabs:rgba(255,255,255,.96); --ovl-bg:rgba(247,247,251,.98);
+      --bar:rgba(255,255,255,.85); --bar-player:rgba(255,255,255,.95); --bar-tabs:rgba(255,255,255,.96); --ovl-bg:#f7f7fb;
     }
     *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     button:focus,a:focus,[onclick]:focus,[tabindex]:focus{ outline:none; }
     button:focus-visible,a:focus-visible,[onclick]:focus-visible,[tabindex]:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+      @supports not selector(:focus-visible){ button:focus,a:focus,[onclick]:focus,[tabindex]:focus,input:focus,select:focus,textarea:focus{ outline:2px solid var(--accent); outline-offset:2px; } }
     html,body{ height:100%; margin:0; }
     body{
       font-family:var(--font); color:var(--text);
@@ -2652,7 +2653,7 @@ const PAGE = `<!DOCTYPE html>
     .tab.active .ms{ background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
 
     /* Overlay (lyrics / settings) */
-    .ovl{ position:fixed; top:0;right:0;bottom:0;left:0; z-index:60; background:var(--ovl-bg); -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px); overflow:hidden; display:flex; flex-direction:column;
+    .ovl{ position:fixed; top:0;right:0;bottom:0;left:0; z-index:60; background:var(--ovl-bg); overflow:hidden; display:flex; flex-direction:column;
       padding:0 18px calc(28px + env(safe-area-inset-bottom,0px)); }
     #ovlBody{ flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch; }
     .ovl .obar{ display:flex; align-items:center; justify-content:space-between; margin:0 -18px 16px; padding:18px 18px 12px; background:var(--ovl-bg); border-bottom:1px solid var(--line); flex:none; }
@@ -2729,7 +2730,7 @@ const PAGE = `<!DOCTYPE html>
     .empty{ font-size:.96rem; }
     @media (prefers-reduced-motion: reduce){ *{ transition:none !important; animation-duration:.01ms !important; } }
 
-.workspace-banner{margin:20px 18px;padding:24px;border:1px solid var(--line);border-radius:22px;background:linear-gradient(135deg,var(--surface-2),var(--surface))}.workspace-banner h2{font-size:1.8rem;margin:6px 0 10px;letter-spacing:-.04em}.workspace-banner p{line-height:1.6;margin:0 0 12px}.workspace-banner .chips{padding:0}.library-tools{margin:12px 18px}.library-tile{text-align:left;color:var(--text);background:none;border:0;font:inherit;cursor:pointer;padding:0}.library-tile .kicker{margin-top:6px;font-size:.65rem}.tab{min-width:0;padding:0 2px}.tab .lbl{font-size:.63rem}button:disabled{opacity:.3;cursor:default}html[data-density="compact"] .track{min-height:46px;padding-top:5px;padding-bottom:5px}html[data-motion="reduced"] *,html[data-motion="reduced"] *::before{animation:none!important;transition:none!important;scroll-behavior:auto!important}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}@media(max-width:480px){.workspace-banner{padding:18px}.track .iconbtn{width:30px;min-width:30px}.seg{flex-wrap:wrap}.row{flex-wrap:wrap;gap:10px}.row .rlabel{min-width:160px}.row .seg{max-width:100%;box-sizing:border-box}}
+.workspace-banner{margin:14px 18px;padding:15px 16px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(135deg,var(--surface-2),var(--surface))}.workspace-banner h2{font-size:1.25rem;margin:4px 0 6px;letter-spacing:-.02em}.workspace-banner p{line-height:1.5;margin:0 0 10px;font-size:.9rem}.workspace-banner .chips{padding:0}.library-tools{margin:12px 18px}.library-tile{text-align:left;color:var(--text);background:none;border:0;font:inherit;cursor:pointer;padding:0}.library-tile .kicker{margin-top:6px;font-size:.65rem}.tab{min-width:0;padding:0 2px}.tab .lbl{font-size:.63rem}button:disabled{opacity:.3;cursor:default}html[data-density="compact"] .track{min-height:46px;padding-top:5px;padding-bottom:5px}html[data-motion="reduced"] *,html[data-motion="reduced"] *::before{animation:none!important;transition:none!important;scroll-behavior:auto!important}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}@media(max-width:480px){.workspace-banner{padding:13px 14px}.track .iconbtn{width:30px;min-width:30px}.seg{flex-wrap:wrap}.row{flex-wrap:wrap;gap:10px}.row .rlabel{min-width:160px}.row .seg{max-width:100%;box-sizing:border-box}}
 
 .eq-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:18px 0}.eq-band{padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}.eq-band label,.eq-band output{display:block;font-size:.85rem}.eq-band input{width:100%;accent-color:var(--accent);margin:16px 0}.mix-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 18px 22px}.mix-card{padding:16px;text-align:left;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,var(--surface-3),var(--surface));color:var(--text);font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:10px;min-height:0}.mix-card strong{font-size:1.1rem}.mix-card span:not(.kicker),.mix-card small{color:var(--muted);line-height:1.5}.track[hidden]{display:none!important}@media(min-width:700px){.eq-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:480px){.mix-grid{gap:10px}.mix-card{padding:14px}.mix-card strong{font-size:1rem}.mix-card span:not(.kicker){display:none}}
     /* Touch devices: the blur on the fixed bars is a top scroll-jank source on phones, and the bars are nearly opaque anyway. */ @media (pointer:coarse){ :root{ --bar:rgba(10,10,18,.96); --bar-player:rgba(20,20,34,.98); --bar-tabs:rgba(14,14,24,.98); } :root[data-theme="light"]{ --bar:rgba(255,255,255,.97); --bar-player:rgba(255,255,255,.98); --bar-tabs:rgba(255,255,255,.98); } .top,.player,.tabs,.ovl{ backdrop-filter:none; -webkit-backdrop-filter:none; } }  </style>
