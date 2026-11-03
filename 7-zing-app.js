@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b120-home-search-2026-11-03";
+const BUILD = "b121-settings-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2668,6 +2668,12 @@ const PAGE = `<!DOCTYPE html>
     .bs-grid{ display:flex; flex-wrap:wrap; padding:6px 12px 16px; }
     .bs-tile{ width:calc(50% - 8px); margin:4px; height:78px; border:none; border-radius:12px; padding:12px; color:#fff; font-family:inherit; font-weight:800; font-size:.95rem; text-align:left; cursor:pointer; overflow:hidden; }
     .bs-tile span{ display:block; word-break:break-word; }
+    .switch{ width:48px; height:28px; border-radius:999px; border:none; background:var(--surface-3); position:relative; flex:none; cursor:pointer; padding:0; }
+    .switch span{ position:absolute; left:3px; top:3px; width:22px; height:22px; border-radius:999px; background:#fff; box-shadow:0 2px 6px rgba(0,0,0,.4); -webkit-transition:left .15s; transition:left .15s; display:block; }
+    .switch.on{ background:var(--grad); } .switch.on span{ left:23px; }
+    .set-tools{ padding:2px 18px 6px; } .set-tools .chip{ margin:0 8px 8px 0; }
+    .hm-tx b{ white-space:normal; line-height:1.15; } .hm-chip{ height:auto; min-height:56px; }
+    #sres .empty:first-child{ padding-bottom:0; }
     .xp-head{ padding:6px 18px 0; } .xp-head h1{ margin:6px 0 2px; font-size:1.6rem; }
     .xp-grid{ display:flex; flex-wrap:wrap; padding:14px 12px; }
     .xp-tile{ position:relative; width:calc(50% - 12px); margin:6px; min-height:112px; border:none; border-radius:16px; padding:14px; color:#fff; text-align:left; font-family:inherit; cursor:pointer; overflow:hidden; display:block; }
@@ -3087,7 +3093,7 @@ const PAGE = `<!DOCTYPE html>
     function homeHeadHtml(){
       var hr=new Date().getHours(), g=hr<5?"Good night":hr<12?"Good morning":hr<18?"Good afternoon":"Good evening";
       var nl=getLiked().length, nh=getHistory().length, np=getPlaylists().length;
-      var sc=[["openLiked()","favorite","#c04cff,#7c5cff","Liked songs",nl?nl+" songs":"Songs you like"],["openHistory()","history","#2e7dd7,#19b5a5","Recently played",nh?nh+" songs":"Nothing yet"],["openMyPlaylists()","queue_music","#ff7a59,#ff4f8b","Your playlists",np?np+" playlists":"Make your first"],["playPersonalMix('rotation')","play_arrow","#f2a93b,#e8603c","Your rotation","Mix from your music"]];
+      var sc=[["openLiked()","favorite","#c04cff,#7c5cff","Liked songs",nl?nl+" songs":"Songs you like"],["openHistory()","history","#2e7dd7,#19b5a5","Recently played",nh?nh+" songs":"Nothing yet"],["openMyPlaylists()","queue_music","#ff7a59,#ff4f8b","Your playlists",np?np+" playlists":"Make your first"],["playPersonalMix('rotation')","play_arrow","#f2a93b,#e8603c","Your rotation","Made for you"]];
       return '<div class="hm-head"><h1>'+g+'</h1></div><div class="hm-short">'+sc.map(function(x){ var c=x[2].split(",");
         return '<button class="hm-chip" onclick="'+x[0]+'"><span class="hm-ico" style="background:linear-gradient(135deg,'+c[0]+','+c[1]+')">'+ic(x[1])+'</span><span class="hm-tx"><b>'+x[3]+'</b><i>'+x[4]+'</i></span></button>'; }).join("")+'</div>';
     }
@@ -3739,8 +3745,8 @@ const PAGE = `<!DOCTYPE html>
     // ---------- Settings ----------
     function openSettings(){ overlay("Settings", settingsHtml()); }
     function row(title, desc, right, click){ return '<div class="row"'+(click?' style="cursor:pointer" onclick="'+click+'"':'')+'><div class="rlabel"><div class="rt">'+esc(title)+'</div>'+(desc?'<div class="rd">'+esc(desc)+'</div>':'')+'</div>'+right+'</div>'; }
-    function segEl(id, opts, cur, fn){ return '<div class="seg" id="'+id+'">'+opts.map(function(o){ return '<button data-v="'+esc(o[0])+'" class="'+(o[0]===cur?"on":"")+'" onclick="'+fn+'(\\''+o[0]+'\\')">'+esc(o[1])+'</button>'; }).join("")+'</div>'; }
-    function segMark(id,val){ var s=$(id); if(!s) return; [].forEach.call(s.children,function(b){ b.classList.toggle("on", b.getAttribute("data-v")===val); }); }
+    function segEl(id, opts, cur, fn){ if(opts.length===2&&opts[0][0]==="on"&&opts[1][0]==="off"){ return '<button type="button" role="switch" class="switch'+(cur==="on"?" on":"")+'" id="'+id+'" data-v="'+(cur==="on"?"on":"off")+'" aria-checked="'+(cur==="on"?"true":"false")+'" onclick="'+fn+'(this.getAttribute(\\'data-v\\')===\\'on\\'?\\'off\\':\\'on\\')"><span></span></button>'; } return '<div class="seg" id="'+id+'">'+opts.map(function(o){ return '<button data-v="'+esc(o[0])+'" class="'+(o[0]===cur?"on":"")+'" onclick="'+fn+'(\\''+o[0]+'\\')">'+esc(o[1])+'</button>'; }).join("")+'</div>'; }
+    function segMark(id,val){ var s=$(id); if(!s) return; if(s.classList.contains("switch")){ s.classList.toggle("on",val==="on"); s.setAttribute("data-v",val==="on"?"on":"off"); s.setAttribute("aria-checked",val==="on"?"true":"false"); return; } [].forEach.call(s.children,function(b){ b.classList.toggle("on", b.getAttribute("data-v")===val); }); }
     function setLang(v){ SET.lang=(v==="he"?"he":"en"); saveSettings(); segMark("segLang",SET.lang); _dirtyView=true; }
     function setTheme(v){ SET.theme=(v==="light"?"light":"dark"); saveSettings(); applyTheme(); segMark("segTheme",SET.theme); }
     function setAutoplay(v){ SET.autoplay=(v==="on"); saveSettings(); segMark("segAuto",v); }
@@ -3764,7 +3770,13 @@ const PAGE = `<!DOCTYPE html>
     function settingsHtml(){
       var auto=SET.autoplay?"on":"off"; var radio=SET.radio?"on":"off";
       return ''+
-        '<div class="workspace-banner"><div class="kicker">MAKE IT YOURS</div><h2>Settings & listening tools</h2><p class="muted">Personal preferences are saved on this browser.</p><div class="chips"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openPersonalMixes()">Personal mixes</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="keyboardHelp()">Keyboard shortcuts</button><button class="chip" onclick="sharePage()">Share page</button></div></div>'+
+        '<div class="set-tools"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="openPersonalMixes()">Mixes</button><button class="chip" onclick="keyboardHelp()">Shortcuts</button><button class="chip" onclick="sharePage()">Share</button></div>'+
+        '<div class="set-sec"><h3>Playback</h3><div class="card">'+
+          row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75\u00d7"],["1","1\u00d7"],["1.25","1.25\u00d7"],["1.5","1.5\u00d7"],["2","2\u00d7"]],String(SET.speed),"setSpeed"))+
+          row("Skip buttons","How far the skip buttons jump", segEl("segSkip",[["10","10s"],["15","15s"],["30","30s"]],String(SET.skip),"setSkip"))+
+          row("Resume long tracks","Continue shiurim & stories where you stopped", segEl("segResume",[["on","On"],["off","Off"]],SET.resume?"on":"off","setResume"))+
+          row("Fade in","Ease each track in gently", segEl("segFade",[["on","On"],["off","Off"]],SET.fade?"on":"off","setFade"))+
+        '</div></div>'+
         '<div class="set-sec"><h3>Appearance</h3><div class="card">'+
           row("Accent","Your personal color; does not change the site for others",segEl("uxAccent",[["site","Site"],["purple","Purple"],["green","Green"],["blue","Blue"],["rose","Rose"]],UX.accent,"setAccent"))+
           row("Density","Roomy or compact song lists",segEl("uxDensity",[["comfortable","Roomy"],["compact","Compact"]],UX.density,"setDensity"))+
@@ -3777,12 +3789,6 @@ const PAGE = `<!DOCTYPE html>
           row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
         '</div></div>'+
         appUpdateHtml()+
-        '<div class="set-sec"><h3>Playback</h3><div class="card">'+
-          row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75\u00d7"],["1","1\u00d7"],["1.25","1.25\u00d7"],["1.5","1.5\u00d7"],["2","2\u00d7"]],String(SET.speed),"setSpeed"))+
-          row("Skip buttons","How far the skip buttons jump", segEl("segSkip",[["10","10s"],["15","15s"],["30","30s"]],String(SET.skip),"setSkip"))+
-          row("Resume long tracks","Continue shiurim & stories where you stopped", segEl("segResume",[["on","On"],["off","Off"]],SET.resume?"on":"off","setResume"))+
-          row("Fade in","Ease each track in gently", segEl("segFade",[["on","On"],["off","Off"]],SET.fade?"on":"off","setFade"))+
-        '</div></div>'+
         '<div class="set-sec"><h3>Audio & downloads</h3><div class="card">'+
           row("Audio quality","Original quality provided by the music source. No extra bitrate or offline tier is available.","")+
           row("Album download confirmation","Ask before starting multiple downloads",segEl("uxDownload",[["on","On"],["off","Off"]],UX.confirmDownloads?"on":"off","setDownloadConfirm"))+
@@ -4609,7 +4615,7 @@ const PAGE = `<!DOCTYPE html>
     function genTilesHtml(list){ return '<div class="bs-title">Browse all</div><div class="bs-grid">'+list.map(function(g,i){ var c=GEN_COLORS[i%GEN_COLORS.length].split(",");
       return '<button class="bs-tile" style="background:linear-gradient(135deg,'+c[0]+','+c[1]+')" onclick="openGenre('+g.id+')"><span>'+esc(genName(g))+'</span></button>'; }).join("")+'</div>'; }
     doSearch=function(v){ _doSearch0(v); if((v||"").trim()) return; var box=$("sres"); if(!box) return;
-      var paint=function(list){ var b=$("sres"),q=$("q"); if(!b||(q&&q.value.trim())||!list.length) return; if(b.querySelector(".bs-grid")) return; b.insertAdjacentHTML("beforeend",genTilesHtml(list)); };
+      var paint=function(list){ var b=$("sres"),q=$("q"); if(!b||(q&&q.value.trim())||!list.length) return; if(b.querySelector(".bs-grid")) return; var em=b.querySelector(".empty"); if(em&&/Type to search/.test(em.textContent)) em.parentNode.removeChild(em); b.insertAdjacentHTML("beforeend",genTilesHtml(list)); };
       if(_genCache){ paint(_genCache); return; }
       gql("query { genres(take: 30) { id enName heName } }").then(function(d){ _genCache=d.genres||[]; paint(_genCache); }).catch(function(){}); };
 
