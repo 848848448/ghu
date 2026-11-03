@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b122-playback-group-2026-11-03";
+const BUILD = "b123-search-menu-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3229,7 +3229,7 @@ const PAGE = `<!DOCTYPE html>
             return '<div class="track" onclick="playSearchTrack('+i+')"><div class="num">'+ic("play_arrow")+'</div>'+
               '<div class="tk">'+esc(trackName(t))+(t.artists&&t.artists.length?'<div class="sub">'+esc(artNames(t.artists))+'</div>':'')+'</div>'+
               (t.duration?'<div class="time">'+fmt(t.duration)+'</div>':'')+
-              dlBtn(t.id,t.file)+'</div>'; }).join("")+'</div></div>';
+              dlBtn(t.id,t.file)+'<button class="np-btn" title="Song options" onclick="event.stopPropagation();searchSongMenu('+i+')">'+ic("more_vert")+'</button></div>'; }).join("")+'</div></div>';
         }
         if(albs.length){
           html+='<div class="sec">'+secHead("Albums")+'<div class="grid albums">'+albs.map(function(al){ return albumTile(al, artNames(al.artists)); }).join("")+'</div></div>';
@@ -3240,6 +3240,7 @@ const PAGE = `<!DOCTYPE html>
         box.innerHTML=html;
       }).catch(function(e){ if(seq!==_searchSeq) return; if(e.message==="login")return; box.innerHTML='<div class="empty">Search error: '+esc(e.message)+'</div>'; });
     }
+    function searchSongMenu(i){ var t=(_searchTracks||[])[i]; if(t) songMenu(normTrack(t)); }
     function playSearchTrack(i){ playTracks(_searchTracks||[], i, ""); }
 
     // ---------- Genres ----------
