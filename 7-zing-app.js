@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b129-admin-tabs-2026-11-03";
+const BUILD = "b130-admin-row-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2679,7 +2679,7 @@ const PAGE = `<!DOCTYPE html>
     .ovl.sheet #ovlBody{ flex:none; background:#141422; padding-top:0; max-height:70%; }
     :root[data-theme="light"] .ovl.sheet .obar,:root[data-theme="light"] .ovl.sheet #ovlBody{ background:#fff; }
     @media (max-width:520px){ .hero{ display:block; text-align:center; margin-bottom:16px; } .hero .cover{ width:200px; height:200px; margin:6px auto 16px; border-radius:14px; box-shadow:0 14px 34px rgba(0,0,0,.5); } .hero h2{ font-size:1.5rem; } .hero .actions{ justify-content:center; } .hero .chips{ justify-content:center; padding:0; } }
-    .admin-row{ display:block; margin-top:12px; padding:10px 10px 2px; border:1px dashed var(--line); border-radius:14px; text-align:center; } .admin-lbl{ display:block; font-size:.68rem; letter-spacing:1.4px; text-transform:uppercase; color:var(--muted); margin-bottom:8px; } .admin-row .chip{ font-size:.8rem; padding:7px 12px; margin:0 4px 8px; }
+    .chips.admin-row{ display:flex; flex-wrap:wrap; justify-content:center; margin:12px 0 0; padding:10px 10px 2px; border:1px dashed var(--line); border-radius:14px; } .admin-lbl{ display:block; width:100%; text-align:center; font-size:.68rem; letter-spacing:1.4px; text-transform:uppercase; color:var(--muted); margin-bottom:8px; } .admin-row .chip{ font-size:.8rem; padding:7px 12px; margin:0 4px 8px; }
     .xp-head{ padding:6px 18px 0; } .xp-head h1{ margin:6px 0 2px; font-size:1.6rem; }
     .xp-grid{ display:flex; flex-wrap:wrap; padding:14px 12px; }
     .xp-tile{ position:relative; width:calc(50% - 12px); margin:6px; min-height:112px; border:none; border-radius:16px; padding:14px; color:#fff; text-align:left; font-family:inherit; cursor:pointer; overflow:hidden; display:block; }
