@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b112-focusvis-2026-11-03";
+const BUILD = "b113-settings-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2654,7 +2654,7 @@ const PAGE = `<!DOCTYPE html>
     /* Overlay (lyrics / settings) */
     .ovl{ position:fixed; top:0;right:0;bottom:0;left:0; z-index:60; background:var(--ovl-bg); -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px); overflow:auto;
       padding:18px 18px calc(28px + env(safe-area-inset-bottom,0px)); }
-    .ovl .obar{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:16px; position:sticky; top:0; }
+    .ovl .obar{ display:flex; align-items:center; justify-content:space-between; margin:-18px -18px 16px; padding:18px 18px 12px; position:sticky; top:0; background:var(--ovl-bg); z-index:5; border-bottom:1px solid var(--line); }
     .ovl h2{ margin:0; font-size:1.2rem; }
     .ovl pre{ white-space:pre-wrap; font-family:inherit; font-size:1.02rem; line-height:1.8; margin:0; }
     .banner{ border-radius:14px; padding:13px 15px; margin:0 18px 8px; border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); color:var(--warn); font-size:.9rem; }
@@ -2663,9 +2663,9 @@ const PAGE = `<!DOCTYPE html>
       background:var(--surface-3); color:var(--text); border:1px solid var(--line); padding:11px 16px; border-radius:12px;
       box-shadow:0 12px 30px rgba(0,0,0,.5); opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; z-index:70; font-size:.9rem; max-width:88%; text-align:center; }
     .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
-    .chips{ display:flex; gap:8px; padding:0 18px; flex-wrap:wrap; }
-    .chip{ background:var(--surface); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:8px 14px; font-weight:600; font-size:.85rem; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
-    .chip .ms{ font-size:18px; }
+    .chips{ display:flex; padding:0 18px; flex-wrap:wrap; } .chips .chip{ margin:0 8px 8px 0; }
+    .chip{ background:var(--surface); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:8px 14px; font-weight:600; font-size:.85rem; cursor:pointer; display:inline-flex; align-items:center; }
+    .chip .ms{ font-size:18px; margin-right:6px; }
     .chip.on{ color:var(--accent); border-color:var(--accent); }
 
     /* Settings */
@@ -2673,15 +2673,15 @@ const PAGE = `<!DOCTYPE html>
     .set-sec:first-child{ margin-top:4px; }
     .set-sec h3{ margin:0 0 10px; font-size:.74rem; letter-spacing:1.6px; text-transform:uppercase; color:var(--muted); }
     .card{ background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
-    .row{ display:flex; align-items:center; gap:12px; padding:13px 15px; border-bottom:1px solid var(--line); }
+    .row{ display:flex; align-items:center; padding:13px 15px; border-bottom:1px solid var(--line); }
     .row:last-child{ border-bottom:none; }
-    .arow{ display:flex; align-items:center; gap:4px; padding:12px 12px; cursor:pointer; border-bottom:1px solid var(--line); transition:background .12s; }
+    .arow{ display:flex; align-items:center; padding:12px 12px; cursor:pointer; border-bottom:1px solid var(--line); transition:background .12s; } .arow>*+*{ margin-left:4px; }
     .arow:last-child{ border-bottom:none; }
     .arow:active{ background:var(--surface-2); }
     .arow .aic{ width:38px; height:38px; border-radius:11px; background:var(--surface-3); display:grid; place-items:center; flex:none; margin-right:12px; color:var(--accent); }
     .arow .ms svg{ width:22px; height:22px; }
     .abadge{ display:inline-block; min-width:18px; text-align:center; background:var(--accent); color:#fff; border-radius:999px; font-size:.68rem; font-weight:800; padding:1px 6px; margin-left:6px; vertical-align:1px; }
-    .row .rlabel{ flex:1; min-width:0; }
+    .row .rlabel{ flex:1; min-width:0; margin-right:12px; }
     .row .rlabel .rt{ font-weight:600; font-size:.98rem; }
     .row .rlabel .rd{ color:var(--muted); font-size:.8rem; margin-top:2px; }
     .row .ms{ color:var(--muted); font-size:22px; flex:none; }
@@ -2889,7 +2889,7 @@ const PAGE = `<!DOCTYPE html>
       bedtime:"M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
       more_vert:"M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
       playlist_add:"M14 10H2v2h12v-2zm0-4H2v2h12V6zM2 16h8v-2H2v2zm19-6-1.41-1.41L16 12.17V4h-2v8.17l-3.59-3.58L9 10l5 5 5-5z",
-      download:"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
+      download:"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",upload:"M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z",
       arrow_back_ios_new:"M17.77 3.77 16 2 6 12l10 10 1.77-1.77L9.54 12z",
       close:"M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
       delete:"M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
@@ -3724,35 +3724,55 @@ const PAGE = `<!DOCTYPE html>
     function settingsHtml(){
       var auto=SET.autoplay?"on":"off"; var radio=SET.radio?"on":"off";
       return ''+
+        '<div class="workspace-banner"><div class="kicker">MAKE IT YOURS</div><h2>Settings & listening tools</h2><p class="muted">Personal preferences are saved on this browser.</p><div class="chips"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openPersonalMixes()">Personal mixes</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="keyboardHelp()">Keyboard shortcuts</button><button class="chip" onclick="sharePage()">Share page</button></div></div>'+
+        '<div class="set-sec"><h3>Appearance</h3><div class="card">'+
+          row("Accent","Your personal color; does not change the site for others",segEl("uxAccent",[["site","Site"],["purple","Purple"],["green","Green"],["blue","Blue"],["rose","Rose"]],UX.accent,"setAccent"))+
+          row("Density","Roomy or compact song lists",segEl("uxDensity",[["comfortable","Roomy"],["compact","Compact"]],UX.density,"setDensity"))+
+          row("Motion","Use your device preference or turn animations off",segEl("uxMotion",[["system","System"],["reduced","Reduced"]],UX.motion,"setMotion"))+
+        '</div></div>'+
         '<div class="set-sec"><h3>App</h3><div class="card">'+
-          row("Language","Show names in English or Hebrew", segEl("segLang",[["en","English"],["he","עברית"]],SET.lang,"setLang"))+
+          row("Language","Show names in English or Hebrew", segEl("segLang",[["en","English"],["he","\u05e2\u05d1\u05e8\u05d9\u05ea"]],SET.lang,"setLang"))+
           row("Theme","Dark or light look", segEl("segTheme",[["dark","Dark"],["light","Light"]],SET.theme,"setTheme"))+
           row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
           row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
         '</div></div>'+
         appUpdateHtml()+
         '<div class="set-sec"><h3>Playback</h3><div class="card">'+
-          row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75×"],["1","1×"],["1.25","1.25×"],["1.5","1.5×"],["2","2×"]],String(SET.speed),"setSpeed"))+
+          row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75\u00d7"],["1","1\u00d7"],["1.25","1.25\u00d7"],["1.5","1.5\u00d7"],["2","2\u00d7"]],String(SET.speed),"setSpeed"))+
           row("Skip buttons","How far the skip buttons jump", segEl("segSkip",[["10","10s"],["15","15s"],["30","30s"]],String(SET.skip),"setSkip"))+
           row("Resume long tracks","Continue shiurim & stories where you stopped", segEl("segResume",[["on","On"],["off","Off"]],SET.resume?"on":"off","setResume"))+
           row("Fade in","Ease each track in gently", segEl("segFade",[["on","On"],["off","Off"]],SET.fade?"on":"off","setFade"))+
         '</div></div>'+
+        '<div class="set-sec"><h3>Audio & downloads</h3><div class="card">'+
+          row("Audio quality","Original quality provided by the music source. No extra bitrate or offline tier is available.","")+
+          row("Album download confirmation","Ask before starting multiple downloads",segEl("uxDownload",[["on","On"],["off","Off"]],UX.confirmDownloads?"on":"off","setDownloadConfirm"))+
+          row("Download location","Your browser controls the download folder and file prompts","")+
+        '</div><p class="muted">Fade-in is available above. Crossfade and true gapless playback are not supported by this streaming player. Premium restrictions still apply.</p></div>'+
         '<div class="set-sec"><h3>Your library</h3><div class="card">'+
-          row("Your playlists","Playlists you\\'ve made", ic("chevron_right"), "openMyPlaylists()")+
-          row("Liked songs","Songs you\\'ve ♥\\'d", ic("chevron_right"), "openLiked()")+
+          row("Library","Browse all your music", ic("chevron_right"), "browseLibrary()")+
+          row("Your playlists","Playlists you\'ve made", ic("chevron_right"), "openMyPlaylists()")+
+          row("Liked songs","Songs you\'ve \u2665\'d", ic("chevron_right"), "openLiked()")+
           row("Recently played","Your play history", ic("chevron_right"), "openHistory()")+
         '</div></div>'+
-        '<div class="set-sec"><h3>Storage on this device</h3><div class="chips" style="padding:0">'+
-          '<button class="chip" onclick="clearData(\\'zing_hist\\',\\'Recently played\\')">Clear history</button>'+
-          '<button class="chip" onclick="clearData(\\'zing_liked\\',\\'Liked songs\\')">Clear liked</button>'+
+        '<div class="set-sec"><h3>Storage on this device</h3><div class="card">'+
+          row("Clear history","Remove your recently played list", ic("delete"), "clearData(\'zing_hist\',\'Recently played\')")+
+          row("Clear liked songs","Remove all your liked songs", ic("delete"), "clearData(\'zing_liked\',\'Liked songs\')")+
+        '</div></div>'+
+        '<div class="set-sec"><h3>Backup & privacy</h3><div class="card">'+
+          row("Export your library","Download likes, playlists, follows, albums, history and preferences",ic("download"),"exportLibrary()")+
+          row("Restore a backup","Merge a private JSON backup from another browser",ic("upload"),"pickLibraryBackup()")+
+          row("Library storage","Stored on this device. Clearing browser data removes it; backups are not automatic.","")+
         '</div></div>'+
         (ME.user ? ('<div class="set-sec"><h3>Your account</h3><div class="card">'+
           row(esc(ME.user.name||ME.user.email), esc(ME.user.email), ic("chevron_right"), "openProfile()")+
-        '</div></div>') : '')+
+          '<div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div>'+
+        '</div></div>') : ('<div class="set-sec"><h3>Account</h3><div class="card">'+
+          '<div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div>'+
+        '</div></div>'))+
         (ME.admin ? ('<div class="set-sec"><h3>Admin</h3><div class="card">'+
           row("Admin panel","Accounts, appearance, features, who's online", ic("chevron_right"), "openAccess()")+
         '</div></div>') : '')+
-        (ME.admin ? ('<div class="set-sec"><h3>Diagnostics</h3><div class="chips" style="padding:0">'+
+        (ME.admin ? ('<div class="set-sec"><h3>Diagnostics</h3><div class="card" style="padding:12px 15px"><div class="chips" style="padding:0">'+
           '<button class="chip" onclick="runCheck()">Check connection</button>'+
           '<button class="chip" onclick="showZingConfig()">Zing settings</button>'+
           '<button class="chip" onclick="showZingActions()">Zing actions</button>'+
@@ -3760,11 +3780,8 @@ const PAGE = `<!DOCTYPE html>
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="probeNew()">New releases (debug)</button>'+
           '<button class="chip" onclick="probeAudio()">Singles (debug)</button>'+
-          '<button class="chip" onclick="showImageInfo()">Image info</button><button class="chip" onclick="showUaInfo()">Browser info</button></div>'+
-          '<div id="diag" style="margin-top:14px"></div></div>') : '')+
-        '<div class="set-sec"><h3>Account</h3><div class="card">'+
-          '<div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div>'+
-        '</div></div>';
+          '<button class="chip" onclick="showImageInfo()">Image info</button><button class="chip" onclick="showUaInfo()">Browser info</button></div></div>'+
+          '<div id="diag" style="margin-top:14px"></div></div>') : '');
     }
     function openProfile(){ if(!ME.user){ return; } var u=ME.user;
       overlay("Profile", '<div style="text-align:center;margin-bottom:8px">'+
@@ -4333,14 +4350,7 @@ const PAGE = `<!DOCTYPE html>
     function keyboardHelp(){overlay("Keyboard shortcuts",'<div class="card">'+[["Space / K","Play or pause"],["Left / Right","Seek backward / forward"],["Shift + Left / Right","Previous / next song"],["Up / Down","Volume"],["S / R","Shuffle / repeat"],["L / M","Like / mute"],["/","Search"],["?","This help"]].map(function(x){return row(x[0],x[1],"");}).join("")+'</div><p class="muted">Shortcuts are paused while typing in an input.</p>');}
     function sharePage(){var url=location.origin+location.pathname+location.hash;if(navigator.share){navigator.share({title:document.title,url:url}).catch(function(){});}else if(navigator.clipboard){navigator.clipboard.writeText(url).then(function(){toast("Link copied");}).catch(function(){prompt("Copy this link:",url);});}else prompt("Copy this link:",url);}
     function exportLibrary(){var keys=["zing_liked","zing_playlists","zing_hist","zing_saved_albums","zing_followed_artists","zing_settings",UXKEY],data={app:"Zing",version:1,exportedAt:new Date().toISOString(),data:{}};keys.forEach(function(k){try{var s=localStorage.getItem(k);if(s)data.data[k]=JSON.parse(s);}catch(e){}});var blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="zing-library-backup.json";a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},3000);toast("Library backup downloaded. Keep it private.");}
-    var baseSettingsHtml=settingsHtml;
-    settingsHtml=function(){return '<div class="workspace-banner"><div class="kicker">MAKE IT YOURS</div><h2>Settings & listening tools</h2><p class="muted">Personal preferences are saved on this browser.</p><div class="chips"><button class="chip" onclick="openEqualizer()">Equalizer</button><button class="chip" onclick="openPersonalMixes()">Personal mixes</button><button class="chip" onclick="openSleep()">Sleep timer</button><button class="chip" onclick="keyboardHelp()">Keyboard shortcuts</button><button class="chip" onclick="sharePage()">Share page</button></div></div><div class="set-sec"><h3>Your space</h3><div class="chips" style="margin:0 18px 12px"><button class="chip" onclick="browseLibrary()">Library</button><button class="chip" onclick="openMyPlaylists()">Playlists</button><button class="chip" onclick="openHistory()">History</button></div></div><div class="set-sec"><h3>Appearance</h3><div class="card">'+
-      row("Accent","Your personal color; does not change the site for others",segEl("uxAccent",[["site","Site"],["purple","Purple"],["green","Green"],["blue","Blue"],["rose","Rose"]],UX.accent,"setAccent"))+
-      row("Density","Roomy or compact song lists",segEl("uxDensity",[["comfortable","Roomy"],["compact","Compact"]],UX.density,"setDensity"))+
-      row("Motion","Use your device preference or turn animations off",segEl("uxMotion",[["system","System"],["reduced","Reduced"]],UX.motion,"setMotion"))+'</div></div>'+baseSettingsHtml()+'<div class="set-sec"><h3>Audio & downloads</h3><div class="card">'+
-      row("Audio quality","Original quality provided by the music source. No extra bitrate or offline tier is available.","")+
-      row("Album download confirmation","Ask before starting multiple downloads",segEl("uxDownload",[["on","On"],["off","Off"]],UX.confirmDownloads?"on":"off","setDownloadConfirm"))+
-      row("Download location","Your browser controls the download folder and file prompts","")+'</div><p class="muted">Fade-in is available above. Crossfade and true gapless playback are not supported by this streaming player. Premium restrictions still apply.</p></div><div class="set-sec"><h3>Backup & privacy</h3><div class="card">'+row("Export your library","Download likes, playlists, follows, albums, history and preferences",ic("download"),"exportLibrary()")+row("Restore a backup","Merge a private JSON backup from another browser",ic("upload"),"pickLibraryBackup()")+row("Library storage","Stored on this device. Clearing browser data removes it; backups are not automatic.","")+'</div></div>';};
+    // (settings sections consolidated into settingsHtml)
     function setAccent(v){setUX("accent",v);}function setDensity(v){setUX("density",v);}function setMotion(v){setUX("motion",v);}function setDownloadConfirm(v){setUX("confirmDownloads",v);}
     var baseDownloadAlbum=downloadAlbum;
     downloadAlbum=function(id){var a=(window._albums||{})[id];if(!a||!dlAllowed())return;if(UX.confirmDownloads&&!confirm("Download all "+(a.tracks||[]).length+" tracks? Your browser may ask to allow multiple files."))return;baseDownloadAlbum(id);};
@@ -4373,8 +4383,7 @@ const PAGE = `<!DOCTYPE html>
     function addSongFilter(){var b=$("ovlBody");if(b&&b.querySelector(".track"))b.insertAdjacentHTML("afterbegin",'<input class="field" aria-label="Filter songs" placeholder="Filter songs..." oninput="filterSongRows(this)" style="margin-bottom:14px">');}
     var originalLiked=openLiked,originalHistory=openHistory,originalPersonalPlaylist=openMyPlaylist;
     openLiked=function(){originalLiked();addSongFilter();};openHistory=function(){originalHistory();addSongFilter();};openMyPlaylist=function(id){originalPersonalPlaylist(id);addSongFilter();};
-    var beforeAudioSettings=settingsHtml;
-    settingsHtml=function(){return beforeAudioSettings()+'<div class="set-sec"><h3>Listening desk</h3><div class="card">'+row("Equalizer","Six bands: Flat, Bass, Voice and Soft presets",ic("graphic_eq"),"openEqualizer()")+row("Personal mixes","Build mixes from your likes and recent songs",ic("shuffle"),"openPersonalMixes()")+'</div></div>';};
+    // (equalizer and mixes live in the settings hero chips)
     function openPersonalMixes(){overlay("Personal mixes",personalMixesHtml());}
 
     // Merge only whitelisted, validated music data. Never execute backup fields.
