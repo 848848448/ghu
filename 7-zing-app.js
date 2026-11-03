@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b111-oldwv-ux-2026-11-03";
+const BUILD = "b112-focusvis-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2444,6 +2444,7 @@ const PAGE = `<!DOCTYPE html>
     }
     *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     button:focus,a:focus,[onclick]:focus,[tabindex]:focus{ outline:none; }
+    button:focus-visible,a:focus-visible,[onclick]:focus-visible,[tabindex]:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
     html,body{ height:100%; margin:0; }
     body{
       font-family:var(--font); color:var(--text);
