@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b116-solidovl-2026-11-03";
+const BUILD = "b117-ovlpad-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2653,10 +2653,9 @@ const PAGE = `<!DOCTYPE html>
     .tab.active .ms{ background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
 
     /* Overlay (lyrics / settings) */
-    .ovl{ position:fixed; top:0;right:0;bottom:0;left:0; z-index:60; background:var(--ovl-bg); overflow:hidden; display:flex; flex-direction:column;
-      padding:0 18px calc(28px + env(safe-area-inset-bottom,0px)); }
-    #ovlBody{ flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch; }
-    .ovl .obar{ display:flex; align-items:center; justify-content:space-between; margin:0 -18px 16px; padding:18px 18px 12px; background:var(--ovl-bg); border-bottom:1px solid var(--line); flex:none; }
+    .ovl{ position:fixed; top:0;right:0;bottom:0;left:0; z-index:60; background:var(--ovl-bg); overflow:hidden; display:flex; flex-direction:column; }
+    #ovlBody{ flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch; padding:0 18px calc(28px + env(safe-area-inset-bottom,0px)); }
+    .ovl .obar{ display:flex; align-items:center; justify-content:space-between; margin:0 0 16px; padding:18px 18px 12px; background:var(--ovl-bg); border-bottom:1px solid var(--line); flex:none; }
     .ovl h2{ margin:0; font-size:1.2rem; }
     .ovl pre{ white-space:pre-wrap; font-family:inherit; font-size:1.02rem; line-height:1.8; margin:0; }
     .banner{ border-radius:14px; padding:13px 15px; margin:0 18px 8px; border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); color:var(--warn); font-size:.9rem; }
