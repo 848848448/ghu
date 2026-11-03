@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b123-search-menu-2026-11-03";
+const BUILD = "b124-sheet-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2674,6 +2674,10 @@ const PAGE = `<!DOCTYPE html>
     .set-tools{ padding:2px 18px 6px; } .set-tools .chip{ margin:0 8px 8px 0; }
     .hm-tx b{ white-space:normal; line-height:1.15; } .hm-chip{ height:auto; min-height:56px; }
     #sres .empty:first-child{ padding-bottom:0; }
+    .ovl.sheet{ background:rgba(0,0,0,.6); justify-content:flex-end; }
+    .ovl.sheet .obar{ background:#141422; margin:0; border-radius:20px 20px 0 0; border-bottom:none; padding:16px 18px 6px; }
+    .ovl.sheet #ovlBody{ flex:none; background:#141422; padding-top:0; max-height:70%; }
+    :root[data-theme="light"] .ovl.sheet .obar,:root[data-theme="light"] .ovl.sheet #ovlBody{ background:#fff; }
     .xp-head{ padding:6px 18px 0; } .xp-head h1{ margin:6px 0 2px; font-size:1.6rem; }
     .xp-grid{ display:flex; flex-wrap:wrap; padding:14px 12px; }
     .xp-tile{ position:relative; width:calc(50% - 12px); margin:6px; min-height:112px; border:none; border-radius:16px; padding:14px; color:#fff; text-align:left; font-family:inherit; cursor:pointer; overflow:hidden; display:block; }
@@ -3625,7 +3629,7 @@ const PAGE = `<!DOCTYPE html>
         item("queue_music","Add to playlist","menuPlaylist()")+
         item("play_arrow","Play next","menuPlayNext()")+
         item("queue_music","Add to queue","menuAddQueue()")+item("share","Share song","shareSong(window._menuTrack)")+
-        '</div>'); }
+        '</div>'); var o=$("ovl"); if(o){ o.className="ovl sheet"; o.onclick=function(e){ if(e.target===o) closeOverlay(); }; } }
     function menuLike(){ toggleLike(window._menuTrack); closeOverlay(true); }
     function menuPlaylist(){ var t=window._menuTrack; closeOverlay(true); choosePlaylist(t); }
     function menuPlayNext(){ playNext(window._menuTrack); closeOverlay(true); }
