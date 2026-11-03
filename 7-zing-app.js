@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b130-admin-row-2026-11-03";
+const BUILD = "b131-restore-nav-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2653,7 +2653,6 @@ const PAGE = `<!DOCTYPE html>
     .tab.active{ color:var(--text); }
 
     /* b119 shell */
-    .tab .ms{ font-size:24px; } .tab span.lbl{ font-size:.68rem; }
     .player{ left:8px; right:8px; bottom:calc(var(--tabs-h) + 6px + env(safe-area-inset-bottom,0px)); border-radius:14px; border:1px solid var(--line); background:#1b1b2e; padding:7px 10px; box-shadow:0 8px 24px rgba(0,0,0,.45); -webkit-backdrop-filter:none; backdrop-filter:none; overflow:hidden; }
     :root[data-theme="light"] .player{ background:#fff; }
     .np-cover{ width:42px; height:42px; border-radius:8px; }
@@ -2802,9 +2801,12 @@ const PAGE = `<!DOCTYPE html>
   <!-- Bottom tabs -->
   <nav class="tabs">
     <button class="tab active" id="tabHome" onclick="go('home')"><span class="ms">home</span><span class="lbl">Home</span></button>
+    <button class="tab" id="tabAlbums" onclick="go('albums')"><span class="ms">album</span><span class="lbl">Albums</span></button>
     <button class="tab" id="tabSearch" onclick="go('search')"><span class="ms">search</span><span class="lbl">Search</span></button>
-    <button class="tab" id="tabExplore" onclick="go('explore')"><span class="ms">category</span><span class="lbl">Explore</span></button>
+    <button class="tab" id="tabGenres" onclick="go('genres')"><span class="ms">category</span><span class="lbl">Genres</span></button>
+    <button class="tab" id="tabPlaylists" onclick="go('playlists')"><span class="ms">featured_play_list</span><span class="lbl">Playlists</span></button>
     <button class="tab" id="tabLibrary" onclick="browseLibrary()"><span class="ms">favorite</span><span class="lbl">Library</span></button>
+    <button class="tab" id="tabArtists" onclick="go('artists')"><span class="ms">artist</span><span class="lbl">Artists</span></button>
   </nav>
 
   <audio id="audio" preload="none"></audio>
@@ -3036,7 +3038,7 @@ const PAGE = `<!DOCTYPE html>
     }
 
     // ---------- Tabs ----------
-    function setTab(id){ if(id) window._tabSeen=true; if(id==="tabAlbums"||id==="tabGenres"||id==="tabPlaylists"||id==="tabArtists") id="tabExplore"; ["tabHome","tabSearch","tabExplore","tabLibrary"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
+    function setTab(id){ if(id) window._tabSeen=true; ["tabHome","tabAlbums","tabSearch","tabGenres","tabPlaylists","tabArtists","tabLibrary"].forEach(function(n){ var el=$(n); if(el) el.classList.toggle("active", n===id); }); }
     var GO_LABEL={explore:"Exploring",home:"Home",albums:"Albums",search:"Searching",genres:"Genres",playlists:"Playlists",artists:"Artists"};
     function go(where){
       curTab=where; setActivity(GO_LABEL[where]||"Home"); saveRoute(where);
@@ -3119,7 +3121,7 @@ const PAGE = `<!DOCTYPE html>
         // Keep featured in the admin-chosen order.
         if(featured.length){ var fm={}; featured.forEach(function(a){fm[a.id]=a;}); featured=CFG.featured.map(function(id){return fm[id];}).filter(Boolean); }
         window._albums=window._albums||{};
-        var html=homeHeadHtml();
+        var html=personalMixesHtml();
         if(banners.length && feat("banners")){
           var bcards=banners.map(bannerCard).filter(Boolean).join("");
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
@@ -4522,7 +4524,7 @@ const PAGE = `<!DOCTYPE html>
         var tabs={explore:1,home:1,albums:1,genres:1,playlists:1,artists:1};
         if(tabs[k]){ go(k); return; }
         var opens={track:openTrackRoute,album:openAlbum,artist:openArtist,playlist:openPlaylist,genre:openGenre,category:openCategory,story:openStory};
-        if(opens[k]){ if(!window._tabSeen){ setTab(k==="story"?"tabHome":(k==="track"?"tabSearch":"tabExplore")); } try{ opens[k](numify(a)); }catch(e){ go("home"); } return; }
+        if(opens[k]){ if(!window._tabSeen){ setTab({story:"tabHome",track:"tabSearch",album:"tabAlbums",artist:"tabArtists",genre:"tabGenres",category:"tabGenres",playlist:"tabPlaylists"}[k]||"tabHome"); } try{ opens[k](numify(a)); }catch(e){ go("home"); } return; }
         go("home"); }
       function openOverlayRoute(o){ var p=o.split("/"), k=p[0], a=dec(p.slice(1).join("/"));
         if(k==="liked") openLiked();
