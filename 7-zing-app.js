@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b108-simple-playback-2026-10-31";
+const BUILD = "b109-oldwv-imgproxy-appupdate-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -55,6 +55,32 @@ export default {
           "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});\n" +
           "self.addEventListener('fetch',function(e){if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(function(){return new Response(OFF,{headers:{'Content-Type':'text/html; charset=utf-8'}});}));}});\n";
         return new Response(sw, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-cache", "Service-Worker-Allowed": "/" } });
+      }
+      if (path === "/img") {
+        // Same-origin image proxy: catalog cover art lives on the upstream CDN,
+        // which some networks/filters block. Whitelisted hosts only - never an open proxy.
+        const IMG_HOSTS = { "image.zingmusic.app": 1, "res.cloudinary.com": 1 };
+        const u = url.searchParams.get("u") || "";
+        let target = null;
+        try { target = new URL(u); } catch (e) { return new Response("bad url", { status: 400 }); }
+        if (target.protocol !== "https:" || !IMG_HOSTS[target.host]) return new Response("not allowed", { status: 403 });
+        const cache = caches.default;
+        const key = new Request(url.toString(), request);
+        let resp = await cache.match(key);
+        if (!resp) {
+          let up;
+          try { up = await fetch(target.toString(), { cf: { cacheTtl: 604800, cacheEverything: true } }); }
+          catch (e) { return new Response("upstream error", { status: 502 }); }
+          if (!up.ok) return new Response("not found", { status: 404 });
+          const ct = up.headers.get("Content-Type") || "image/jpeg";
+          if (!/^image\//.test(ct)) return new Response("not an image", { status: 404 });
+          resp = new Response(up.body, { status: 200, headers: {
+            "Content-Type": ct,
+            "Cache-Control": "public, max-age=604800, immutable",
+          } });
+          try { await cache.put(key, resp.clone()); } catch (e) {}
+        }
+        return resp;
       }
       if (path === "/api/status") {
         const auth = await hasAuthNow(env);
@@ -2440,7 +2466,7 @@ const PAGE = `<!DOCTYPE html>
     /* Top bar */
     .top{ position:sticky; top:env(safe-area-inset-top,0px); z-index:30;
       display:flex; align-items:center; gap:12px; padding:13px 18px;
-      background:var(--bar); backdrop-filter:blur(14px); border-bottom:1px solid var(--line); }
+      background:var(--bar); -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px); border-bottom:1px solid var(--line); }
     .brand{ display:flex; align-items:center; gap:10px; }
     .logo{ width:36px; height:36px; border-radius:11px; display:grid; place-items:center; background:var(--grad);
       box-shadow:0 6px 16px rgba(124,92,255,.45); }
@@ -2536,7 +2562,7 @@ const PAGE = `<!DOCTYPE html>
     @keyframes spin{ to{ transform:rotate(360deg); } }
     /* Loading skeletons (shimmer) */
     .skel{ position:relative; overflow:hidden; background:var(--surface-2); border-radius:12px; }
-    .skel::after{ content:""; position:absolute; inset:0; transform:translateX(-100%);
+    .skel::after{ content:""; position:absolute; top:0;right:0;bottom:0;left:0; transform:translateX(-100%);
       background:linear-gradient(90deg,transparent,rgba(255,255,255,.07),transparent); animation:shim 1.35s infinite; }
     :root[data-theme="light"] .skel::after{ background:linear-gradient(90deg,transparent,rgba(0,0,0,.05),transparent); }
     @keyframes shim{ 100%{ transform:translateX(100%); } }
@@ -2544,15 +2570,27 @@ const PAGE = `<!DOCTYPE html>
     .sk-cover{ width:100%; aspect-ratio:1/1; border-radius:14px; }
     .sk-line{ height:11px; border-radius:6px; margin-top:9px; } .sk-line.sm{ width:58%; }
     /* Image fade-in over the gradient placeholder; broken images just fall back */
-    .cvimg{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity .4s ease; }
+    .cvimg{ position:absolute; top:0;right:0;bottom:0;left:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity .4s ease; }
     .cvimg.on{ opacity:1; }
+
+    /* Old Android WebView (<Chrome 88) has no aspect-ratio: keep square covers via the padding hack */
+    @supports not (aspect-ratio: 1/1){
+      .cover{ height:0; padding-top:100%; }
+      .cover.round{ padding-top:86%; }
+      .cover .ini{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); }
+      .cover .disc{ position:absolute; top:35%; left:35%; }
+      .sk-cover{ height:0; padding-top:100%; }
+      .banner-card{ height:169px; }
+      .hero .cover{ height:150px; padding-top:0; }
+      .np-cover{ height:46px; padding-top:0; }
+    }
     #status{ min-height:18px; font-size:.9rem; margin:6px 18px; }
     .ok{ color:var(--ok); } .err{ color:var(--err); } .muted{ color:var(--muted); }
 
     /* Now-playing bar */
     .player{ position:fixed; left:0; right:0; bottom:calc(var(--tabs-h) + env(safe-area-inset-bottom,0px)); z-index:35;
       display:flex; align-items:center; gap:12px; padding:9px 14px;
-      background:var(--bar-player); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
+      background:var(--bar-player); -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px); border-top:1px solid var(--line); }
     .player[hidden]{ display:none; }
     .np-cover{ width:46px; height:46px; border-radius:10px; flex:none; display:grid; place-items:center; overflow:hidden; box-shadow:inset 0 0 20px rgba(0,0,0,.3); }
     .np-cover .disc{ width:34%; height:34%; border-radius:999px; background:radial-gradient(circle at 50% 50%,#fff 0 14%,rgba(255,255,255,.22) 15% 33%,rgba(0,0,0,.14) 34% 100%); }
@@ -2600,14 +2638,14 @@ const PAGE = `<!DOCTYPE html>
 
     /* Bottom tabs */
     .tabs{ position:fixed; left:0; right:0; bottom:0; z-index:36; height:calc(var(--tabs-h) + env(safe-area-inset-bottom,0px));
-      padding-bottom:env(safe-area-inset-bottom,0px); display:flex; background:var(--bar-tabs); backdrop-filter:blur(16px); border-top:1px solid var(--line); }
+      padding-bottom:env(safe-area-inset-bottom,0px); display:flex; background:var(--bar-tabs); -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px); border-top:1px solid var(--line); }
     .tab{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; background:none; border:none; color:var(--muted); cursor:pointer; font-family:inherit; }
     .tab .ms{ font-size:25px; } .tab span.lbl{ font-size:.66rem; font-weight:600; }
     .tab.active{ color:var(--text); }
     .tab.active .ms{ background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
 
     /* Overlay (lyrics / settings) */
-    .ovl{ position:fixed; inset:0; z-index:60; background:var(--ovl-bg); backdrop-filter:blur(8px); overflow:auto;
+    .ovl{ position:fixed; top:0;right:0;bottom:0;left:0; z-index:60; background:var(--ovl-bg); -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px); overflow:auto;
       padding:18px 18px calc(28px + env(safe-area-inset-bottom,0px)); }
     .ovl .obar{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:16px; position:sticky; top:0; }
     .ovl h2{ margin:0; font-size:1.2rem; }
@@ -2675,7 +2713,7 @@ const PAGE = `<!DOCTYPE html>
     .see:active{ transform:scale(.95); }
     /* logo sheen */
     .logo{ position:relative; overflow:hidden; }
-    .logo::after{ content:""; position:absolute; inset:0; background:linear-gradient(120deg,transparent 42%,rgba(255,255,255,.4) 50%,transparent 58%); transform:translateX(-130%); animation:sheen 6s ease-in-out infinite; }
+    .logo::after{ content:""; position:absolute; top:0;right:0;bottom:0;left:0; background:linear-gradient(120deg,transparent 42%,rgba(255,255,255,.4) 50%,transparent 58%); transform:translateX(-130%); animation:sheen 6s ease-in-out infinite; }
     @keyframes sheen{ 0%,72%{ transform:translateX(-130%); } 88%,100%{ transform:translateX(130%); } }
     /* softer, deeper card shadows */
     .card{ box-shadow:0 1px 2px rgba(0,0,0,.04); transition:border-color .2s ease, box-shadow .2s ease; }
@@ -2880,7 +2918,7 @@ const PAGE = `<!DOCTYPE html>
     function plName(p){ return pick(p.enName||p.name, p.heName)||"Playlist"; }
     function genName(g){ return pick(g.enName,g.heName)||"Genre"; }
     function albImg(al){ var im=al&&al.images; return (im && (im.cdnMedium||im.medium||im.cdnSmall||im.small))||null; }
-    function imgUrl(v){ return (typeof v==="string" && /^https?:\\/\\//.test(v)) ? v : null; }
+    function imgUrl(v){ if(typeof v!=="string" || !/^https?:\\/\\//.test(v)) return null; return /^https:\\/\\/(image\\.zingmusic\\.app|res\\.cloudinary\\.com)\\//.test(v) ? ("/img?u="+encodeURIComponent(v)) : v; }
 
     function setStatus(h,c){ $("status").innerHTML=h||""; $("status").className=c||""; }
     function loading(m){ setStatus('<span class="spinner"></span>'+m,"muted"); }
@@ -3664,6 +3702,16 @@ const PAGE = `<!DOCTYPE html>
     function setRadio(v){ SET.radio=(v==="on"); saveSettings(); segMark("segRadio",v); }
     function clearData(key,label){ if(!confirm("Clear "+label+"?")) return; try{ localStorage.removeItem(key); }catch(e){} toast(label+" cleared"); }
     function signOut(){ location.href="/api/logout"; }
+    function appUpdateHtml(){
+      if(!window.ZingNative) return "";
+      var ver="unknown";
+      try{ ver=ZingNative.getAppVersion()+" (build "+ZingNative.getAppBuild()+")"; }catch(e){}
+      return '<div class="set-sec"><h3>App updates</h3><div class="card">'+
+        row("Zing app","Installed: "+ver,'<button class="chip" onclick="checkAppUpdate()">Check for updates</button>')+
+      '</div></div>';
+    }
+    function checkAppUpdate(){ try{ window.ZingNative.checkForUpdates(); toast("Checking for updates\u2026"); }catch(e){ toast("Update check needs the Zing Android app"); } }
+    function showUaInfo(){ var d=$("diag"); if(d) d.innerHTML='<div class="card" style="padding:15px"><div class="rt">Browser engine</div><div class="muted" style="word-break:break-all;margin-top:6px">'+esc(navigator.userAgent)+'</div></div>'; }
     function settingsHtml(){
       var auto=SET.autoplay?"on":"off"; var radio=SET.radio?"on":"off";
       return ''+
@@ -3673,6 +3721,7 @@ const PAGE = `<!DOCTYPE html>
           row("Autoplay","Play the next track automatically", segEl("segAuto",[["on","On"],["off","Off"]],auto,"setAutoplay"))+
           row("Autoplay radio","Keep playing similar songs when the queue ends", segEl("segRadio",[["on","On"],["off","Off"]],radio,"setRadio"))+
         '</div></div>'+
+        appUpdateHtml()+
         '<div class="set-sec"><h3>Playback</h3><div class="card">'+
           row("Speed","Default playback speed", segEl("segSpeed",[["0.75","0.75×"],["1","1×"],["1.25","1.25×"],["1.5","1.5×"],["2","2×"]],String(SET.speed),"setSpeed"))+
           row("Skip buttons","How far the skip buttons jump", segEl("segSkip",[["10","10s"],["15","15s"],["30","30s"]],String(SET.skip),"setSkip"))+
@@ -3702,7 +3751,7 @@ const PAGE = `<!DOCTYPE html>
           '<button class="chip" onclick="showSchema()">API structure</button>'+
           '<button class="chip" onclick="probeNew()">New releases (debug)</button>'+
           '<button class="chip" onclick="probeAudio()">Singles (debug)</button>'+
-          '<button class="chip" onclick="showImageInfo()">Image info</button></div>'+
+          '<button class="chip" onclick="showImageInfo()">Image info</button><button class="chip" onclick="showUaInfo()">Browser info</button></div>'+
           '<div id="diag" style="margin-top:14px"></div></div>') : '')+
         '<div class="set-sec"><h3>Account</h3><div class="card">'+
           '<div class="row" style="cursor:pointer" onclick="signOut()"><div class="rlabel"><div class="rt" style="color:var(--err)">Sign out</div></div>'+ic("logout")+'</div>'+
@@ -3738,7 +3787,7 @@ const PAGE = `<!DOCTYPE html>
     // ---------- Single device: one account = one device ----------
     var _tkPoll=null;
     function showTakeover(){ var el=$("takeover"); if(el){ el.hidden=false; return; }
-      el=document.createElement("div"); el.id="takeover"; el.style.cssText="position:fixed;inset:0;z-index:9999;background:var(--bg);display:grid;place-items:center;padding:24px;text-align:center";
+      el=document.createElement("div"); el.id="takeover"; el.style.cssText="position:fixed;top:0;right:0;bottom:0;left:0;z-index:9999;background:var(--bg);display:grid;place-items:center;padding:24px;text-align:center";
       el.innerHTML='<div style="max-width:380px"><div style="width:64px;height:64px;border-radius:999px;background:var(--grad);display:inline-grid;place-items:center;margin-bottom:16px">'+ic("lock")+'</div>'+
         '<h2 style="margin:0 0 8px">You are signed in on another device</h2>'+
         '<p class="muted" style="margin:0 0 18px">Your account can only be signed in on one device at a time. To use it here, sign out the other device.</p>'+
@@ -4499,4 +4548,5 @@ const PAGE = `<!DOCTYPE html>
   </script>
 </body>
 </html>`; /* Perf split: serve the app script at /app.js?v=BUILD with an immutable per-build cache instead of 204KB inline on every load. */ const _jsTagOpen = PAGE.indexOf("<script>"); const _jsTagClose = PAGE.lastIndexOf("</" + "script>"); const PAGE_SHELL = PAGE.slice(0, _jsTagOpen) + '<script src="/app.js?v=' + BUILD + '"></' + 'script></body></html>'; const PAGE_JS = PAGE.slice(_jsTagOpen + 8, _jsTagClose); function jsResponse(request) { return maybeZip(request, PAGE_JS, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "private, max-age=31536000, immutable" }); }
+
 
