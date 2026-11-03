@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b117-ovlpad-2026-11-03";
+const BUILD = "b118-kbdfocus-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2445,7 +2445,8 @@ const PAGE = `<!DOCTYPE html>
     *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     button:focus,a:focus,[onclick]:focus,[tabindex]:focus{ outline:none; }
     button:focus-visible,a:focus-visible,[onclick]:focus-visible,[tabindex]:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
-      @supports not selector(:focus-visible){ button:focus,a:focus,[onclick]:focus,[tabindex]:focus,input:focus,select:focus,textarea:focus{ outline:2px solid var(--accent); outline-offset:2px; } }
+      /* Older engines without :focus-visible: show the ring only while the keyboard is in use (body.kbd), never after a tap. Box-shadow follows the element's rounded corners. */
+      @supports not selector(:focus-visible){ body.kbd button:focus,body.kbd a:focus,body.kbd [onclick]:focus,body.kbd [tabindex]:focus,body.kbd input:focus,body.kbd select:focus,body.kbd textarea:focus{ outline:none; box-shadow:0 0 0 2px var(--accent); } }
     html,body{ height:100%; margin:0; }
     body{
       font-family:var(--font); color:var(--text);
@@ -4440,6 +4441,8 @@ const PAGE = `<!DOCTYPE html>
       function saveY(){ if(applying||restoring||!ready) return; var s=stateNow(); if(!s) return; var y=Math.round(window.pageYOffset||0); if(s.y===y) return;
         try{ history.replaceState({i:s.i,d:s.d,y:y},"",location.href); }catch(e){} }
       window.addEventListener("scroll", function(){ if(restoring) return; clearTimeout(saveT); saveT=setTimeout(saveY,200); }, {passive:true});
+      window.addEventListener("keydown", function(e){ if(e.key==="Tab"||e.key==="ArrowUp"||e.key==="ArrowDown"||e.key==="ArrowLeft"||e.key==="ArrowRight"){ document.body.classList.add("kbd"); } }, true);
+      ["touchstart","mousedown","pointerdown"].forEach(function(ev){ window.addEventListener(ev, function(){ document.body.classList.remove("kbd"); }, {passive:true,capture:true}); });
       ["touchstart","wheel","mousedown","keydown"].forEach(function(ev){ window.addEventListener(ev, function(){ userMoved=true; }, {passive:true,capture:true}); });
       window.addEventListener("pagehide", function(){ saveY(); });
       try{ history.scrollRestoration="manual"; }catch(e){}
