@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b109-oldwv-imgproxy-appupdate-2026-11-03";
+const BUILD = "b110-imgredir-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -69,9 +69,10 @@ export default {
         let resp = await cache.match(key);
         if (!resp) {
           let up;
-          try { up = await fetch(target.toString(), { cf: { cacheTtl: 604800, cacheEverything: true } }); }
+          // redirect:"manual" - a whitelisted host must not bounce us to an arbitrary one
+          try { up = await fetch(target.toString(), { redirect: "manual", cf: { cacheTtl: 604800, cacheEverything: true } }); }
           catch (e) { return new Response("upstream error", { status: 502 }); }
-          if (!up.ok) return new Response("not found", { status: 404 });
+          if (up.status !== 200) return new Response("not found", { status: 404 });
           const ct = up.headers.get("Content-Type") || "image/jpeg";
           if (!/^image\//.test(ct)) return new Response("not an image", { status: 404 });
           resp = new Response(up.body, { status: 200, headers: {
