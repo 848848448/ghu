@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b119-shell-2026-11-03";
+const BUILD = "b120-home-search-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -2659,6 +2659,15 @@ const PAGE = `<!DOCTYPE html>
     .np-cover{ width:42px; height:42px; border-radius:8px; }
     .np-btn.main{ width:40px; height:40px; box-shadow:0 4px 12px rgba(124,92,255,.35); } .np-btn.main .ms{ font-size:24px; }
     .np-seek-wrap{ left:10px; right:10px; top:auto; bottom:0; height:2px; } .np-seek{ height:2px; } .np-seek::-webkit-slider-thumb{ width:0; height:0; }
+    .hm-head{ padding:4px 18px 0; } .hm-head h1{ margin:6px 0 2px; font-size:1.5rem; }
+    .hm-short{ display:flex; flex-wrap:wrap; padding:10px 12px 4px; }
+    .hm-chip{ width:calc(50% - 8px); margin:4px; display:flex; align-items:center; border:none; padding:0 8px 0 0; height:56px; border-radius:10px; background:var(--surface-2); color:var(--text); font-family:inherit; text-align:left; cursor:pointer; overflow:hidden; }
+    .hm-ico{ width:56px; height:56px; flex:none; display:block; position:relative; color:#fff; margin-right:10px; } .hm-ico .ms{ position:absolute; left:16px; top:16px; } .hm-ico svg{ width:24px; height:24px; fill:#fff; }
+    .hm-tx{ min-width:0; display:block; } .hm-tx b{ display:block; font-size:.84rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .hm-tx i{ display:block; font-style:normal; font-size:.7rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
+    .bs-title{ font-weight:800; font-size:1.05rem; padding:14px 18px 4px; }
+    .bs-grid{ display:flex; flex-wrap:wrap; padding:6px 12px 16px; }
+    .bs-tile{ width:calc(50% - 8px); margin:4px; height:78px; border:none; border-radius:12px; padding:12px; color:#fff; font-family:inherit; font-weight:800; font-size:.95rem; text-align:left; cursor:pointer; overflow:hidden; }
+    .bs-tile span{ display:block; word-break:break-word; }
     .xp-head{ padding:6px 18px 0; } .xp-head h1{ margin:6px 0 2px; font-size:1.6rem; }
     .xp-grid{ display:flex; flex-wrap:wrap; padding:14px 12px; }
     .xp-tile{ position:relative; width:calc(50% - 12px); margin:6px; min-height:112px; border:none; border-radius:16px; padding:14px; color:#fff; text-align:left; font-family:inherit; cursor:pointer; overflow:hidden; display:block; }
@@ -3074,6 +3083,14 @@ const PAGE = `<!DOCTYPE html>
       if((m=url.match(/artist[s]?[\\/=](\\d+)/i))){ openArtist(+m[1]); return; }
       if((m=url.match(/playlist[s]?[\\/=](\\d+)/i))){ openPlaylist(+m[1]); return; }
       if(/^https?:/i.test(url)){ window.open(url,"_blank"); } }
+
+    function homeHeadHtml(){
+      var hr=new Date().getHours(), g=hr<5?"Good night":hr<12?"Good morning":hr<18?"Good afternoon":"Good evening";
+      var nl=getLiked().length, nh=getHistory().length, np=getPlaylists().length;
+      var sc=[["openLiked()","favorite","#c04cff,#7c5cff","Liked songs",nl?nl+" songs":"Songs you like"],["openHistory()","history","#2e7dd7,#19b5a5","Recently played",nh?nh+" songs":"Nothing yet"],["openMyPlaylists()","queue_music","#ff7a59,#ff4f8b","Your playlists",np?np+" playlists":"Make your first"],["playPersonalMix('rotation')","play_arrow","#f2a93b,#e8603c","Your rotation","Mix from your music"]];
+      return '<div class="hm-head"><h1>'+g+'</h1></div><div class="hm-short">'+sc.map(function(x){ var c=x[2].split(",");
+        return '<button class="hm-chip" onclick="'+x[0]+'"><span class="hm-ico" style="background:linear-gradient(135deg,'+c[0]+','+c[1]+')">'+ic(x[1])+'</span><span class="hm-tx"><b>'+x[3]+'</b><i>'+x[4]+'</i></span></button>'; }).join("")+'</div>';
+    }
     function home(){
       setStatus(""); setView(skHome());
       var pBan=gql("query { banners(take: 15) { id enName heName enImage heImage url index platform } }").then(function(d){ var b=d.banners||[]; b.sort(function(x,y){return (x.index||0)-(y.index||0);}); return b; }).catch(function(){return [];});
@@ -3090,7 +3107,7 @@ const PAGE = `<!DOCTYPE html>
         // Keep featured in the admin-chosen order.
         if(featured.length){ var fm={}; featured.forEach(function(a){fm[a.id]=a;}); featured=CFG.featured.map(function(id){return fm[id];}).filter(Boolean); }
         window._albums=window._albums||{};
-        var html=personalMixesHtml();
+        var html=homeHeadHtml();
         if(banners.length && feat("banners")){
           var bcards=banners.map(bannerCard).filter(Boolean).join("");
           if(bcards) html+='<div class="sec" style="margin-top:12px"><div class="hrow banners">'+bcards+'</div></div>';
@@ -4584,6 +4601,17 @@ const PAGE = `<!DOCTYPE html>
         if(!st){ st={i:cur.i+1,d:0,y:0}; h.o=""; setState(st,h.b,h.o,true); }
         apply(h,st.y||0,st,false); });
     })();
+
+
+    // Search tab, empty state: Browse all tiles (genres) like Spotify.
+    var _doSearch0=doSearch, _genCache=null;
+    var GEN_COLORS=["#7c5cff,#c04cff","#ff7a59,#ff4f8b","#19b5a5,#2e7dd7","#f2a93b,#e8603c","#4f8bff,#7c5cff","#e8603c,#c04cff","#2fb36b,#19b5a5","#d6457a,#7c5cff"];
+    function genTilesHtml(list){ return '<div class="bs-title">Browse all</div><div class="bs-grid">'+list.map(function(g,i){ var c=GEN_COLORS[i%GEN_COLORS.length].split(",");
+      return '<button class="bs-tile" style="background:linear-gradient(135deg,'+c[0]+','+c[1]+')" onclick="openGenre('+g.id+')"><span>'+esc(genName(g))+'</span></button>'; }).join("")+'</div>'; }
+    doSearch=function(v){ _doSearch0(v); if((v||"").trim()) return; var box=$("sres"); if(!box) return;
+      var paint=function(list){ var b=$("sres"),q=$("q"); if(!b||(q&&q.value.trim())||!list.length) return; if(b.querySelector(".bs-grid")) return; b.insertAdjacentHTML("beforeend",genTilesHtml(list)); };
+      if(_genCache){ paint(_genCache); return; }
+      gql("query { genres(take: 30) { id enName heName } }").then(function(d){ _genCache=d.genres||[]; paint(_genCache); }).catch(function(){}); };
 
     // Load who-I-am and the shared config BEFORE rendering, so download controls
     // and features are right, then restore the page you were on (refresh stays put).
