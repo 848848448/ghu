@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b126-playnext-order-2026-11-03";
+const BUILD = "b127-repeat-one-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3427,7 +3427,7 @@ const PAGE = `<!DOCTYPE html>
     function nextInOrder(){ var pos=_order.indexOf(qi); var np=pos+1;
       if(np>=_order.length){ if(_repeat==="all"){ if(_shuffle) buildOrder(_order.length?_order[0]:0); return _order.length?_order[0]:-1; } return -1; }
       return _order[np]; }
-    function nextTrack(){ if(!queue.length) return; if(_repeat==="one"){ playIndex(qi); return; } var n=nextInOrder(); if(n>=0){ playIndex(n); return; } if(_repeat==="off" && SET.radio) extendRadio(); }
+    function nextTrack(auto){ if(!queue.length) return; if(_repeat==="one"&&auto===true){ playIndex(qi); return; } if(_repeat==="one"){ var pr=_repeat; _repeat="all"; var m=nextInOrder(); _repeat=pr; if(m>=0){ playIndex(m); } return; } var n=nextInOrder(); if(n>=0){ playIndex(n); return; } if(_repeat==="off" && SET.radio) extendRadio(); }
     // Endless radio: when the queue runs out, keep going with similar songs.
     function extendRadio(){ var t=queue[qi]; if(!t){ return; }
       gql("query { relatedTracks(trackId:"+Number(t.id)+", take: 20) { track { id enName heName file duration artists { enName heName } album { images { cdnSmall cdnMedium } } } } }").then(function(d){
@@ -3451,7 +3451,7 @@ const PAGE = `<!DOCTYPE html>
     var _lastReport=0;
     function reportPlay(t){ if(!t) return; var now=Date.now(); if(now-_lastReport<3000) return; _lastReport=now;
       post("/api/played",{track:t.id,title:t.title||"",artist:t.artist||""}).catch(function(){}); }
-    audio.addEventListener("ended", function(){ var t=queue[qi]; if(t) clearPos(t.id); if(_sleepEnd){ _sleepEnd=false; toast("Sleep timer — paused"); syncSheet(); return; } nextTrack(); }); // keep playing one after another
+    audio.addEventListener("ended", function(){ var t=queue[qi]; if(t) clearPos(t.id); if(_sleepEnd){ _sleepEnd=false; toast("Sleep timer — paused"); syncSheet(); return; } nextTrack(true); }); // keep playing one after another
     audio.addEventListener("loadedmetadata", function(){ _dur=audio.duration||0; var d=$("shDur"); if(d) d.textContent=fmt(_dur);
       // Resume long tracks (shiurim/stories) where you left off.
       if(SET.resume && !_resumed){ _resumed=true; var t=queue[qi]; if(t && _dur>600){ var p=getPos(t.id); if(p>30 && p<_dur-30){ try{ audio.currentTime=p; toast("Resumed where you left off"); }catch(e){} } } } });
