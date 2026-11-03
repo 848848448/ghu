@@ -11,7 +11,7 @@
  * token is never sent to the browser (downloads are signed here).
  */
 
-const BUILD = "b124-sheet-2026-11-03";
+const BUILD = "b125-plname-2026-11-03";
 const TOKEN_VER = 2; // bump to invalidate any stale cached token in D1
 export default {
   async fetch(request, env) {
@@ -3599,7 +3599,14 @@ const PAGE = `<!DOCTYPE html>
     function addToPlaylist(plId,t){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl||!t) return; if(pl.tracks.some(function(x){return x.id===t.id;})){ toast("Already in “"+pl.name+"”"); return; } pl.tracks.push(normTrack(t)); savePlaylists(l); toast("Added to “"+pl.name+"” ♪"); }
     function removeFromPlaylist(plId,trackId){ var l=getPlaylists(); var pl=l.filter(function(p){return p.id===plId;})[0]; if(!pl) return; pl.tracks=pl.tracks.filter(function(x){return x.id!==trackId;}); savePlaylists(l); openMyPlaylist(plId); }
     function deletePlaylist(plId){ if(!confirm("Delete this playlist?")) return; savePlaylists(getPlaylists().filter(function(p){return p.id!==plId;})); openMyPlaylists(); }
-    function newPlaylistPrompt(){ var n=prompt("Playlist name:"); if(n===null) return; var pl=createPlaylist(n); if(pl){ toast("Playlist created"); openMyPlaylist(pl.id); } }
+    function nameDialog(then){ var o=document.createElement("div"); o.className="ovl sheet"; o.id="nameDlg"; o.style.zIndex=80;
+      o.innerHTML='<div class="obar"><h2>New playlist</h2><button class="iconbtn" id="ndX">'+ic("close")+'</button></div><div id="ovlBody"><input class="field" id="ndIn" maxlength="60" placeholder="Playlist name" autocomplete="off" style="margin-bottom:12px"><button class="btn" id="ndOk" style="width:100%">Create</button></div>';
+      document.body.appendChild(o); var inp=document.getElementById("ndIn"); setTimeout(function(){ try{ inp.focus(); }catch(e){} },50);
+      var close=function(){ if(o.parentNode) o.parentNode.removeChild(o); };
+      var ok=function(){ var v=inp.value.trim(); if(!v){ toast("Type a name first"); return; } close(); then(v); };
+      document.getElementById("ndOk").onclick=ok; document.getElementById("ndX").onclick=close; o.onclick=function(e){ if(e.target===o) close(); };
+      inp.onkeydown=function(e){ if(e.key==="Enter"||e.keyCode===13) ok(); }; }
+    function newPlaylistPrompt(){ nameDialog(function(n){ var pl=createPlaylist(n); if(pl){ toast("Playlist created"); openMyPlaylist(pl.id); } }); }
     function openMyPlaylists(){ var l=getPlaylists();
       var head='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b style="font-size:1.05rem">Your playlists</b><button class="chip" onclick="newPlaylistPrompt()">'+ic("person_add")+' New</button></div>';
       if(!l.length){ overlay("Your playlists", head+'<div class="empty">No playlists yet. Make one, then add songs from the ⋮ menu or the player.</div>'); return; }
@@ -3619,7 +3626,7 @@ const PAGE = `<!DOCTYPE html>
       var rows=l.map(function(p){ return '<div class="track" onclick="addToPlaylistUI(\\''+p.id+'\\')"><div class="np-mini" style="background:'+grad(p.name)+';display:grid;place-items:center;color:#fff">'+ic("queue_music")+'</div><div class="tk">'+esc(p.name)+'<div class="sub">'+p.tracks.length+' songs</div></div></div>'; }).join("");
       overlay("Add to playlist", '<button class="btn" style="width:100%;justify-content:center;margin-bottom:12px" onclick="newPlaylistAdd()">'+ic("person_add")+' New playlist</button>'+(l.length?('<div class="tracks">'+rows+'</div>'):'<div class="empty">No playlists yet — make one above.</div>')); }
     function addToPlaylistUI(plId){ addToPlaylist(plId, window._addTrack); closeOverlay(true); }
-    function newPlaylistAdd(){ var n=prompt("Playlist name:"); if(n===null) return; var pl=createPlaylist(n); if(pl&&window._addTrack){ addToPlaylist(pl.id, window._addTrack); } closeOverlay(true); }
+    function newPlaylistAdd(){ nameDialog(function(n){ var pl=createPlaylist(n); if(pl&&window._addTrack){ addToPlaylist(pl.id, window._addTrack); } closeOverlay(true); }); }
 
     // ---------- Song menu (⋮): like, add to playlist, play next, add to queue ----------
     function songMenu(t){ if(!t) return; window._menuTrack=normTrack(t); var liked=isLiked(t.id);
